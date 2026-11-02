@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#10080f" />
+  <meta name="description" content="Crushify — tạo một món quà kỹ thuật số thật riêng cho người thương. Chọn template, thêm kỷ niệm và gửi đi bằng một chiếc link." />
+  <title>Crushify — Make your love unforgettable</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <header class="site-header" id="top">
+    <a class="brand" href="#top" aria-label="Crushify trang chủ">
+      <span class="brand-mark"><span></span><span></span></span>
+      <span>crushify<span class="brand-period">.</span></span>
+    </a>
+    <button class="menu-toggle" id="menuToggle" aria-label="Mở menu" aria-expanded="false"><span></span><span></span></button>
+    <nav class="main-nav" id="mainNav">
+      <a href="#templates">Khám phá</a>
+      <a href="#how-it-works">Cách hoạt động</a>
+      <a href="#pricing">Bảng giá</a>
+      <a class="nav-cta" href="#templates">Tạo món quà <span>↗</span></a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero section-shell">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-dot"></span> A LITTLE THING, MADE WITH LOVE</div>
+        <h1>Một chiếc link.<br /><em>Cả một câu chuyện yêu.</em></h1>
+        <p class="hero-description">Biến những điều muốn nói thành một món quà kỹ thuật số thật riêng. Chọn mẫu, thêm hình ảnh, viết câu chuyện của hai người — Crushify lo phần còn lại.</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="#templates">Khám phá template <span>↗</span></a>
+          <a class="text-link" href="#how-it-works"><span class="play-icon">▷</span> Xem cách hoạt động</a>
+        </div>
+        <div class="hero-proof">
+          <div class="proof-avatars"><span>♡</span><span>✦</span><span>∞</span></div>
+          <div><strong>Mỗi câu chuyện đều khác nhau.</strong><small>Và món quà của bạn cũng vậy.</small></div>
+        </div>
+      </div>
+
+      <div class="hero-art" aria-label="Trái tim 3D tạo từ những hạt sáng đang xoay">
+        <div class="art-orbit orbit-a"></div>
+        <div class="art-orbit orbit-b"></div>
+        <div class="art-halo"></div>
+        <canvas id="heartCanvas" aria-hidden="true"></canvas>
+        <div class="floating-note note-top"><span class="note-icon">✦</span><span><b>Made for your person</b><small>One of a kind</small></span></div>
+        <div class="floating-note note-bottom"><span class="note-heart">♥</span><span><b>100% your story</b><small>Photos · words · memories</small></span></div>
+        <div class="art-caption">A universe made of little moments <span>✧</span></div>
+      </div>
+      <a href="#templates" class="scroll-cue"><span></span> SCROLL TO FEEL THE LOVE</a>
+    </section>
+
+    <section class="ticker" aria-label="Crushify features">
+      <div class="ticker-track"><span>YOUR STORY</span><i>✳</i><span>YOUR MEMORIES</span><i>✳</i><span>YOUR LITTLE UNIVERSE</span><i>✳</i><span>MADE WITH LOVE</span><i>✳</i><span>YOUR STORY</span><i>✳</i><span>YOUR MEMORIES</span><i>✳</i><span>YOUR LITTLE UNIVERSE</span><i>✳</i></div>
+    </section>
+
+    <section class="templates section-shell" id="templates">
+      <div class="section-heading">
+        <div><div class="eyebrow">THE GIFT COLLECTION · 01</div><h2>Chọn một cách để<br /><em>nói lời thương.</em></h2></div>
+        <p>Không cần biết thiết kế. Chỉ cần chọn đúng cảm xúc, rồi biến nó thành câu chuyện của riêng hai người.</p>
+      </div>
+      <div class="filter-row" role="group" aria-label="Lọc mẫu">
+        <button class="filter-chip active" data-filter="all">Tất cả <span>05</span></button>
+        <button class="filter-chip" data-filter="romantic">Lãng mạn</button>
+        <button class="filter-chip" data-filter="cute">Dễ thương</button>
+        <button class="filter-chip" data-filter="minimal">Tối giản</button>
+      </div>
+      <div class="template-grid" id="templateGrid">
+        <article class="template-card" data-category="romantic">
+          <div class="template-art universe-art"><div class="universe-glow"></div><div class="mini-orbit"></div><div class="mini-planet">♥</div><span class="art-star star-one">✦</span><span class="art-star star-two">✧</span><span class="art-star star-three">·</span><div class="art-label">YOU + ME<br /><b>IN EVERY UNIVERSE</b></div><span class="template-number">01 / 05</span></div>
+          <div class="template-info"><div><div class="template-kicker">ROMANTIC · 3D FEEL</div><h3>Our Universe</h3><p>Một vũ trụ nhỏ chỉ có hai người.</p></div><a class="round-arrow" href="templates/our-universe/index.html" aria-label="Mở Our Universe">↗</a></div>
+        </article>
+        <article class="template-card" data-category="romantic">
+          <div class="template-art letter-art"><div class="letter-glow"></div><div class="envelope"><div class="envelope-flap"></div><div class="letter-paper"><span>to my favorite person</span><b>you make<br />life softer.</b><i>with love, always ♡</i></div><div class="envelope-seal">♥</div></div><span class="template-number">02 / 05</span><span class="letter-side-note">A LETTER<br />FOR YOU</span></div>
+          <div class="template-info"><div><div class="template-kicker">ROMANTIC · LOVE NOTE</div><h3>Love Letter</h3><p>Mở phong thư, mở cả lòng mình.</p></div><button class="round-arrow preview-btn" data-template="letter" aria-label="Xem Love Letter">↗</button></div>
+        </article>
+        <article class="template-card" data-category="cute">
+          <div class="template-art memories-art"><div class="memory-heading">little moments<br /><em>big feelings.</em></div><div class="polaroid polaroid-one"><div class="photo-placeholder photo-sun">☼</div><span>the first day</span></div><div class="polaroid polaroid-two"><div class="photo-placeholder photo-heart">♡</div><span>and every day</span></div><span class="memory-spark">✳</span><span class="template-number">03 / 05</span></div>
+          <div class="template-info"><div><div class="template-kicker">CUTE · PHOTO STORY</div><h3>Our Memories</h3><p>Gom những khoảnh khắc thành một nơi.</p></div><button class="round-arrow preview-btn" data-template="memories" aria-label="Xem Our Memories">↗</button></div>
+        </article>
+        <article class="template-card" data-category="cute">
+          <div class="template-art sayyes-art"><div class="sayyes-spark">✦</div><div class="sayyes-small">I HAVE A QUESTION...</div><div class="sayyes-title">Will you<br /><em>be mine?</em></div><div class="sayyes-buttons"><span>YES, ALWAYS</span><span>♡</span></div><span class="template-number">04 / 05</span><div class="sayyes-heart">♥</div></div>
+          <div class="template-info"><div><div class="template-kicker">PLAYFUL · INTERACTIVE</div><h3>Say Yes!</h3><p>Một câu hỏi nhỏ, một khoảnh khắc nhớ lâu.</p></div><button class="round-arrow preview-btn" data-template="sayyes" aria-label="Xem Say Yes">↗</button></div>
+        </article>
+        <article class="template-card" data-category="minimal">
+          <div class="template-art distance-art"><div class="moon"></div><div class="distance-stars">·　✦　　·</div><div class="distance-copy">no matter<br /><em>the distance.</em></div><div class="distance-line"><span></span><span></span></div><div class="distance-bottom">SAME SKY. SAME HEART.</div><span class="template-number">05 / 05</span></div>
+          <div class="template-info"><div><div class="template-kicker">MINIMAL · LONG DISTANCE</div><h3>Distance Means Nothing</h3><p>Dành cho hai người dưới cùng một bầu trời.</p></div><button class="round-arrow preview-btn" data-template="distance" aria-label="Xem Distance Means Nothing">↗</button></div>
+        </article>
+        <div class="coming-card"><div class="coming-plus">+</div><span>YOUR IDEA, NEXT</span><p>Một template mới<br />có thể bắt đầu từ bạn.</p><a href="mailto:hello@crushify.love">Gợi ý ý tưởng <span>↗</span></a></div>
+      </div>
+      <div class="template-bottom"><span>MORE THAN A TEMPLATE. A LITTLE PIECE OF YOU.</span><a href="#how-it-works">Tìm hiểu cách tạo quà <span>↗</span></a></div>
+    </section>
+
+    <section class="manifesto section-shell" id="how-it-works">
+      <div class="manifesto-visual"><div class="manifesto-ring ring-one"></div><div class="manifesto-ring ring-two"></div><div class="manifesto-heart">♥</div><span class="manifesto-star ms-one">✦</span><span class="manifesto-star ms-two">✧</span><div class="manifesto-stamp">MADE<br />WITH<br /><b>LOVE</b></div></div>
+      <div class="manifesto-copy"><div class="eyebrow">IT'S YOUR STORY · 02</div><h2>Những điều nhỏ bé<br />xứng đáng được <em>lưu giữ.</em></h2><p>Một tấm ảnh chụp vội. Một câu nói ngốc nghếch. Ngày đầu tiên hai người gặp nhau. Crushify giúp gom những điều ấy vào một món quà có thể mở lại bất cứ lúc nào.</p>
+        <div class="steps-list">
+          <div class="step"><span>01</span><div><b>Chọn câu chuyện</b><small>Chọn template hợp với điều bạn muốn nói.</small></div><i>↗</i></div>
+          <div class="step"><span>02</span><div><b>Thêm điều của riêng bạn</b><small>Điền tên, lời nhắn, ngày đặc biệt và hình ảnh.</small></div><i>↗</i></div>
+          <div class="step"><span>03</span><div><b>Gửi đi bằng một chiếc link</b><small>Món quà riêng tư, sẵn sàng để chia sẻ.</small></div><i>↗</i></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="pricing section-shell" id="pricing">
+      <div class="section-heading pricing-heading"><div><div class="eyebrow">SIMPLE, LIKE LOVE · 03</div><h2>Một món quà nhỏ.<br /><em>Một cảm xúc thật lớn.</em></h2></div><p>Bắt đầu bằng bản xem thử miễn phí. Chỉ trả tiền khi bạn sẵn sàng biến câu chuyện thành món quà thật.</p></div>
+      <div class="pricing-grid">
+        <article class="price-card"><div class="price-top"><span>01 / A LITTLE START</span><span class="price-icon">♡</span></div><h3>Mini</h3><p>Dành cho một lời nhắn dễ thương.</p><div class="price">39.000<small>đ / một lần</small></div><ul><li>01 template tiêu chuẩn</li><li>Nội dung và lời nhắn cá nhân</li><li>Link chia sẻ riêng</li></ul><a href="#templates" class="price-link">Chọn Mini <span>↗</span></a></article>
+        <article class="price-card featured"><div class="popular-tag">MOST LOVED ✦</div><div class="price-top"><span>02 / THE FULL STORY</span><span class="price-icon">✧</span></div><h3>Standard</h3><p>Dành cho câu chuyện có nhiều kỷ niệm.</p><div class="price">79.000<small>đ / một lần</small></div><ul><li>Mọi tính năng của Mini</li><li>Album ảnh và timeline</li><li>Hiệu ứng và nhạc nền</li><li>Tùy chỉnh màu sắc</li></ul><a href="#templates" class="price-link">Chọn Standard <span>↗</span></a></article>
+        <article class="price-card"><div class="price-top"><span>03 / EXTRA SPECIAL</span><span class="price-icon">✦</span></div><h3>Premium</h3><p>Dành cho món quà thật khó quên.</p><div class="price">129.000<small>đ / một lần</small></div><ul><li>Mọi tính năng của Standard</li><li>Hiệu ứng cao cấp</li><li>Nhiều khu vực nội dung hơn</li><li>Ưu tiên hỗ trợ</li></ul><a href="#templates" class="price-link">Chọn Premium <span>↗</span></a></article>
+      </div>
+      <p class="pricing-note">* Giá hiển thị là mức giá dự kiến cho bản thử nghiệm, có thể điều chỉnh trước khi mở bán.</p>
+    </section>
+
+    <section class="final-cta section-shell">
+      <div class="cta-glow"></div><div class="cta-content"><div class="eyebrow">SOMEONE IS WAITING FOR YOUR LITTLE SURPRISE</div><h2>Để tình yêu có<br /><em>một nơi để ở lại.</em></h2><a class="button button-light" href="#templates">Bắt đầu tạo món quà <span>↗</span></a></div><div class="cta-orbit"><span>♡</span><span>✦</span><span>∞</span></div>
+    </section>
+  </main>
+
+  <footer class="site-footer"><a class="brand" href="#top"><span class="brand-mark"><span></span><span></span></span><span>crushify<span class="brand-period">.</span></span></a><span class="footer-center">MADE FOR THE FEELINGS THAT MATTER.</span><div class="footer-links"><a href="#templates">Templates</a><a href="mailto:hello@crushify.love">Contact</a><a href="#top">Back to top ↑</a></div><small>© 2026 CRUSHIFY. MADE WITH ♡</small></footer>
+
+  <div class="preview-modal" id="previewModal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel"><button class="modal-close" data-close-modal aria-label="Đóng">×</button><div class="modal-visual" id="modalVisual"></div><div class="modal-copy"><div class="eyebrow">TEMPLATE PREVIEW</div><h2 id="modalTitle">Our Universe</h2><p id="modalDescription">Một vũ trụ nhỏ chỉ có hai người.</p><div class="modal-actions"><a class="button button-primary" href="#pricing" id="modalChoose">Chọn mẫu này <span>↗</span></a><button class="text-link" data-close-modal>Đóng xem thử</button></div></div></div>
+  </div>
+  <script src="js/particle-heart.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

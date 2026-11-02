@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#05050b">
+  <title>Our Universe — Crushify</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500;1,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./css/our-universe.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="../../index.html">CRUSH<span>IFY</span><i>/</i> OUR UNIVERSE</a>
+    <div class="top-actions">
+      <button class="top-button" id="jumpEditor">✦ Cá nhân hóa</button>
+      <span class="live-indicator"><i></i> LIVE UNIVERSE</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="universe-stage" id="universeStage" aria-label="Vũ trụ tình yêu tương tác">
+      <canvas id="universeCanvas" aria-label="Trái tim tạo từ các hạt sáng nổi trên thiên hà xoắn ốc. Kéo để xoay, chạm các điểm ký ức để mở câu chuyện."></canvas>
+      <div class="stage-vignette"></div>
+      <div class="hero-copy">
+        <div class="eyebrow">A UNIVERSE MADE FOR TWO</div>
+        <div class="couple-names"><span id="heroNameA">Minh</span><b>✦</b><span id="heroNameB">Linh</span></div>
+        <h1 id="heroHeadline">You are my <em>favorite</em> universe.</h1>
+        <p id="heroMessage">Giữa hàng tỷ vì sao ngoài kia, điều may mắn nhất của mình là tìm thấy cậu.</p>
+        <div class="hero-meta"><strong id="dayCount">992</strong><span>DAYS IN ORBIT</span><i>·</i><strong>∞</strong><span>YEARS OF US</span></div>
+        <button class="letter-button" id="openLetter">Mở thông điệp của chúng mình <span>↗</span></button>
+      </div>
+
+      <div class="scene-caption caption-left">✦ 01 / FIRST ORBIT</div>
+      <div class="scene-caption caption-right">DRAG TO EXPLORE THE GALAXY</div>
+      <div class="canvas-hint"><span class="mouse-icon"></span>KÉO ĐỂ XOAY · CUỘN ĐỂ PHÓNG TO · CHẠM VÀO KÝ ỨC</div>
+      <div class="scene-controls">
+        <button id="autoRotate" class="round-control active" title="Bật/tắt tự xoay" aria-label="Bật tắt tự xoay">⟳</button>
+        <button id="zoomOut" class="round-control" title="Thu nhỏ" aria-label="Thu nhỏ">−</button>
+        <button id="zoomIn" class="round-control" title="Phóng to" aria-label="Phóng to">+</button>
+        <button id="resetScene" class="round-control" title="Đặt lại góc nhìn" aria-label="Đặt lại góc nhìn">⌂</button>
+      </div>
+    </section>
+
+    <section class="memory-section" id="memories">
+      <div class="section-heading">
+        <span>CONSTELLATION OF MOMENTS</span>
+        <h2>Những điểm sáng <em>của chúng mình.</em></h2>
+        <p>Chạm vào một hành tinh trong vũ trụ hoặc chọn một kỷ niệm bên dưới để khám phá câu chuyện.</p>
+      </div>
+      <div class="memory-grid">
+        <button class="memory-card" data-memory="0"><i class="planet planet-pink">✦</i><span class="card-index">ORBIT 01</span><h3 id="memoryCardTitle0">First Orbit</h3><p id="memoryCardDesc0">Ngày hai thế giới bắt đầu tiến lại gần nhau.</p><b>Khám phá ↗</b></button>
+        <button class="memory-card" data-memory="1"><i class="planet planet-blue">✧</i><span class="card-index">ORBIT 02</span><h3 id="memoryCardTitle1">Our Journey</h3><p id="memoryCardDesc1">Những điều bình thường trở thành kỷ niệm.</p><b>Khám phá ↗</b></button>
+        <button class="memory-card" data-memory="2"><i class="planet planet-gold">♡</i><span class="card-index">ORBIT 03</span><h3 id="memoryCardTitle2">To Infinity</h3><p id="memoryCardDesc2">Điều mình mong chờ ở những ngày phía trước.</p><b>Khám phá ↗</b></button>
+      </div>
+    </section>
+
+    <section class="editor-section" id="editor">
+      <div class="editor-intro">
+        <span>MAKE IT YOURS</span>
+        <h2>Tạo một vũ trụ <em>chỉ của hai người.</em></h2>
+        <p>Nhập câu chuyện của hai bạn. Vũ trụ và phần xem trước sẽ thay đổi ngay khi bạn chỉnh sửa.</p>
+      </div>
+      <div class="editor-layout">
+        <form class="editor-form" id="universeForm">
+          <div class="form-heading"><span>01 / THE TWO OF YOU</span><h3>Hai nhân vật chính</h3></div>
+          <div class="field-row">
+            <label class="field"><span>Tên của bạn</span><input id="nameA" value="Minh" maxlength="32" autocomplete="off"></label>
+            <label class="field"><span>Tên người ấy</span><input id="nameB" value="Linh" maxlength="32" autocomplete="off"></label>
+          </div>
+          <label class="field"><span>Tiêu đề vũ trụ</span><input id="headlineInput" value="You are my favorite universe." maxlength="90"></label>
+          <label class="field"><span>Ngày bắt đầu yêu</span><input id="startDate" type="date" value="2024-02-14"></label>
+          <label class="field"><span>Lời nhắn ở trang chính</span><textarea id="mainMessage" maxlength="400">Giữa hàng tỷ vì sao ngoài kia, điều may mắn nhất của mình là tìm thấy cậu. Cảm ơn vì đã cùng mình viết nên những ngày thật đẹp.</textarea></label>
+
+          <div class="form-heading form-heading-spaced"><span>02 / MEMORY ORBITS</span><h3>Ba hành tinh ký ức</h3></div>
+          <div class="memory-fields">
+            <div class="memory-field">
+              <label class="field"><span>Hành tinh 01 — tên kỷ niệm</span><input id="memoryTitle0" value="First Orbit" maxlength="36"></label>
+              <label class="field"><span>Câu chuyện</span><textarea id="memoryText0" maxlength="400">Ngày hai thế giới bắt đầu tiến lại gần nhau. Từ một cuộc gặp tưởng bình thường, mọi thứ dần trở nên đặc biệt.</textarea></label>
+            </div>
+            <div class="memory-field">
+              <label class="field"><span>Hành tinh 02 — tên kỷ niệm</span><input id="memoryTitle1" value="Our Journey" maxlength="36"></label>
+              <label class="field"><span>Câu chuyện</span><textarea id="memoryText1" maxlength="400">Những điều nhỏ bé nhất lại là thứ mình nhớ lâu nhất: những lần đi dạo, những câu chuyện chẳng có hồi kết.</textarea></label>
+            </div>
+            <div class="memory-field">
+              <label class="field"><span>Hành tinh 03 — tên kỷ niệm</span><input id="memoryTitle2" value="To Infinity" maxlength="36"></label>
+              <label class="field"><span>Câu chuyện</span><textarea id="memoryText2" maxlength="400">Mình không biết tương lai sẽ đưa chúng ta đến đâu, chỉ mong những vì sao sau này vẫn có hai đứa cạnh nhau.</textarea></label>
+            </div>
+          </div>
+
+          <div class="form-heading form-heading-spaced"><span>03 / PHOTOS</span><h3>Những khoảnh khắc</h3></div>
+          <label class="upload-box"><input id="photoUpload" type="file" accept="image/*" multiple><span class="upload-icon">＋</span><span><b>Thêm ảnh kỷ niệm</b><small>Tối đa 4 ảnh · chỉ xem trước trên thiết bị này</small></span></label>
+          <div id="photoPreview" class="photo-preview"></div>
+          <div class="form-actions"><button type="button" class="save-button" id="saveDraft">Lưu bản nháp</button><button type="button" class="reset-button" id="restoreDefaults">Khôi phục mẫu</button></div>
+          <p class="save-status" id="saveStatus" aria-live="polite"></p>
+        </form>
+
+        <aside class="preview-column">
+          <div class="preview-sticky">
+            <span class="preview-label">LIVE PREVIEW</span>
+            <div class="preview-universe">
+              <div class="preview-stars">✦　·　˚　✧　·　✦</div>
+              <span class="preview-names"><b id="previewNameA">Minh</b> ✦ <b id="previewNameB">Linh</b></span>
+              <h3 id="previewHeadline">You are my favorite universe.</h3>
+              <p id="previewMessage">Giữa hàng tỷ vì sao ngoài kia, điều may mắn nhất của mình là tìm thấy cậu.</p>
+              <div class="preview-days"><strong id="previewDays">992</strong><small>DAYS TOGETHER</small></div>
+            </div>
+            <p class="preview-note">Bản demo lưu trên trình duyệt. Khi tích hợp backend, dữ liệu sẽ được lưu vào database và xuất bản thành link riêng sau thanh toán.</p>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <footer>CRUSHIFY · TWO SOULS, ONE INFINITE UNIVERSE</footer>
+
+  <div class="modal-backdrop" id="storyModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <article class="story-modal">
+      <button class="modal-close" id="closeModal" aria-label="Đóng">×</button>
+      <span id="modalEyebrow">A MESSAGE FROM THE STARS</span>
+      <h2 id="modalTitle">For you, always.</h2>
+      <p id="modalText"></p>
+      <button class="letter-button" id="modalDone">Giữ khoảnh khắc này ♡</button>
+    </article>
+  </div>
+  <script src="./js/our-universe.js"></script>
+</body>
+</html>
