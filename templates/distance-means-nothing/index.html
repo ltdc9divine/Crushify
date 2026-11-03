@@ -1,0 +1,46 @@
+<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Xa mặt không cách lòng — Crushify</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Playfair+Display:ital,wght@0,500;1,500&family=Caveat:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="distance.css">
+<!-- To avoid CDN dependence, copy three@0.160.0 (build/three.module.js + examples/jsm) to assets/vendor/ and point these URLs there. -->
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head><body>
+<div id="app">
+<aside id="editor">
+ <h2>Xa mặt không cách lòng</h2>
+ <details open><summary>Hai người</summary>
+  <label>Tên của bạn<input data-k="sender.name"></label><label>Tên người ấy<input data-k="receiver.name"></label></details>
+ <details open><summary>Hai thành phố</summary>
+  <label>Thành phố của bạn<input list="cities" data-city="sender"></label><label>Múi giờ của bạn<select data-k="sender.timezone" class="tz"></select></label>
+  <label>Thành phố người ấy<input list="cities" data-city="receiver"></label><label>Múi giờ người ấy<select data-k="receiver.timezone" class="tz"></select></label>
+  <label>Khoảng cách<select data-k="distance.mode"><option value="coordinates">Tính theo tọa độ thành phố</option><option value="manual">Tự nhập số ki-lô-mét</option></select></label>
+  <label id="kmRow">Khoảng cách (km)<input type="number" min="1" data-k="distance.distanceKm"></label>
+  <p class="hint" id="distHint"></p><datalist id="cities"></datalist></details>
+ <details><summary>Thời gian bên nhau</summary>
+  <label>Ngày kỷ niệm<input type="date" data-k="anniversary"></label><label>Ngày gặp lại<input type="date" data-k="nextMeeting.date"></label>
+  <label>Giờ gặp lại<input type="time" data-k="nextMeeting.time"></label><label>Múi giờ nơi gặp<select data-k="nextMeeting.timezone" class="tz"></select></label></details>
+ <details><summary>Câu chuyện của hai người</summary>
+  <label>Tiêu đề<input data-k="headline"></label><label>Lời nhắn riêng<textarea rows="4" data-k="message"></textarea></label></details>
+ <details><summary>Lời nhắn</summary><div id="msgList"></div><button id="addMsg" type="button">Thêm lời nhắn</button></details>
+ <details open><summary>Giao diện</summary>
+  <label>Chủ đề<select data-k="theme"><option value="midnight-distance">Khoảng cách giữa đêm</option><option value="blue-aurora">Cực quang xanh</option><option value="rose-galaxy">Thiên hà hồng</option><option value="golden-horizon">Chân trời vàng</option></select></label>
+  <label>Hiệu ứng<select data-k="animation"><option value="cinematic">Điện ảnh</option><option value="dreamy">Mộng mơ</option><option value="cosmic">Vũ trụ</option><option value="minimal">Tối giản</option></select></label></details>
+ <div class="row"><button id="copyLink" type="button">Sao chép liên kết người nhận</button><button id="viewAs" type="button">Xem trước như người nhận</button></div>
+</aside>
+<main id="stage">
+ <div id="gl"></div><div id="fallback" hidden><i class="p a"></i><i class="p b"></i></div>
+ <header id="title"><h1></h1><p id="sub"></p></header>
+ <div id="phase" aria-live="polite"></div>
+ <section id="clocks"></section><section id="count"></section>
+ <nav id="tools" aria-label="Điều khiển khung cảnh">
+  <button data-a="rotate" aria-pressed="false">Tự xoay</button><button data-a="zin">Phóng to</button><button data-a="zout">Thu nhỏ</button>
+  <button data-a="pa">Hành tinh A</button><button data-a="pb">Hành tinh B</button><button data-a="link">Trái tim</button><button data-a="reset">Đặt lại</button>
+  <button data-a="parts" aria-pressed="true">Hạt sáng</button><button data-a="replay">Phát lại</button><button data-a="skip">Bỏ qua mở đầu</button>
+  <button data-a="full">Toàn màn hình</button><button data-a="end">Kết thúc</button></nav>
+ <aside id="panel" hidden><button id="close" aria-label="Đóng">×</button><div id="pe"></div><h3 id="pt"></h3><p id="pb"></p></aside>
+ <div id="final" hidden><p>Dù mình ở nơi đâu,<br>hai đứa vẫn chung một bầu trời.</p><small id="sig"></small><button id="back">Trở lại bầu trời</button></div>
+</main></div>
+<nav id="tabs"><button data-t="editor" class="on">Chỉnh sửa</button><button data-t="stage">Xem trước</button></nav>
+<script type="module" src="app.js"></script></body></html>

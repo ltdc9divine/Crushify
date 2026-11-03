@@ -23,11 +23,11 @@
   }));
 
   const templates = {
-    universe: { title: 'Our Universe', description: 'Một vũ trụ nhỏ chỉ có hai người. Gửi lời thương qua những vì sao và một trái tim đang phát sáng.', symbol: '♥', theme: 'universe', href: 'templates/our-universe/index.html' },
-    letter: { title: 'Love Letter', description: 'Một chiếc phong thư mở ra những lời bạn vẫn muốn nói. Nhẹ nhàng, riêng tư và thật nhiều cảm xúc.', symbol: '✉', theme: 'letter', href: 'templates/love-letter/index.html' },
-    memories: { title: 'Our Memories', description: 'Lưu những bức ảnh, ngày đặc biệt và khoảnh khắc nhỏ thành một cuốn album của hai người.', symbol: '♡', theme: 'memories', href: 'templates/our-memories/index.html' },
-    sayyes: { title: 'Say Yes!', description: 'Một lời hỏi dễ thương với những lựa chọn tương tác, dành cho một bất ngờ không thể đoán trước.', symbol: '♥', theme: 'sayyes', href: 'templates/say-yes/index.html' },
-    distance: { title: 'Distance Means Nothing', description: 'Một món quà dành cho những trái tim ở xa nhưng vẫn hướng về cùng một nơi.', symbol: '☾', theme: 'distance' }
+    universe: { title: 'Vũ trụ của chúng mình', description: 'Một vũ trụ nhỏ chỉ có hai người. Gửi lời thương qua những vì sao và một trái tim đang phát sáng.', symbol: '♥', theme: 'universe', href: 'templates/our-universe/index.html' },
+    letter: { title: 'Lá thư tình', description: 'Một chiếc phong thư mở ra những lời bạn vẫn muốn nói. Nhẹ nhàng, riêng tư và thật nhiều cảm xúc.', symbol: '✉', theme: 'letter', href: 'templates/love-letter/index.html' },
+    memories: { title: 'Kỷ niệm đôi mình', description: 'Lưu những bức ảnh, ngày đặc biệt và khoảnh khắc nhỏ thành một cuốn album của hai người.', symbol: '♡', theme: 'memories', href: 'templates/our-memories/index.html' },
+    sayyes: { title: 'Hãy nói đồng ý!', description: 'Một lời hỏi dễ thương với những lựa chọn tương tác, dành cho một bất ngờ không thể đoán trước.', symbol: '♥', theme: 'sayyes', href: 'templates/say-yes/index.html' },
+    distance: { title: 'Xa mặt không cách lòng', description: 'Một món quà dành cho những trái tim ở xa nhưng vẫn hướng về cùng một nơi.', symbol: '☾', theme: 'distance', href: 'templates/distance-means-nothing/index.html' }
   };
   const modal = document.getElementById('previewModal');
   const modalTitle = document.getElementById('modalTitle');
@@ -49,7 +49,7 @@
     modalVisual.dataset.theme = item.theme;
     modalVisual.innerHTML = `<span class="modal-symbol" aria-hidden="true">${item.symbol}</span>`;
     modalChoose.href = item.href || '#pricing';
-    modalChoose.firstChild.textContent = item.href ? 'Mở template ' : 'Chọn mẫu này ';
+    modalChoose.firstChild.textContent = item.href ? 'Mở mẫu quà ' : 'Chọn mẫu này ';
     modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false');
     document.body.style.overflow = 'hidden';
     modal.querySelector('.modal-close')?.focus();

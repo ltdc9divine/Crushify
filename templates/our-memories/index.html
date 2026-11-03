@@ -1,17 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="vi">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Our Memories — Crushify</title>
+<title>Kỷ niệm đôi mình — Crushify</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;1,500&family=Dancing+Script:wght@500&display=swap">
 <link rel="stylesheet" href="our-memories.css">
 </head>
 <body>
-<div id="tabs"><button data-v="ed">Editor</button><button data-v="pv">Preview</button></div>
+<div id="tabs"><button data-v="ed">Chỉnh sửa</button><button data-v="pv">Xem trước</button></div>
 <aside id="editor">
-  <h2>Our Memories <small>Creator</small></h2>
+  <h2>Kỷ niệm đôi mình <small>Tạo album</small></h2>
   <details open><summary>Thông tin cặp đôi</summary>
     <label>Tên bạn<input data-k="sender"></label>
     <label>Tên người ấy<input data-k="receiver"></label>
@@ -34,31 +34,31 @@
   </details>
   <details><summary>Giao diện</summary>
     <div id="themes"></div>
-    <label>Hiệu ứng<select id="anim"><option value="cinematic">Cinematic</option><option value="dreamy">Dreamy</option><option value="nostalgic">Nostalgic</option><option value="minimal">Minimal</option></select></label>
+    <label>Hiệu ứng<select id="anim"><option value="cinematic">Điện ảnh</option><option value="dreamy">Mộng mơ</option><option value="nostalgic">Hoài niệm</option><option value="minimal">Tối giản</option></select></label>
     <label class="row"><input id="motion" type="checkbox" checked> Bật chuyển động</label>
   </details>
-  <div class="actions"><button id="asRecipient">Xem như người nhận</button><button id="exp">Xuất JSON</button></div>
+  <div class="actions"><button id="asRecipient">Xem như người nhận</button><button id="exp">Tải dữ liệu JSON</button></div>
 </aside>
 <main id="stage">
   <canvas id="c"></canvas>
   <div id="fb" hidden></div>
   <header class="hud">
-    <button id="snd">Sound off</button><button id="reset">Reset view</button><button id="rot">Auto-rotate</button><button id="prt">Particles</button>
-    <button id="backEdit" class="only-edit">Back to editor</button>
+    <button id="snd">Bật âm thanh</button><button id="reset">Đặt lại góc nhìn</button><button id="rot">Tự xoay</button><button id="prt">Hạt sáng</button>
+    <button id="backEdit" class="only-edit">Quay lại chỉnh sửa</button>
   </header>
   <section id="hero">
     <p id="hNames"></p>
     <h1 id="hTitle"></h1>
     <p id="hSub" class="sub"></p>
-    <p class="days">Together for <b id="hDays"></b></p>
-    <button id="openBtn" class="cta">Open Our Memories</button>
+    <p class="days">Bên nhau được <b id="hDays"></b></p>
+    <button id="openBtn" class="cta">Mở album kỷ niệm</button>
   </section>
   <nav id="tl"></nav>
-  <div id="nav"><button id="prev" aria-label="Previous page">‹</button><button id="next" aria-label="Next page">›</button></div>
-  <button id="replay" hidden>Watch the album again</button>
+  <div id="nav"><button id="prev" aria-label="Trang trước">‹</button><button id="next" aria-label="Trang tiếp theo">›</button></div>
+  <button id="replay" hidden>Xem lại album</button>
   <div id="lb" hidden>
     <figure><img id="lbImg" alt=""><figcaption><b id="lbCap"></b><span id="lbDate"></span></figcaption></figure>
-    <button id="lbP" aria-label="Previous photo">‹</button><button id="lbN" aria-label="Next photo">›</button><button id="lbX" aria-label="Close">×</button>
+    <button id="lbP" aria-label="Ảnh trước">‹</button><button id="lbN" aria-label="Ảnh tiếp theo">›</button><button id="lbX" aria-label="Đóng">×</button>
   </div>
 </main>
 <script src="our-memories.js"></script>

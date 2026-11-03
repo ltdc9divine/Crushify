@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Crushify · Love Letter 3D</title>
+<title>Crushify · Lá thư tình 3D</title>
 <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Playfair+Display:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box}
@@ -40,7 +40,7 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 </style></head><body>
 <div id="app">
 <aside id="panel">
-<h1>Love Letter</h1><p class="sub">Một lá thư từ trái tim, chỉ dành cho người ấy ♥</p>
+<h1>Lá thư tình</h1><p class="sub">Một lá thư từ trái tim, chỉ dành cho người ấy ♥</p>
 <h3>1 · Câu chuyện</h3>
 <div class="row"><input id="f-from" placeholder="Tên của bạn" maxlength="30" aria-label="Tên của bạn"><input id="f-to" placeholder="Tên người nhận" maxlength="30" aria-label="Tên người nhận"></div>
 <input id="f-title" placeholder="Tiêu đề (tuỳ chọn)" maxlength="60" aria-label="Tiêu đề">
@@ -49,17 +49,17 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 <h3>2 · Kỷ niệm</h3><div id="thumbs"></div>
 <label class="btn">＋ Thêm ảnh (tối đa 4)<input id="up" type="file" accept="image/*" multiple hidden></label>
 <h3>3 · Chủ đề</h3><div id="themes"></div>
-<h3>4 · Nhịp animation</h3>
-<select id="f-spd" aria-label="Nhịp animation"><option value="1">Điện ảnh (chậm, đầy đủ)</option><option value="2">Nhanh</option></select>
-<div class="row" style="margin-top:14px"><button id="b-pv" class="pri">Xem như người nhận</button><button id="b-copy">Sao chép link</button></div>
+<h3>4 · Nhịp chuyển động</h3>
+<select id="f-spd" aria-label="Nhịp chuyển động"><option value="1">Điện ảnh (chậm, đầy đủ)</option><option value="2">Nhanh</option></select>
+<div class="row" style="margin-top:14px"><button id="b-pv" class="pri">Xem như người nhận</button><button id="b-copy">Sao chép liên kết</button></div>
 </aside>
 <main id="stage">
 <canvas id="cv" aria-label="Cảnh 3D lá thư tình"></canvas><div id="fb" hidden></div>
 <button id="exit" hidden>← Thoát xem trước</button>
 <a id="home" class="btn" href="../../index.html" aria-label="Quay lại trang chủ Crushify">← Crushify</a>
-<div id="hint">Kéo để xoay · cuộn để zoom · chạm vào con dấu để mở thư</div>
+<div id="hint">Kéo để xoay · cuộn để thu phóng · chạm vào con dấu để mở thư</div>
 <div id="hud">
-<button id="b-reset" title="Đặt lại camera" aria-label="Đặt lại camera">◎</button>
+<button id="b-reset" title="Đặt lại góc nhìn" aria-label="Đặt lại góc nhìn">◎</button>
 <button id="b-zin" title="Phóng to" aria-label="Phóng to">＋</button>
 <button id="b-zout" title="Thu nhỏ" aria-label="Thu nhỏ">－</button>
 <button id="b-fx" title="Bật/tắt hạt" aria-label="Bật hoặc tắt hiệu ứng hạt" aria-pressed="true" class="on">✦</button>
@@ -75,10 +75,10 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 const $=s=>document.querySelector(s),clamp=(v,a,b)=>Math.min(b,Math.max(a,v)),lerp=(a,b,t)=>a+(b-a)*t,rnd=(a,b)=>a+Math.random()*(b-a),ease=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
 const RM=matchMedia('(prefers-reduced-motion:reduce)').matches,Q=new URLSearchParams(location.search),mob=innerWidth<820||matchMedia('(pointer:coarse)').matches;
 const TH={
-rose:{n:'Rose Velvet',bg:0x14030c,fog:0x1c0613,a:0xff4fa3,b:0xff9ccb,c:0x7b2cff,plat:0x3a1228,paper:'#fdeee9',ink:'#7a2342',seal:0x9b1030,petal:[0xff7fb5,0xff4f9a,0xffb3d1],star:[0xffffff,0xffb3d9,0xc9a0ff],frame:0xfff4f0,ui:'#ff4fa3',ui2:'#ff9ccb',pn:'rgba(40,8,26,.82)'},
-mid:{n:'Midnight Love',bg:0x040001,fog:0x090103,a:0xff2a45,b:0xff6a7d,c:0x6a0f2a,plat:0x1a0508,paper:'#2a0d14',ink:'#ffd9d9',seal:0xc40a2a,petal:[0xb3122a,0x7a0a1c,0xff2a45],star:[0xffffff,0xff9aa8,0xd1122e],frame:0xe8d6d2,ui:'#ff2a45',ui2:'#ff8095',pn:'rgba(22,3,8,.86)'},
-lav:{n:'Lavender Dream',bg:0x0c0620,fog:0x130b2e,a:0xb892ff,b:0x7fb2ff,c:0xff9fd8,plat:0x2a1c52,paper:'#f1ecff',ink:'#4a2f8a',seal:0x6a3fc4,petal:[0xc9a8ff,0xff9fd8,0x9fc4ff],star:[0xffffff,0xd9c8ff,0xa6d0ff],frame:0xf6f1ff,ui:'#b892ff',ui2:'#9fc4ff',pn:'rgba(22,12,52,.82)'},
-ivory:{n:'Warm Ivory',bg:0x150e07,fog:0x1d140a,a:0xe6c27a,b:0xffe3a8,c:0xffb36b,plat:0x4a3820,paper:'#fbf3e0',ink:'#6b4a1c',seal:0x9a6a1e,petal:[0xf5e1b0,0xe6c27a,0xffd9b0],star:[0xffffff,0xffe3a8,0xffcf8a],frame:0xfff8e8,ui:'#e6c27a',ui2:'#ffe3a8',pn:'rgba(36,26,12,.84)'}};
+rose:{n:'Nhung hồng',bg:0x14030c,fog:0x1c0613,a:0xff4fa3,b:0xff9ccb,c:0x7b2cff,plat:0x3a1228,paper:'#fdeee9',ink:'#7a2342',seal:0x9b1030,petal:[0xff7fb5,0xff4f9a,0xffb3d1],star:[0xffffff,0xffb3d9,0xc9a0ff],frame:0xfff4f0,ui:'#ff4fa3',ui2:'#ff9ccb',pn:'rgba(40,8,26,.82)'},
+mid:{n:'Tình yêu đêm',bg:0x040001,fog:0x090103,a:0xff2a45,b:0xff6a7d,c:0x6a0f2a,plat:0x1a0508,paper:'#2a0d14',ink:'#ffd9d9',seal:0xc40a2a,petal:[0xb3122a,0x7a0a1c,0xff2a45],star:[0xffffff,0xff9aa8,0xd1122e],frame:0xe8d6d2,ui:'#ff2a45',ui2:'#ff8095',pn:'rgba(22,3,8,.86)'},
+lav:{n:'Giấc mơ oải hương',bg:0x0c0620,fog:0x130b2e,a:0xb892ff,b:0x7fb2ff,c:0xff9fd8,plat:0x2a1c52,paper:'#f1ecff',ink:'#4a2f8a',seal:0x6a3fc4,petal:[0xc9a8ff,0xff9fd8,0x9fc4ff],star:[0xffffff,0xd9c8ff,0xa6d0ff],frame:0xf6f1ff,ui:'#b892ff',ui2:'#9fc4ff',pn:'rgba(22,12,52,.82)'},
+ivory:{n:'Ngà ấm áp',bg:0x150e07,fog:0x1d140a,a:0xe6c27a,b:0xffe3a8,c:0xffb36b,plat:0x4a3820,paper:'#fbf3e0',ink:'#6b4a1c',seal:0x9a6a1e,petal:[0xf5e1b0,0xe6c27a,0xffd9b0],star:[0xffffff,0xffe3a8,0xffcf8a],frame:0xfff8e8,ui:'#e6c27a',ui2:'#ffe3a8',pn:'rgba(36,26,12,.84)'}};
 const D={from:'Anh',to:'Em',title:'Gửi người mình thương nhất…',msg:'Cảm ơn em vì đã ở đây, vì đã làm những ngày của anh rực rỡ hơn, và vì đã yêu anh theo cách của em. Dù thế giới có rộng lớn đến đâu, anh vẫn luôn chọn em.',secret:'Em là vũ trụ của anh ♥',theme:'rose',spd:'1'};
 try{const d=Q.get('d');if(d)Object.assign(D,JSON.parse(decodeURIComponent(escape(atob(d)))))}catch(e){}
 let rc=Q.get('mode')==='recipient';const app=$('#app');

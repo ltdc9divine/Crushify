@@ -1,7 +1,7 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8">
+<html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Crushify · Our Universe</title>
+<title>Crushify · Vũ trụ của chúng mình</title>
 <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Playfair+Display:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box}
@@ -54,40 +54,40 @@ button:hover,.btn:hover{border-color:var(--a)}button.on{border-color:var(--a);ba
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style></head><body>
 <div id="app">
-<aside id="panel"><h1>Our Universe</h1><p class="sub">Creator mode · every change updates the 3D scene live</p><div id="ed"></div>
-<div class="row" style="margin-top:16px"><button id="b-pv" class="pri">Preview Recipient</button><button id="b-copy">Copy recipient link</button></div></aside>
+<aside id="panel"><h1>Vũ trụ của chúng mình</h1><p class="sub">Chế độ sáng tạo · mọi thay đổi cập nhật khung cảnh 3D ngay lập tức</p><div id="ed"></div>
+<div class="row" style="margin-top:16px"><button id="b-pv" class="pri">Xem trước như người nhận</button><button id="b-copy">Sao chép liên kết người nhận</button></div></aside>
 <main id="stage">
-<canvas id="cv" aria-label="Interactive 3D universe"></canvas>
-<header id="top"><a class="logo" href="../../index.html" aria-label="Back to Crushify homepage">CRUSHIFY</a><span>Our Universe</span><div class="sp"></div><button id="exit" hidden>← Exit preview</button></header>
-<section id="hero"><p class="eye" id="h-eye"></p><h2>Our <em>Universe</em></h2><p class="it" id="h-sub"></p><p id="h-names" class="k"></p><p id="h-msg"></p>
-<div id="stats"><div><small>Together for</small><b id="s-d">—</b></div><div><small>Through</small><b id="s-y">—</b></div></div>
-<div class="row"><button id="b-explore" class="pri">Explore Our Universe</button><button id="b-story">Open Our Story</button></div></section>
-<nav id="tl" aria-label="Our journey"></nav>
+<canvas id="cv" aria-label="Vũ trụ 3D tương tác"></canvas>
+<header id="top"><a class="logo" href="../../index.html" aria-label="Quay lại trang chủ Crushify">CRUSHIFY</a><span>Vũ trụ của chúng mình</span><div class="sp"></div><button id="exit" hidden>← Thoát xem trước</button></header>
+<section id="hero"><p class="eye" id="h-eye"></p><h2>Vũ trụ <em>của chúng mình</em></h2><p class="it" id="h-sub"></p><p id="h-names" class="k"></p><p id="h-msg"></p>
+<div id="stats"><div><small>Bên nhau được</small><b id="s-d">—</b></div><div><small>Cùng nhau</small><b id="s-y">—</b></div></div>
+<div class="row"><button id="b-explore" class="pri">Khám phá vũ trụ</button><button id="b-story">Mở câu chuyện</button></div></section>
+<nav id="tl" aria-label="Hành trình của chúng mình"></nav>
 <div id="hud">
-<button id="b-auto" class="on" aria-pressed="true"><span>⟳</span>Rotate</button><button id="b-zin"><span>＋</span>Zoom in</button><button id="b-zout"><span>－</span>Zoom out</button>
-<button id="b-next"><span>✧</span>Explore</button><button id="b-reset"><span>◎</span>Reset</button><button id="b-fx" class="on" aria-pressed="true"><span>✦</span>Particles</button><button id="b-fs"><span>⛶</span>Full</button><button id="b-st"><span>♡</span>Story</button></div>
-<section id="mem" hidden><div class="k" id="m-k"></div><h3 id="m-t"></h3><p id="m-d"></p><img id="m-i" alt="" hidden><button id="m-x">← Back to universe</button></section>
-<section id="story" hidden><div class="k" id="s-k"></div><h3 id="s-t"></h3><p id="s-m"></p><button id="s-x">Close</button></section>
-<div id="note" hidden></div><div id="toast" role="status"></div><div id="load">Building your universe…</div>
+<button id="b-auto" class="on" aria-pressed="true"><span>⟳</span>Tự xoay</button><button id="b-zin"><span>＋</span>Phóng to</button><button id="b-zout"><span>－</span>Thu nhỏ</button>
+<button id="b-next"><span>✧</span>Khám phá</button><button id="b-reset"><span>◎</span>Đặt lại</button><button id="b-fx" class="on" aria-pressed="true"><span>✦</span>Hạt sáng</button><button id="b-fs"><span>⛶</span>Toàn màn hình</button><button id="b-st"><span>♡</span>Câu chuyện</button></div>
+<section id="mem" hidden><div class="k" id="m-k"></div><h3 id="m-t"></h3><p id="m-d"></p><img id="m-i" alt="" hidden><button id="m-x">← Trở về vũ trụ</button></section>
+<section id="story" hidden><div class="k" id="s-k"></div><h3 id="s-t"></h3><p id="s-m"></p><button id="s-x">Đóng</button></section>
+<div id="note" hidden></div><div id="toast" role="status"></div><div id="load">Đang tạo vũ trụ của bạn…</div>
 </main></div>
 <div id="lb" hidden><figure><img alt=""><figcaption></figcaption></figure></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 const $=s=>document.querySelector(s),clamp=(v,a,b)=>Math.min(b,Math.max(a,v)),lerp=(a,b,t)=>a+(b-a)*t,rnd=(a,b)=>a+Math.random()*(b-a),ease=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
 const RM=matchMedia('(prefers-reduced-motion:reduce)').matches,Q=new URLSearchParams(location.search),mob=innerWidth<820||matchMedia('(pointer:coarse)').matches;
-const TH={'rose-nebula':{n:'Rose Nebula',bg:0x05050b,fog:0x0a0716,A:0xf04db2,B:0xd83ab5,C:0x885cf6,W:0xfff4ff,pn:'rgba(23,16,43,.88)',ui:'#f04db2',ui2:'#ff9ccb'},
-'violet-dream':{n:'Violet Dream',bg:0x06040f,fog:0x0d0820,A:0x885cf6,B:0xb07cff,C:0xf04db2,W:0xf4eeff,pn:'rgba(20,12,45,.88)',ui:'#885cf6',ui2:'#c0a4ff'},
-'blue-aurora':{n:'Blue Aurora',bg:0x03060c,fog:0x07101c,A:0x4cc9f0,B:0x7aa2ff,C:0x9b6bff,W:0xeaf8ff,pn:'rgba(8,20,40,.88)',ui:'#4cc9f0',ui2:'#9fd8ff'},
-'golden-galaxy':{n:'Golden Galaxy',bg:0x0a0705,fog:0x150e08,A:0xffc15a,B:0xff8a5a,C:0xd83ab5,W:0xfff6e0,pn:'rgba(36,24,12,.88)',ui:'#ffc15a',ui2:'#ffe0a0'}};
-const AN={cinematic:{n:'Cinematic',sp:1,pulse:1,esc:.7,camk:3,comet:1,amp:.45},dreamy:{n:'Dreamy',sp:.5,pulse:.7,esc:1,camk:2,comet:.5,amp:.3},energetic:{n:'Energetic',sp:1.9,pulse:1.5,esc:.5,camk:5,comet:2.5,amp:.7},minimal:{n:'Minimal',sp:.3,pulse:.3,esc:.15,camk:3,comet:0,amp:.1}};
-const D={templateId:'our-universe',sender:'Minh',receiver:'Linh',nickname:'Bé yêu',headline:'A universe made for two',subheadline:'Two souls. One infinite universe.',mainMessage:"In a vast galaxy, we found each other. And in this universe, we'll find forever.",startDate:'2024-02-14',theme:'rose-nebula',animation:'cinematic',
-memories:[{title:'First Orbit',description:'The day our paths crossed and everything began.',photos:[]},{title:'Our Journey',description:'Every adventure, every ordinary day that became extraordinary.',photos:[]},{title:'To Infinity',description:'Whatever comes next, I want to see it with you.',photos:[]}]};
+const TH={'rose-nebula':{n:'Tinh vân hồng',bg:0x05050b,fog:0x0a0716,A:0xf04db2,B:0xd83ab5,C:0x885cf6,W:0xfff4ff,pn:'rgba(23,16,43,.88)',ui:'#f04db2',ui2:'#ff9ccb'},
+'violet-dream':{n:'Giấc mơ tím',bg:0x06040f,fog:0x0d0820,A:0x885cf6,B:0xb07cff,C:0xf04db2,W:0xf4eeff,pn:'rgba(20,12,45,.88)',ui:'#885cf6',ui2:'#c0a4ff'},
+'blue-aurora':{n:'Cực quang xanh',bg:0x03060c,fog:0x07101c,A:0x4cc9f0,B:0x7aa2ff,C:0x9b6bff,W:0xeaf8ff,pn:'rgba(8,20,40,.88)',ui:'#4cc9f0',ui2:'#9fd8ff'},
+'golden-galaxy':{n:'Thiên hà vàng',bg:0x0a0705,fog:0x150e08,A:0xffc15a,B:0xff8a5a,C:0xd83ab5,W:0xfff6e0,pn:'rgba(36,24,12,.88)',ui:'#ffc15a',ui2:'#ffe0a0'}};
+const AN={cinematic:{n:'Điện ảnh',sp:1,pulse:1,esc:.7,camk:3,comet:1,amp:.45},dreamy:{n:'Mộng mơ',sp:.5,pulse:.7,esc:1,camk:2,comet:.5,amp:.3},energetic:{n:'Sôi động',sp:1.9,pulse:1.5,esc:.5,camk:5,comet:2.5,amp:.7},minimal:{n:'Tối giản',sp:.3,pulse:.3,esc:.15,camk:3,comet:0,amp:.1}};
+const D={templateId:'our-universe',sender:'Minh',receiver:'Linh',nickname:'Bé yêu',headline:'Một vũ trụ dành riêng cho hai ta',subheadline:'Hai tâm hồn. Một vũ trụ vô tận.',mainMessage:'Giữa thiên hà bao la, chúng mình đã tìm thấy nhau. Và trong vũ trụ này, mình sẽ bên nhau mãi mãi.',startDate:'2024-02-14',theme:'rose-nebula',animation:'cinematic',
+memories:[{title:'Quỹ đạo đầu tiên',description:'Ngày hai con đường gặp nhau và mọi điều bắt đầu.',photos:[]},{title:'Hành trình đôi mình',description:'Mỗi chuyến phiêu lưu, mỗi ngày bình thường hóa thành điều tuyệt vời.',photos:[]},{title:'Đến vô cùng',description:'Dù ngày mai có điều gì, mình vẫn muốn cùng em trải nghiệm.',photos:[]}]};
 try{const d=Q.get('d');if(d)Object.assign(D,JSON.parse(decodeURIComponent(escape(atob(d)))))}catch(e){}
-const SUBS=['Where it all began','Growing together','And beyond…'];let rc=Q.get('mode')==='recipient';const app=$('#app');
+const SUBS=['Nơi mọi điều bắt đầu','Cùng nhau trưởng thành','Và còn mãi…'];let rc=Q.get('mode')==='recipient';const app=$('#app');
 function setRc(v){rc=v;app.classList.toggle('rc',v);$('#exit').hidden=!(v&&Q.get('mode')!=='recipient')}
 let toastT;function toast(m,ms=3500){const t=$('#toast');t.textContent=m;t.classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('on'),ms)}
 /* ---- ảnh: danh sách dùng chung cho editor và cảnh 3D ---- */
-const PH=[];const DEF=[['#f09a6b','#3b1a5a','🌅','First sunset'],['#f04db2','#17102b','💞','Us'],['#4a6fd8','#17102b','🌌','Under the stars']];
+const PH=[];const DEF=[['#f09a6b','#3b1a5a','🌅','Hoàng hôn đầu tiên'],['#f04db2','#17102b','💞','Đôi mình'],['#4a6fd8','#17102b','🌌','Dưới trời sao']];
 DEF.forEach(([a,b,e,cap])=>{const c=document.createElement('canvas');c.width=c.height=480;const g=c.getContext('2d'),gr=g.createLinearGradient(0,0,0,480);gr.addColorStop(0,a);gr.addColorStop(1,b);g.fillStyle=gr;g.fillRect(0,0,480,480);g.font='170px serif';g.textAlign='center';g.fillText(e,240,300);PH.push({c,cap,def:true})});
 const api={focus(){},reset(){},zoom(){},fx(){},auto(){},pols(){},pol(){},theme(){},anim(){},next(){}};
 let cur=TH['rose-nebula'],mi=-1,exploring=false;
@@ -96,22 +96,22 @@ const get=(o,p)=>p.split('.').reduce((a,k)=>a[k],o),set=(o,p,v)=>{const k=p.spli
 function field(par,label,path,kind){const w=document.createElement('label'),s=document.createElement('span'),e=document.createElement(kind==='ta'?'textarea':'input');w.className='fl';s.textContent=label;if(kind==='date')e.type='date';e.value=get(D,path);e.maxLength=kind==='ta'?500:80;e.oninput=()=>{set(D,path,e.value);renderText()};w.append(s,e);par.append(w)}
 function sect(t){const h=document.createElement('h3');h.textContent=t;$('#ed').append(h);return $('#ed')}
 function buildEditor(){const ed=$('#ed');ed.textContent='';
-sect('01 — Our names');[['Your name','sender'],['Partner name','receiver'],['Nickname','nickname']].forEach(a=>field(ed,...a));
-sect('02 — Our story');[['Main headline','headline'],['Subheadline','subheadline'],['Main message','mainMessage','ta'],['Start date','startDate','date']].forEach(a=>field(ed,...a));
-sect('03 — Our memories');D.memories.forEach((m,i)=>{field(ed,`Memory title ${i+1}`,`memories.${i}.title`);field(ed,`Memory description ${i+1}`,`memories.${i}.description`,'ta')});
-sect('04 — Photos (max 6)');const pl=document.createElement('div');pl.id='plist';const lb=document.createElement('label');lb.className='btn';lb.textContent='＋ Upload photos';const up=document.createElement('input');up.type='file';up.accept='image/*';up.multiple=true;up.hidden=true;up.onchange=e=>{[...e.target.files].forEach(addPhoto);e.target.value=''};lb.append(up);ed.append(pl,lb);
-sect('05 — Universe style');const th=document.createElement('div');th.className='row';th.id='ths';Object.entries(TH).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.onclick=()=>setTheme(k);th.append(b)});ed.append(th);
-sect('06 — Animations');const an=document.createElement('div');an.className='row';an.id='ans';Object.entries(AN).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.onclick=()=>setAnim(k);an.append(b)});ed.append(an);renderPhotos()}
-function addPhoto(f){if(!/^image\//.test(f.type))return;const im=new Image();im.onload=()=>{if(PH.filter(p=>!p.def).length>=6){toast('Maximum 6 photos');URL.revokeObjectURL(im.src);return}
+sect('01 — Tên của hai người');[['Tên của bạn','sender'],['Tên người ấy','receiver'],['Biệt danh','nickname']].forEach(a=>field(ed,...a));
+sect('02 — Câu chuyện của chúng mình');[['Tiêu đề chính','headline'],['Tiêu đề phụ','subheadline'],['Lời nhắn','mainMessage','ta'],['Ngày bắt đầu','startDate','date']].forEach(a=>field(ed,...a));
+sect('03 — Kỷ niệm');D.memories.forEach((m,i)=>{field(ed,`Tiêu đề kỷ niệm ${i+1}`,`memories.${i}.title`);field(ed,`Mô tả kỷ niệm ${i+1}`,`memories.${i}.description`,'ta')});
+sect('04 — Ảnh (tối đa 6)');const pl=document.createElement('div');pl.id='plist';const lb=document.createElement('label');lb.className='btn';lb.textContent='＋ Tải ảnh lên';const up=document.createElement('input');up.type='file';up.accept='image/*';up.multiple=true;up.hidden=true;up.onchange=e=>{[...e.target.files].forEach(addPhoto);e.target.value=''};lb.append(up);ed.append(pl,lb);
+sect('05 — Chủ đề vũ trụ');const th=document.createElement('div');th.className='row';th.id='ths';Object.entries(TH).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.onclick=()=>setTheme(k);th.append(b)});ed.append(th);
+sect('06 — Hiệu ứng chuyển động');const an=document.createElement('div');an.className='row';an.id='ans';Object.entries(AN).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.onclick=()=>setAnim(k);an.append(b)});ed.append(an);renderPhotos()}
+function addPhoto(f){if(!/^image\//.test(f.type))return;const im=new Image();im.onload=()=>{if(PH.filter(p=>!p.def).length>=6){toast('Bạn chỉ có thể thêm tối đa 6 ảnh');URL.revokeObjectURL(im.src);return}
 const s=Math.min(1,768/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=Math.round(im.width*s);c.height=Math.round(im.height*s);c.getContext('2d').drawImage(im,0,0,c.width,c.height);
 for(let i=PH.length-1;i>=0;i--)if(PH[i].def)PH.splice(i,1);PH.push({c,cap:'',def:false});URL.revokeObjectURL(im.src);photosChanged()};im.src=URL.createObjectURL(f)}
-function renderPhotos(){const box=$('#plist');if(!box)return;box.textContent='';PH.forEach((p,i)=>{const r=document.createElement('div'),im=new Image(),cap=document.createElement('input');r.className='ph';im.alt='';im.src=p.c.toDataURL('image/jpeg',.4);cap.value=p.cap;cap.placeholder='Caption';cap.maxLength=40;cap.oninput=()=>{p.cap=cap.value;api.pol(i)};
-const mb=(t,f)=>{const b=document.createElement('button');b.textContent=t;b.setAttribute('aria-label',t==='✕'?'Remove photo':'Move photo');b.onclick=f;return b};
+function renderPhotos(){const box=$('#plist');if(!box)return;box.textContent='';PH.forEach((p,i)=>{const r=document.createElement('div'),im=new Image(),cap=document.createElement('input');r.className='ph';im.alt='';im.src=p.c.toDataURL('image/jpeg',.4);cap.value=p.cap;cap.placeholder='Chú thích ảnh';cap.maxLength=40;cap.oninput=()=>{p.cap=cap.value;api.pol(i)};
+const mb=(t,f)=>{const b=document.createElement('button');b.textContent=t;b.setAttribute('aria-label',t==='✕'?'Xóa ảnh':'Di chuyển ảnh');b.onclick=f;return b};
 r.append(im,cap,mb('↑',()=>mv(i,-1)),mb('↓',()=>mv(i,1)),mb('✕',()=>{PH.splice(i,1);photosChanged()}));box.append(r)})}
 function mv(i,d){const j=i+d;if(j<0||j>=PH.length)return;[PH[i],PH[j]]=[PH[j],PH[i]];photosChanged()}
 function photosChanged(){renderPhotos();api.pols();if(mi>=0)openMem(mi,true)}
 function renderText(){const n=[D.sender,D.receiver].filter(Boolean).join('  ✦  ');$('#h-eye').textContent=D.headline;$('#h-sub').textContent=D.subheadline;$('#h-names').textContent=n+(D.nickname?'  ·  '+D.nickname:'');$('#h-msg').textContent=D.mainMessage;
-const s=new Date(D.startDate+'T00:00:00'),d=Math.floor((Date.now()-s)/864e5);if(isNaN(d)){$('#s-d').textContent='—';$('#s-y').textContent='—'}else{$('#s-d').textContent=Math.abs(d)+' days'+(d<0?' to go':'');const y=Math.floor(Math.abs(d)/365.25);$('#s-y').textContent=y>=1?y+'+ years':Math.floor(Math.abs(d)/30)+' months'}
+const s=new Date(D.startDate+'T00:00:00'),d=Math.floor((Date.now()-s)/864e5);if(isNaN(d)){$('#s-d').textContent='—';$('#s-y').textContent='—'}else{$('#s-d').textContent=Math.abs(d)+' ngày'+(d<0?' nữa':'');const y=Math.floor(Math.abs(d)/365.25);$('#s-y').textContent=y>=1?y+'+ năm':Math.floor(Math.abs(d)/30)+' tháng'}
 $('#tl').textContent='';D.memories.forEach((m,i)=>{const b=document.createElement('button'),ic=document.createElement('i'),t=document.createElement('b'),sm=document.createElement('small');ic.style.background=`radial-gradient(circle at 30% 30%,#fff7,var(--p${i}) 55%,#000)`;t.textContent=m.title;sm.textContent=SUBS[i];b.append(ic,t,sm);b.onclick=()=>openMem(i);$('#tl').append(b)});
 if(mi>=0)openMem(mi,true);if(!$('#story').hidden)openStory()}
 function openMem(i,keep){mi=i;$('#story').hidden=true;const m=D.memories[i];$('#m-k').textContent='0'+(i+1)+' — '+SUBS[i];$('#m-t').textContent=m.title;$('#m-d').textContent=m.description;const p=PH.filter((x,j)=>j%3===i)[0],im=$('#m-i');if(p){im.src=p.c.toDataURL('image/jpeg',.8);im.hidden=false}else im.hidden=true;$('#mem').hidden=false;if(!keep)api.focus(i)}
@@ -121,17 +121,17 @@ function openLb(i){const p=PH[i];if(!p)return;$('#lb img').src=p.c.toDataURL('im
 function setTheme(k){D.theme=k;cur=TH[k];const s=document.documentElement.style;s.setProperty('--a',cur.ui);s.setProperty('--b',cur.ui2);s.setProperty('--pn',cur.pn);document.querySelectorAll('#ths button').forEach(b=>b.classList.toggle('on',b.dataset.k===k));api.theme(k)}
 function setAnim(k){D.animation=k;document.querySelectorAll('#ans button').forEach(b=>b.classList.toggle('on',b.dataset.k===k));api.anim(k)}
 function resetView(){closeMem();$('#story').hidden=true;$('#lb').hidden=true;exploring=false;app.classList.remove('ex');api.reset()}
-$('#b-explore').onclick=()=>{exploring=true;app.classList.add('ex');api.zoom(.8);toast('Drag to rotate · scroll to zoom · tap a planet or the heart')};
+$('#b-explore').onclick=()=>{exploring=true;app.classList.add('ex');api.zoom(.8);toast('Kéo để xoay · cuộn để thu phóng · chạm vào hành tinh hoặc trái tim')};
 $('#b-story').onclick=openStory;$('#b-st').onclick=openStory;$('#s-x').onclick=()=>$('#story').hidden=true;$('#m-x').onclick=resetView;$('#b-reset').onclick=resetView;
 $('#b-zin').onclick=()=>api.zoom(.8);$('#b-zout').onclick=()=>api.zoom(1.25);$('#b-next').onclick=()=>openMem((mi+1)%3);
 $('#b-fx').onclick=e=>{const on=api.fx();e.currentTarget.classList.toggle('on',on);e.currentTarget.setAttribute('aria-pressed',on)};
 $('#b-auto').onclick=e=>{const on=api.auto();e.currentTarget.classList.toggle('on',on);e.currentTarget.setAttribute('aria-pressed',on)};
-$('#b-fs').onclick=async()=>{const el=document.documentElement,f=el.requestFullscreen||el.webkitRequestFullscreen;try{if(!f)throw 0;if(document.fullscreenElement||document.webkitFullscreenElement)await(document.exitFullscreen||document.webkitExitFullscreen).call(document);else await f.call(el)}catch(e){toast('Fullscreen is not available here. On iPhone, use Share → Add to Home Screen.')}};
+$('#b-fs').onclick=async()=>{const el=document.documentElement,f=el.requestFullscreen||el.webkitRequestFullscreen;try{if(!f)throw 0;if(document.fullscreenElement||document.webkitFullscreenElement)await(document.exitFullscreen||document.webkitExitFullscreen).call(document);else await f.call(el)}catch(e){toast('Không thể bật toàn màn hình tại đây. Trên iPhone, chọn Chia sẻ → Thêm vào Màn hình chính.')}};
 $('#b-pv').onclick=()=>setRc(true);$('#exit').onclick=()=>setRc(false);
-$('#b-copy').onclick=async()=>{const u=location.origin+location.pathname+'?mode=recipient&d='+encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(D)))));try{await navigator.clipboard.writeText(u);toast('Link copied (uploaded photos are not included).')}catch(e){toast('The browser blocked copying.')}};
+$('#b-copy').onclick=async()=>{const u=location.origin+location.pathname+'?mode=recipient&d='+encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(D)))));try{await navigator.clipboard.writeText(u);toast('Đã sao chép liên kết (không bao gồm ảnh đã tải lên).')}catch(e){toast('Trình duyệt không cho phép sao chép.')}};
 $('#lb').onclick=()=>$('#lb').hidden=true;addEventListener('keydown',e=>{if(e.key==='Escape')$('#lb').hidden=true});
 /* ---- Canvas 2D fallback thật, có thông báo rõ ràng ---- */
-function fb2d(msg){$('#cv').hidden=true;const n=$('#note');n.hidden=false;n.textContent=msg+' Showing a simplified Canvas 2D version (not WebGL).';$('#load').classList.add('off');
+function fb2d(msg){$('#cv').hidden=true;const n=$('#note');n.hidden=false;n.textContent=msg+' Đang hiển thị phiên bản Canvas 2D đơn giản (không phải WebGL).';$('#load').classList.add('off');
 const c=document.createElement('canvas');c.id='cv2';$('#stage').prepend(c);const g=c.getContext('2d'),st=[...Array(300)].map(()=>[Math.random(),Math.random(),Math.random()*1.6+.4,Math.random()*6]),hp=[];
 for(let i=0;i<1800;i++){const u=Math.random()*6.283,r=Math.sqrt(Math.random());hp.push([16*Math.pow(Math.sin(u),3)*r,-(13*Math.cos(u)-5*Math.cos(2*u)-2*Math.cos(3*u)-Math.cos(4*u))*r,(Math.random()-.5)*8*(1-Math.abs(Math.sin(u))*.5)])}
 let a=0;(function f(){requestAnimationFrame(f);const w=c.width=c.clientWidth,h=c.height=c.clientHeight;g.fillStyle='#05050b';g.fillRect(0,0,w,h);g.globalCompositeOperation='lighter';
@@ -140,12 +140,12 @@ g.fillStyle='rgba(240,77,178,.75)';hp.forEach(p=>{const x=p[0]*ca-p[2]*sa,z=p[0]
 function ld(u){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=u;s.onload=ok;s.onerror=no;document.head.appendChild(s)})}
 (async()=>{setRc(rc);buildEditor();setTheme(D.theme);setAnim(D.animation);renderText();
 if(!window.THREE){try{await ld('https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js')}catch(e){}}
-try{if(!window.THREE)throw new Error('Three.js could not be loaded.');initGL()}catch(e){console.error(e);fb2d(e.message||'WebGL is unavailable.')}})();
+try{if(!window.THREE)throw new Error('Không tải được Three.js.');initGL()}catch(e){console.error(e);fb2d(e.message||'WebGL không khả dụng.')}})();
 
 function initGL(){
 const cv=$('#cv'),stage=$('#stage');let R;try{R=new THREE.WebGLRenderer({canvas:cv,antialias:!mob,powerPreference:'high-performance'})}catch(e){}
-if(!R||!R.getContext())throw new Error('WebGL is unavailable.');
-let raf,dead=false;cv.addEventListener('webglcontextlost',e=>{e.preventDefault();dead=true;cancelAnimationFrame(raf);fb2d('WebGL context was lost.')});
+if(!R||!R.getContext())throw new Error('WebGL không khả dụng.');
+let raf,dead=false;cv.addEventListener('webglcontextlost',e=>{e.preventDefault();dead=true;cancelAnimationFrame(raf);fb2d('Kết nối WebGL đã bị gián đoạn.')});
 const q=mob?.42:1,maxPR=Math.min(devicePixelRatio||1,mob?1.5:2);let pr=maxPR;R.setPixelRatio(pr);R.toneMapping=THREE.ACESFilmicToneMapping;R.toneMappingExposure=1.05;
 const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(45,1,.1,400),AD=THREE.AdditiveBlending,C=c=>new THREE.Color(c);scene.background=C(0x05050b);scene.fog=new THREE.FogExp2(0x0a0716,.006);
 const mk=(w,h,f)=>{const c=document.createElement('canvas');c.width=w;c.height=h;f(c.getContext('2d'),w,h,c);return c},tx=c=>new THREE.CanvasTexture(c);
@@ -226,7 +226,7 @@ api.focus=i=>{fcs={k:'planet',i};gl.ph=1.3;gl.r=5.2;lastIn=T;lim()};
 const ray=new THREE.Raycaster(),ptr=new Map();let moved=0,t0=0,lastD=0;
 const pdist=()=>{const a=[...ptr.values()];return a.length<2?0:Math.hypot(a[0][0]-a[1][0],a[0][1]-a[1][1])};
 function pick(e){const r=cv.getBoundingClientRect();ray.setFromCamera({x:(e.clientX-r.left)/r.width*2-1,y:-((e.clientY-r.top)/r.height*2-1)},camera);const h=ray.intersectObjects([...PL.map(p=>p.mesh),hit,...hitsP],false)[0];return h&&h.object.userData}
-function heartFx(){U.burst.value=1;shock.visible=true;shock.userData.t=0;fcs={k:'heart'};Object.assign(gl,{tx:HC.x,ty:HC.y,tz:HC.z,r:12,ph:1.35});lim();closeMem();toast('The heart answers you. Press Reset to return.')}
+function heartFx(){U.burst.value=1;shock.visible=true;shock.userData.t=0;fcs={k:'heart'};Object.assign(gl,{tx:HC.x,ty:HC.y,tz:HC.z,r:12,ph:1.35});lim();closeMem();toast('Trái tim đang hồi đáp. Nhấn Đặt lại để quay về.')}
 cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);ptr.set(e.pointerId,[e.clientX,e.clientY]);if(ptr.size===1){moved=0;t0=performance.now()}lastD=pdist();lastIn=T});
 cv.addEventListener('pointermove',e=>{const r=cv.getBoundingClientRect();if(e.pointerType==='mouse'){mx=(e.clientX-r.left)/r.width*2-1;my=(e.clientY-r.top)/r.height*2-1}
 if(ptr.has(e.pointerId)){const o=ptr.get(e.pointerId),dx=e.clientX-o[0],dy=e.clientY-o[1];ptr.set(e.pointerId,[e.clientX,e.clientY]);lastIn=T;if(ptr.size===1){gl.th-=dx*.006;gl.ph-=dy*.006;moved+=Math.abs(dx)+Math.abs(dy)}else{const d=pdist();if(lastD&&d)gl.r*=lastD/d;lastD=d;moved=99}lim()}else if(e.pointerType==='mouse'){cv.style.cursor=pick(e)?'pointer':'grab'}});

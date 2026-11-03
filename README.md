@@ -1,35 +1,35 @@
-# Crushify — landing page prototype
+# Crushify — trang quà tặng số
 
-A responsive, static landing page for the Crushify digital love-gift concept.
+Trang giới thiệu tĩnh, tương thích với nhiều kích thước màn hình, cho các món quà số của Crushify.
 
-## Run locally
+## Chạy trên máy
 
-Open `index.html` in a browser. For a local server, run:
+Mở `index.html` bằng trình duyệt. Hoặc chạy máy chủ cục bộ:
 
 ```bash
 python -m http.server 5500
 ```
 
-Then open `http://localhost:5500`.
+Sau đó truy cập `http://localhost:5500`.
 
-## Deploy to Vercel
+## Triển khai lên Vercel
 
-1. Create a GitHub repository and upload the contents of this folder.
-2. Import the repository in Vercel.
-3. Framework preset: **Other**.
-4. Build command: leave empty.
-5. Output directory: `.`
-6. Deploy.
+1. Tạo kho lưu trữ GitHub và tải nội dung thư mục này lên.
+2. Nhập kho lưu trữ vào Vercel.
+3. Chọn cấu hình framework: **Other**.
+4. Để trống lệnh build.
+5. Thư mục đầu ra: `.`
+6. Triển khai.
 
-## Current scope
+## Phạm vi hiện tại
 
-- Responsive landing page and navigation.
-- Canvas-based 3D particle heart with automatic rotation and pointer parallax.
-- Template category filters and preview modal.
-- Our Universe V4 as a standalone Canvas 2D module at `templates/our-universe/`.
-- Local live preview and draft persistence in the browser for Our Universe.
-- How-it-works, pricing, and CTA sections.
+- Trang chủ và điều hướng tương thích với nhiều kích thước màn hình.
+- Trái tim hạt 3D dựng bằng Canvas, tự xoay và phản hồi theo vị trí con trỏ.
+- Bộ lọc danh mục mẫu quà và cửa sổ xem trước.
+- Các mẫu quà chạy độc lập trong thư mục `templates/`.
+- Bản xem trước trực tiếp và lưu bản nháp cục bộ trên trình duyệt.
+- Các phần hướng dẫn, bảng giá và lời kêu gọi hành động.
 
-## Not connected yet
+## Các tính năng chưa được kết nối
 
-Our Universe drafts are stored only in the browser, and selected images are previewed locally; images are not uploaded or saved with the draft. User accounts, a database, server-side uploads, checkout, payment processing, and publishing/share links are not implemented. The displayed prices are placeholders for validation and should be confirmed before launch.
+Bản nháp chỉ được lưu trong trình duyệt. Ảnh đã chọn chỉ được xem trước trên thiết bị và không được tải lên máy chủ hoặc lưu cùng bản nháp. Tài khoản người dùng, cơ sở dữ liệu, tải ảnh lên máy chủ, thanh toán và xuất bản liên kết chưa được triển khai. Giá hiển thị chỉ là giá dự kiến để thử nghiệm và cần được xác nhận trước khi mở bán.
