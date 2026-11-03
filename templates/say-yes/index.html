@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Say Yes! — Crushify</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,700;1,500&family=Dancing+Script:wght@500&family=Be+Vietnam+Pro:wght@400;600&display=swap">
+<link rel="stylesheet" href="say-yes.css">
+</head>
+<body data-ph="intro">
+<div id="tabs"><button data-v="ed">Editor</button><button data-v="pv">Preview</button></div>
+<aside id="editor">
+  <h2>Say Yes! <small>Creator</small></h2>
+  <details open><summary>Người trong cuộc</summary>
+    <label>Tên bạn<input data-k="sender"></label>
+    <label>Tên người nhận<input data-k="receiver"></label>
+    <label>Biệt danh<input data-k="nickname"></label>
+  </details>
+  <details open><summary>Câu hỏi</summary>
+    <label>Câu hỏi chính<input data-k="question"></label>
+    <label>Phụ đề<input data-k="subtitle"></label>
+    <label>Chữ nút YES<input data-k="yesLabel"></label>
+    <label>Chữ nút NO<input data-k="noLabel"></label>
+  </details>
+  <details><summary>Lời nhắn khi YES</summary>
+    <label>Tiêu đề<input data-k="yesHeadline"></label>
+    <label>Thông điệp ăn mừng<textarea data-k="yesMessage" rows="2"></textarea></label>
+    <label>Thư riêng<textarea data-k="letter" rows="4"></textarea></label>
+    <label>Chữ ký<input data-k="signature"></label>
+    <label>Ngày đặc biệt<input type="date" data-k="specialDate"></label>
+  </details>
+  <details><summary>Phản hồi khi NO</summary>
+    <label>Nội dung<textarea data-k="noMessage" rows="3"></textarea></label>
+    <label>Chữ nút quay lại<input data-k="noBackLabel"></label>
+    <label class="row"><input type="checkbox" data-k="showNoMessage"> Hiện lời phản hồi</label>
+  </details>
+  <details><summary>Kỷ niệm <span id="cnt"></span></summary>
+    <p class="hint">Tối đa 6 ảnh. Kéo thả để đổi thứ tự.</p>
+    <div id="phs"></div>
+    <label class="btn">Tải ảnh lên<input id="up" type="file" accept="image/*" multiple hidden></label>
+  </details>
+  <details><summary>Giao diện &amp; hiệu ứng</summary>
+    <div id="themes"></div>
+    <label>Kiểu hiệu ứng<select id="anim"><option value="cinematic">Cinematic</option><option value="magical">Magical</option><option value="dreamy">Dreamy</option><option value="minimal">Minimal</option></select></label>
+    <label class="row"><input type="checkbox" data-k="particles"> Bật particle</label>
+    <label class="row"><input type="checkbox" data-k="autoRotate"> Tự xoay camera</label>
+  </details>
+  <div class="actions"><button id="asRecipient">Xem thử như người nhận</button><button id="save">Lưu nháp</button><button id="exp">Xuất JSON</button></div>
+  <p id="msg" class="hint"></p>
+</aside>
+<main id="stage">
+  <canvas id="c"></canvas>
+  <div id="veil"></div>
+  <header class="hud">
+    <a id="home" href="../../index.html">← Crushify</a>
+    <button id="snd">Sound off</button><button id="hHeart">Heart</button><button id="hBox">Ring</button><button id="reset">Reset</button><button id="rot">Rotate</button><button id="prt">Particles</button><button id="replay">Replay</button>
+    <button id="backEdit" class="only-edit">Back to editor</button>
+  </header>
+  <p id="note" hidden>2D mode: WebGL or Three.js is unavailable, so the 3D scene is off.</p>
+  <section id="ask" class="card">
+    <p id="qSub"></p>
+    <h1 id="qMain"></h1>
+    <div class="btns"><button id="yesB" class="yes"></button><button id="noB" class="no"></button></div>
+  </section>
+  <section id="yesP" class="card">
+    <h2 id="yesH"></h2>
+    <p id="yesM"></p>
+    <div id="yesPh"></div>
+    <p id="yesL" class="letter"></p>
+    <p id="yesS" class="sig"></p>
+    <p id="yesN" class="meta"></p>
+    <button id="yesRe" class="no">Replay celebration</button>
+  </section>
+  <section id="noP" class="card">
+    <p id="noM"></p>
+    <div class="btns"><button id="noBack" class="yes"></button><button id="noClose" class="no">Close</button></div>
+  </section>
+</main>
+<script src="say-yes.js?v=2"></script>
+</body>
+</html>

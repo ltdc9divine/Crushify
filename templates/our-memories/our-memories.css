@@ -1,0 +1,87 @@
+*{box-sizing:border-box}
+:root{--b1:#3a0a24;--b2:#10020a;--ac:#ff5fa2}
+html,body{height:100%;margin:0}
+body{font:15px/1.5 "Playfair Display",Georgia,serif;color:#fbe9ee;overflow:hidden;background:radial-gradient(ellipse at 60% 40%,var(--b1),var(--b2) 70%)}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer;color:inherit}
+#stage{position:fixed;inset:0 0 0 380px;overflow:hidden}
+body.recipient #stage{left:0}
+#c{position:absolute;inset:0;width:100%;height:100%;touch-action:none;display:block}
+/* HUD */
+.hud{position:absolute;top:14px;right:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;z-index:3}
+.hud button,#replay,.actions button{background:#0006;border:1px solid #ffffff30;border-radius:99px;padding:7px 14px;backdrop-filter:blur(6px)}
+.hud button.off{opacity:.45}
+.only-edit{display:none}
+body.recipient:not(.locked) .only-edit{display:block}
+/* hero */
+#hero{position:absolute;left:5vw;top:50%;transform:translateY(-50%);max-width:min(440px,50%);z-index:2;pointer-events:none;transition:opacity .8s,transform .8s}
+#hero>*{pointer-events:auto}
+#hero h1{font-size:clamp(34px,5vw,68px);font-weight:500;line-height:1.05;margin:.1em 0 .25em}
+#hNames{font:italic 22px "Dancing Script",cursive;color:var(--ac);margin:0}
+.sub{font-style:italic;font-size:20px;margin:0 0 16px}
+.days{opacity:.8;margin:0 0 22px}.days b{color:var(--ac)}
+.cta{background:linear-gradient(135deg,var(--ac),#c13a8a);border:0;border-radius:99px;padding:13px 28px;font-size:16px;color:#fff;box-shadow:0 0 28px var(--ac)}
+body.open #hero,body.twod.open #hero{opacity:0;pointer-events:none;transform:translateY(-50%) translateX(-30px)}
+body.open #hero>*{pointer-events:none}
+/* timeline / nav */
+#tl{position:absolute;left:50%;bottom:20px;transform:translateX(-50%);display:none;gap:10px;z-index:3;max-width:96%}
+body.open #tl{display:flex}
+#tl button{background:#0007;border:1px solid #ffffff30;border-radius:14px;padding:8px 16px;backdrop-filter:blur(6px);display:flex;gap:8px;align-items:center;white-space:nowrap}
+#tl b{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#ffffff22;font-size:12px}
+#tl .on{border-color:var(--ac);box-shadow:0 0 14px var(--ac)}#tl .on b{background:var(--ac)}
+#nav{position:absolute;left:0;right:0;top:50%;display:none;justify-content:space-between;padding:0 12px;pointer-events:none;z-index:3}
+body.open #nav{display:flex}
+#nav button{pointer-events:auto;width:46px;height:46px;border-radius:50%;border:1px solid #fff3;background:#0006;font-size:26px;line-height:1}
+body.twod #nav{display:none}
+#replay{position:absolute;left:50%;bottom:80px;transform:translateX(-50%);z-index:3;border-color:var(--ac)}
+/* lightbox */
+#lb{position:absolute;inset:0;z-index:5;display:grid;place-items:center;background:#0008;backdrop-filter:blur(8px)}
+#lb[hidden]{display:none}
+#lb figure{margin:0;background:#fff6f8;color:#4a1330;padding:14px 14px 18px;border-radius:3px;box-shadow:0 20px 60px #000a;transform:rotate(-1.2deg);max-width:min(86vw,520px)}
+#lb img{display:block;max-width:100%;max-height:62vh;margin:auto}
+#lb figcaption{text-align:center;margin-top:12px}#lb b{display:block;font:24px "Dancing Script",cursive}#lb span{font-size:13px;opacity:.7}
+#lb button{position:absolute;background:#0007;border:1px solid #fff3;border-radius:50%;width:44px;height:44px;font-size:26px}
+#lbP{left:14px;top:50%}#lbN{right:14px;top:50%}#lbX{right:14px;top:14px}
+/* 2D fallback */
+#fb{position:absolute;inset:0;overflow:auto;padding:70px 6vw 90px;z-index:1;text-align:center}
+#fb[hidden]{display:none}
+#fb .note{background:#0006;border:1px dashed var(--ac);display:inline-block;padding:6px 12px;border-radius:8px;font-size:13px}
+#fb h2{font-size:38px;font-weight:500;margin:.3em 0 0}
+#fb .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;max-width:760px;margin:20px auto}
+#fb figure{margin:0;background:#fff6f8;color:#4a1330;padding:8px 8px 12px;border-radius:2px}#fb img{width:100%;display:block}
+/* editor */
+#editor{position:fixed;left:0;top:0;bottom:0;width:380px;overflow:auto;background:#12020cee;border-right:1px solid #ffffff18;padding:16px;z-index:10}
+body.recipient #editor,body.recipient #tabs{display:none}
+#editor h2{margin:0 0 10px;font-weight:500}#editor small{color:var(--ac);font-size:12px;margin-left:6px}
+details{border-top:1px solid #ffffff18;padding:8px 0}summary{cursor:pointer;padding:4px 0}
+label{display:block;font-size:12px;opacity:.9;margin:8px 0}
+input,textarea,select{width:100%;margin-top:4px;background:#ffffff12;border:1px solid #ffffff25;border-radius:8px;color:#fff;padding:8px}
+select option{color:#000}
+label.row{display:flex;gap:8px;align-items:center}label.row input{width:auto;margin:0}
+.btn{display:block;text-align:center;border:1px dashed var(--ac);border-radius:10px;padding:10px;cursor:pointer}
+.hint{font-size:12px;opacity:.7;margin:4px 0}
+fieldset{border:1px solid #ffffff20;border-radius:10px;margin:8px 0;padding:6px}fieldset input,fieldset textarea{margin:3px 0}
+.ph{display:grid;grid-template-columns:44px 1fr 46px 30px 30px;gap:5px;align-items:center;margin:5px 0;padding:4px;border-radius:8px;background:#ffffff0c;cursor:grab}
+.ph img{width:44px;height:44px;object-fit:cover;border-radius:4px}.ph input,.ph select{margin:0;padding:5px}
+.ph button{background:none;border:0;font-size:18px;opacity:.6}.ph button.on{color:var(--ac);opacity:1}
+#themes{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+#themes button{background:var(--c);border:1px solid #fff4;border-radius:8px;padding:9px;font-size:12px}
+.actions{display:flex;gap:8px;margin-top:14px;position:sticky;bottom:0}
+#tabs{display:none}
+@media(max-width:800px){
+ #stage{left:0}
+ #editor{width:100%;top:46px;display:none}
+ body:not(.pv) #editor{display:block}
+ body:not(.pv) #stage{visibility:hidden}
+ #tabs{display:flex;position:fixed;top:0;left:0;right:0;height:46px;z-index:20;background:#12020c}
+ #tabs button{flex:1;background:none;border:0;border-bottom:2px solid transparent}
+ body.pv #tabs [data-v=pv],body:not(.pv) #tabs [data-v=ed]{border-color:var(--ac)}
+ body.recipient #stage{top:0}
+ #stage{top:46px}
+ #hero{left:5vw;right:5vw;max-width:none;top:auto;bottom:90px;transform:none;text-align:center}
+ body.open #hero{transform:translateX(-30px)}
+ #tl{bottom:12px}#tl button{padding:7px 10px;font-size:13px}
+ .hud button{padding:6px 10px;font-size:12px}
+ .ph{grid-template-columns:40px 1fr 42px 26px 26px}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}

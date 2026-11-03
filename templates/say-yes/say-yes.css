@@ -1,0 +1,57 @@
+*{box-sizing:border-box}
+:root{--b1:#3a0a24;--b2:#10020a;--ac:#ff5fa2}
+html,body{height:100%;margin:0}
+body{font:16px/1.55 "Be Vietnam Pro",system-ui,sans-serif;color:#fbe9ee;overflow:hidden;background:radial-gradient(ellipse at 50% 35%,var(--b1),var(--b2) 72%)}
+button,input,select,textarea{font:inherit}button{cursor:pointer;color:inherit}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+#stage{position:fixed;inset:0 0 0 380px;overflow:hidden}
+body.recipient #stage{left:0}
+#c{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
+#veil{position:absolute;inset:0;background:#000;pointer-events:none;z-index:6}
+body.fade #veil{animation:vin 2.6s ease forwards}
+@keyframes vin{from{opacity:1}to{opacity:0}}
+.hud{position:absolute;top:14px;right:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;z-index:4}
+.hud button,.hud a,.actions button{background:#0006;border:1px solid #ffffff30;border-radius:99px;padding:7px 14px;backdrop-filter:blur(6px);font-size:13px;color:inherit;text-decoration:none}
+.hud button.off{opacity:.45}.only-edit{display:none}body.recipient:not(.locked) .only-edit{display:block}
+#note{position:absolute;top:60px;left:50%;transform:translateX(-50%);z-index:4;background:#0007;border:1px dashed var(--ac);padding:6px 12px;border-radius:8px;font-size:13px;margin:0}
+/* cards */
+.card{position:absolute;left:5vw;top:50%;transform:translateY(-44%);width:min(460px,42vw);max-height:80vh;overflow:auto;z-index:3;opacity:0;pointer-events:none;transition:opacity 1s,transform 1s}
+body.ask[data-ph=intro] #ask,body[data-ph=yes] #yesP,body[data-ph=no] #noP{opacity:1;pointer-events:auto;transform:translateY(-50%)}
+#qSub{font:italic 500 22px "Cormorant Garamond",serif;color:var(--ac);margin:0 0 6px}
+#qMain,#yesH{font:700 clamp(36px,4.6vw,64px)/1.04 "Cormorant Garamond",serif;margin:0 0 24px;text-shadow:0 2px 30px #000a}
+#yesH{font-size:clamp(28px,3.4vw,46px);margin-bottom:12px}
+.btns{display:flex;gap:12px;flex-wrap:wrap}
+.yes,.no{border-radius:99px;padding:14px 26px;font-weight:600;letter-spacing:.03em;border:1px solid #ffffff40}
+.yes{background:linear-gradient(135deg,var(--ac),#b03a9a);border:0;color:#fff;box-shadow:0 0 30px var(--ac)}
+.no{background:#0005;backdrop-filter:blur(6px)}
+#noM,#yesM{font-size:17px}
+#yesPh{display:flex;gap:10px;overflow-x:auto;padding:4px 0 10px}
+#yesPh figure{margin:0;flex:none;width:96px;background:#fff6f8;color:#4a1330;padding:5px 5px 8px;border-radius:2px;font-size:11px;text-align:center;transform:rotate(-2deg)}#yesPh figure:nth-child(even){transform:rotate(2deg)}
+#yesPh img{width:100%;height:96px;object-fit:cover;display:block}
+.letter{white-space:pre-wrap;background:#0004;border-left:2px solid var(--ac);padding:10px 14px;border-radius:0 10px 10px 0;font:italic 500 18px/1.5 "Cormorant Garamond",serif}
+.sig{font:34px "Dancing Script",cursive;color:var(--ac);margin:8px 0 0}.meta{opacity:.75;font-size:13px;margin:0 0 14px}
+/* editor */
+#editor{position:fixed;left:0;top:0;bottom:0;width:380px;overflow:auto;background:#12020cee;border-right:1px solid #ffffff18;padding:16px;z-index:10}
+body.recipient #editor,body.recipient #tabs{display:none}
+#editor h2{margin:0 0 10px;font-weight:600}#editor small{color:var(--ac);font-size:12px;margin-left:6px}
+details{border-top:1px solid #ffffff18;padding:8px 0}summary{cursor:pointer;padding:4px 0}
+label{display:block;font-size:12px;margin:8px 0}
+input,textarea,select{width:100%;margin-top:4px;background:#ffffff12;border:1px solid #ffffff25;border-radius:8px;color:#fff;padding:9px}
+select option{color:#000}label.row{display:flex;gap:8px;align-items:center}label.row input{width:auto;margin:0}
+.btn{display:block;text-align:center;border:1px dashed var(--ac);border-radius:10px;padding:10px;cursor:pointer}.hint{font-size:12px;opacity:.7;margin:4px 0}
+.ph{display:grid;grid-template-columns:44px 1fr 30px;gap:6px;align-items:center;margin:5px 0;padding:4px;border-radius:8px;background:#ffffff0c;cursor:grab}
+.ph img{width:44px;height:44px;object-fit:cover;border-radius:4px}.ph input{margin:0;padding:6px}.ph button{background:none;border:0;font-size:20px;opacity:.7}
+#themes{display:grid;grid-template-columns:1fr 1fr;gap:6px}#themes button{background:var(--c);border:1px solid #fff4;border-radius:8px;padding:10px;font-size:12px;color:#fff;text-shadow:0 1px 3px #000}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+#tabs{display:none}
+@media(max-width:800px){
+ #stage{left:0;top:46px}body.recipient #stage{top:0}
+ #editor{width:100%;top:46px;display:none}body:not(.pv) #editor{display:block}body:not(.pv) #stage{visibility:hidden}
+ #tabs{display:flex;position:fixed;top:0;left:0;right:0;height:46px;z-index:20;background:#12020c}
+ #tabs button{flex:1;background:none;border:0;border-bottom:2px solid transparent}
+ body.pv #tabs [data-v=pv],body:not(.pv) #tabs [data-v=ed]{border-color:var(--ac)}
+ .card{left:5vw;right:5vw;width:auto;top:auto;bottom:6vh;max-height:46vh;text-align:center;transform:translateY(20px)}
+ body.ask[data-ph=intro] #ask,body[data-ph=yes] #yesP,body[data-ph=no] #noP{transform:none}
+ .btns{justify-content:center}.hud button{padding:6px 10px;font-size:12px}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}#veil{display:none}}

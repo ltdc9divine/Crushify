@@ -5,3 +5,7 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 @media(max-width:700px){#heartCanvas{height:390px}}
 @media(max-width:390px){#heartCanvas{height:345px}}
+.template-card[data-href]{cursor:pointer}
+.template-card[data-href] .template-art{transition:transform .25s,border-color .25s}
+.template-card[data-href]:hover .template-art,.template-card[data-href]:focus-within .template-art{transform:translateY(-4px);border-color:rgba(242,140,171,.55)}
+a.round-arrow{display:grid;place-items:center}

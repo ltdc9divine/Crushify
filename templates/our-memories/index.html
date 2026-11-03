@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Our Memories — Crushify</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;1,500&family=Dancing+Script:wght@500&display=swap">
+<link rel="stylesheet" href="our-memories.css">
+</head>
+<body>
+<div id="tabs"><button data-v="ed">Editor</button><button data-v="pv">Preview</button></div>
+<aside id="editor">
+  <h2>Our Memories <small>Creator</small></h2>
+  <details open><summary>Thông tin cặp đôi</summary>
+    <label>Tên bạn<input data-k="sender"></label>
+    <label>Tên người ấy<input data-k="receiver"></label>
+    <label>Biệt danh<input data-k="nickname"></label>
+    <label>Ngày kỷ niệm<input type="date" data-k="anniversary"></label>
+    <label>Tiêu đề album<input data-k="albumTitle"></label>
+    <label>Phụ đề<input data-k="subtitle"></label>
+  </details>
+  <details><summary>Câu chuyện</summary>
+    <label>Lời mở đầu<textarea data-k="introduction" rows="3"></textarea></label>
+    <label>Câu chuyện của chúng ta<textarea data-k="story" rows="3"></textarea></label>
+    <label>Lời nhắn cuối<textarea data-k="closingMessage" rows="3"></textarea></label>
+    <label>Chữ ký<input data-k="signature"></label>
+  </details>
+  <details><summary>Chương kỷ niệm</summary><div id="chs"></div></details>
+  <details open><summary>Ảnh <span id="cnt"></span></summary>
+    <p class="hint">Kéo thả để đổi thứ tự. Số = chương, ★ = ảnh bìa.</p>
+    <div id="phs"></div>
+    <label class="btn">Tải ảnh lên (tối đa 12)<input id="up" type="file" accept="image/*" multiple hidden></label>
+  </details>
+  <details><summary>Giao diện</summary>
+    <div id="themes"></div>
+    <label>Hiệu ứng<select id="anim"><option value="cinematic">Cinematic</option><option value="dreamy">Dreamy</option><option value="nostalgic">Nostalgic</option><option value="minimal">Minimal</option></select></label>
+    <label class="row"><input id="motion" type="checkbox" checked> Bật chuyển động</label>
+  </details>
+  <div class="actions"><button id="asRecipient">Xem như người nhận</button><button id="exp">Xuất JSON</button></div>
+</aside>
+<main id="stage">
+  <canvas id="c"></canvas>
+  <div id="fb" hidden></div>
+  <header class="hud">
+    <button id="snd">Sound off</button><button id="reset">Reset view</button><button id="rot">Auto-rotate</button><button id="prt">Particles</button>
+    <button id="backEdit" class="only-edit">Back to editor</button>
+  </header>
+  <section id="hero">
+    <p id="hNames"></p>
+    <h1 id="hTitle"></h1>
+    <p id="hSub" class="sub"></p>
+    <p class="days">Together for <b id="hDays"></b></p>
+    <button id="openBtn" class="cta">Open Our Memories</button>
+  </section>
+  <nav id="tl"></nav>
+  <div id="nav"><button id="prev" aria-label="Previous page">‹</button><button id="next" aria-label="Next page">›</button></div>
+  <button id="replay" hidden>Watch the album again</button>
+  <div id="lb" hidden>
+    <figure><img id="lbImg" alt=""><figcaption><b id="lbCap"></b><span id="lbDate"></span></figcaption></figure>
+    <button id="lbP" aria-label="Previous photo">‹</button><button id="lbN" aria-label="Next photo">›</button><button id="lbX" aria-label="Close">×</button>
+  </div>
+</main>
+<script src="our-memories.js"></script>
+</body>
+</html>
