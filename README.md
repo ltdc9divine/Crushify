@@ -88,7 +88,15 @@ npm test
 npm run test:integration
 ```
 
-The integration test exercises local D1 and Wrangler's local R2 emulation. No production R2 bucket, email provider, Cloudflare account bindings/secrets, staging deployment, or remote smoke test is configured. Do not deploy this local setup or use production customer data.
+The integration test exercises local D1 and Wrangler's local R2 emulation. The current Worker continues to use D1; the shared database contract and Turso/libSQL adapter are being introduced separately. No remote Turso migration, Vercel API adapter, production R2 bucket, email provider, Cloudflare account bindings/secrets, staging deployment, or remote smoke test is configured. Do not deploy this local setup or use production customer data.
+
+To apply the existing numbered SQLite migrations to a **new or verified empty** Turso database, set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the server environment and run:
+
+```powershell
+npm run db:migrate:turso
+```
+
+The migration command checks applied migration checksums and foreign keys, runs each migration transactionally, and refuses databases containing application tables without a migration ledger. It does not connect automatically or migrate existing D1 data. See [docs/HOSTING_MIGRATION.md](docs/HOSTING_MIGRATION.md) for the staged migration status and safeguards.
 
 The other four templates still use their existing browser-side draft/media flows. Checkout, payment/webhooks, order management, publishing, admin tooling, and production customer workflows are not implemented. Displayed prices remain informational and must not be treated as an active offer.
 

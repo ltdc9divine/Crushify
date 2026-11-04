@@ -1,6 +1,6 @@
 # Crushify Product & System Architecture
 
-**Status:** design proposal; no backend or payment code is implemented.
+**Status:** architecture migration in progress. Cloudflare Worker/D1/R2 remains the current backend; a provider-neutral SQL contract and Turso/libSQL migration path have been added but no remote database or host has been changed. Payment and publication remain unimplemented.
 **Audit basis:** repository contents and local browser checks on 2026-11-04.
 **Decision boundary:** this design does not select a payment provider, set production prices, or claim legal/compliance approval.
 
@@ -15,41 +15,41 @@ Both use the same customer identity, design/assets, order/payment ledger, and pu
 
 ## 2. Audited starting point
 
-At the original audit baseline, the repository was a static HTML/CSS/JavaScript website with five standalone templates and no backend toolchain or deployment configuration. A local-only foundation has since been added: TypeScript Worker entrypoint, Wrangler config, D1 migration, health routes, and basic tests. No Cloudflare staging/production resources, R2 bindings, CI/deployment workflow, customer account, draft API, server-side upload, order service, payment integration, or publishing service is configured or implemented.
+The repository has five standalone templates and a local-only Cloudflare Worker/D1/R2 backend for Our Universe authentication, drafts, private media and previews. The current Worker continues to use D1. A provider-neutral database contract, D1 adapter, Turso/libSQL adapter and checksum-verified transactional migration CLI now share the existing SQLite migrations. These changes have only been tested against local libSQL; no Turso database has been connected or migrated. Vercel/Netlify API adapters, Cloudinary storage, order/payment services and publication are not implemented.
 
 The homepage shows sample prices of 39,000/79,000/129,000 VND and links to the template gallery; its own note labels them provisional. It does not create an order or start checkout. The homepage contains a preview-modal shell/handler but has no `.preview-btn` trigger in its current gallery; card links navigate to the templates directly. The previous integration findings are recorded in [PRODUCT-INTEGRATION-AUDIT.md](../PRODUCT-INTEGRATION-AUDIT.md).
 
 ## 3. Target topology
 
 ```text
-Browser (current HTML/CSS/JS + template-specific renderers)
-   ├── static GET ───────────────> Cloudflare Workers Static Assets
-   └── /api/v1/* ────────────────> TypeScript Cloudflare Worker
-                                      ├── D1: customers, designs, orders,
-                                      │       payments, projects, audit trail
-                                      ├── R2 private: original uploads/drafts
-                                      ├── R2 public: optimized published media
-                                      ├── payment provider adapter
-                                      └── email provider adapter
+Browser (current HTML/CSS/JavaScript + template-specific renderers)
+   ├── static GET ───────────────> Vercel Development / Netlify candidate
+   └── /api/v1/* ────────────────> shared application services
+                                      ├── database adapter ──> Turso/libSQL
+                                      ├── storage adapter ───> Cloudinary
+                                      ├── payment adapter ────> SePay
+                                      └── email adapter
 
-Payment provider ── signed webhook ──> Worker webhook endpoint
-Admin (MFA/Access protected) ─────────> Worker admin API
-Published gift URL ───────────────────> Worker public renderer + D1/R2
-GitHub ── reviewed CI/deploy ─────────> Cloudflare staging / production
+SePay webhook ── signed event ───> future API adapter
+Admin (MFA/role protected) ───────> future admin API
+
+Rollback path: Cloudflare Worker ──> D1 + R2
 ```
+
+The Turso adapter and migrations are implemented locally. The Vercel/Netlify HTTP adapters, Cloudinary/SePay adapters and deployment configurations are not implemented. Cloudflare remains the active backend during this staged migration; do not point new code at customer data until an explicit, verified data migration plan exists.
 
 ### Runtime boundaries
 
 - Keep the present frontend and each template's own CSS, JavaScript, and 3D experience. Add only small shared browser modules/adapters when a template opts in.
 - Use Workers Static Assets for the homepage, template source files, and versioned static assets. Static assets are not a per-customer HTML publishing database.
-- Route `/api/v1/*`, authenticated preview routes, payment webhooks, and gift slugs to Worker code. Keep public static routes cacheable independently of API responses.
-- Use D1 for metadata and state transitions only. Never put image bytes/base64 in D1.
-- Keep original and draft media private in R2. Serve published renditions through an authorization-aware Worker or a deliberately public published-media hostname.
+- Route `/api/v1/*`, authenticated previews, future payment webhooks, and gift slugs through the selected server-side API adapter. Keep public static routes cacheable independently of API responses.
+- Use the database contract for metadata and state transitions only. Turso/libSQL uses the existing SQLite migrations; never put image bytes/base64 in the database.
+- Keep original and draft media private in the future storage adapter. Cloudinary signed uploads are planned; no client upload signature or Cloudinary secret is currently exposed.
 - A published gift uses a high-entropy slug, e.g. `/g/<random-token>`. The public renderer resolves a published design version and its pinned template version. Do not expose a draft or an enumerable D1 ID.
 
 ### Environments
 
-Create separate `development`, `staging`, and `production` Worker/D1/R2 resources, credentials, webhook endpoints, and payment-provider modes. Never point local/staging deployments at production customer data or buckets. Production deployment is a reviewed GitHub workflow, not an ad hoc local command.
+Keep local, Vercel development, and any later Netlify production-candidate resources, credentials, webhook endpoints, and payment-provider modes separate. Netlify eligibility and terms must be verified before commercial use. Never point local/staging deployments at production customer data or storage. Production deployment requires a reviewed, explicit release process.
 
 ## 4. Request/data flows
 

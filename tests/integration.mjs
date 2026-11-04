@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { runDatabaseContract } from "./database-contract.mjs";
 
 const root = process.cwd();
 const devVars = resolve(root, ".dev.vars");
@@ -11,11 +14,23 @@ if (!existsSync(devVars)) {
   throw new Error("Copy .dev.vars.example to .dev.vars before running npm run test:integration.");
 }
 
+const persistDirectory = await mkdtemp(join(tmpdir(), "crushify-d1-contract-"));
 const port = 8787;
 const origin = `http://127.0.0.1:${port}`;
 const child = spawn(
   process.execPath,
-  ["node_modules/wrangler/bin/wrangler.js", "dev", "--ip", "127.0.0.1", "--port", String(port), "--local-protocol", "http"],
+  [
+    "node_modules/wrangler/bin/wrangler.js",
+    "dev",
+    "--ip",
+    "127.0.0.1",
+    "--port",
+    String(port),
+    "--local-protocol",
+    "http",
+    "--persist-to",
+    persistDirectory,
+  ],
   { cwd: root, stdio: ["ignore", "pipe", "pipe"] },
 );
 let logs = "";
@@ -30,6 +45,41 @@ child.stderr.on("data", capture);
 
 function sanitizedLogs() {
   return logs.replace(/magic_token=[A-Za-z0-9_-]+/g, "magic_token=[redacted]");
+}
+
+function executeLocalD1(sql) {
+  return execFileSync(process.execPath, [
+    "node_modules/wrangler/bin/wrangler.js",
+    "d1",
+    "execute",
+    "crushify-local",
+    "--local",
+    "--persist-to",
+    persistDirectory,
+    "--command",
+    sql,
+    "--json",
+  ], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+function assertD1Failure(sql, pattern) {
+  try {
+    executeLocalD1(sql);
+  } catch (error) {
+    const output = error instanceof Error && "stdout" in error && "stderr" in error
+      ? `${String(error.stdout)}\n${String(error.stderr)}\n${error.message}`
+      : String(error);
+    assert.match(output, pattern);
+    return;
+  }
+  assert.fail("Expected local D1 command to fail");
+}
+
+async function stopWorker() {
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill();
+    await new Promise((resolveExit) => child.once("exit", resolveExit));
+  }
 }
 
 async function waitReady() {
@@ -51,6 +101,19 @@ async function waitForMagicToken(after) {
   throw new Error(`Local email adapter did not emit a link.\n${sanitizedLogs()}`);
 }
 
+async function waitForNextMagicToken() {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const text = logs.slice(logCursor);
+    const match = text.match(/magic_token=([A-Za-z0-9_-]+)/);
+    if (match) {
+      logCursor += text.indexOf(match[0]) + match[0].length;
+      return match[1];
+    }
+    await delay(100);
+  }
+  throw new Error(`Local email adapter did not emit a contract magic link.\n${sanitizedLogs()}`);
+}
+
 function makeRequest(session, options = {}) {
   const headers = new Headers(options.headers || {});
   if (session?.cookies.length) headers.set("Cookie", session.cookies.join("; "));
@@ -63,7 +126,10 @@ function makeRequest(session, options = {}) {
 
 async function json(path, session, options = {}) {
   const response = await fetch(origin + "/api/v1" + path, makeRequest(session, options));
-  const body = response.status === 204 ? null : await response.json();
+  const body = response.status === 204 ||
+    !response.headers.get("content-type")?.includes("application/json")
+    ? null
+    : await response.json();
   return { response, body };
 }
 
@@ -155,6 +221,8 @@ try {
     "apply",
     "crushify-local",
     "--local",
+    "--persist-to",
+    persistDirectory,
   ], { cwd: root, stdio: "ignore" });
   await waitReady();
   const live = await json("/health/live", null);
@@ -373,11 +441,101 @@ try {
   const revokedMe = await json("/customers/me", first);
   assert.equal(revokedMe.response.status, 401);
 
-  console.log("Phase 2 local integration: passed (auth, D1, revision conflict, R2 upload/read/delete, preview bearer and expiry).");
+  const contractRequest = async (path, session, options = {}) => {
+    const headers = new Headers(options.headers ?? {});
+    if (session?.cookies.length) headers.set("Cookie", session.cookies.join("; "));
+    if (options.mutating) {
+      headers.set("Origin", origin);
+      if (session?.csrf) headers.set("X-CSRF-Token", session.csrf);
+    }
+    if (options.json !== undefined) {
+      headers.set("Content-Type", "application/json");
+      options = { ...options, body: JSON.stringify(options.json) };
+    }
+    if (options.token) headers.set("Authorization", `Bearer ${options.token}`);
+    const response = await fetch(origin + "/api/v1" + path, {
+      method: options.method ?? "GET",
+      headers,
+      body: options.body,
+    });
+    const body = response.status === 204 ||
+      !response.headers.get("content-type")?.includes("application/json")
+      ? null
+      : await response.json();
+    return { response, body };
+  };
+  logCursor = logs.length;
+  const contract = await runDatabaseContract({
+    request: contractRequest,
+    getMagicToken: waitForNextMagicToken,
+    label: "Cloudflare D1 + local R2",
+  });
+
+  const rollbackDesign = await contractRequest("/designs", contract.owner, {
+    method: "POST",
+    mutating: true,
+    json: { template_id: "our-universe", schema_version: 1 },
+  });
+  assert.equal(rollbackDesign.response.status, 201);
+  executeLocalD1(
+    "CREATE TRIGGER d1_contract_reject_revision BEFORE INSERT ON design_revisions " +
+    "WHEN NEW.revision = 2 BEGIN SELECT RAISE(ABORT, 'forced contract failure'); END",
+  );
+  const rejectedUpdate = await contractRequest(`/designs/${rollbackDesign.body.design_id}`, contract.owner, {
+    method: "PUT",
+    mutating: true,
+    json: {
+      schema_version: 1,
+      expected_revision: 1,
+      data: { ...rollbackDesign.body.data, sender: "Should roll back" },
+    },
+  });
+  assert.equal(rejectedUpdate.response.status, 500);
+  const unchangedAfterRollback = await contractRequest(
+    `/designs/${rollbackDesign.body.design_id}`,
+    contract.owner,
+  );
+  assert.equal(unchangedAfterRollback.response.status, 200);
+  assert.equal(unchangedAfterRollback.body.revision, 1);
+  assert.notEqual(unchangedAfterRollback.body.data.sender, "Should roll back");
+  executeLocalD1("DROP TRIGGER d1_contract_reject_revision");
+
+  await stopWorker();
+  executeLocalD1(
+    "CREATE TABLE d1_contract_unique (id TEXT PRIMARY KEY, value TEXT NOT NULL UNIQUE)",
+  );
+  executeLocalD1("INSERT INTO d1_contract_unique (id, value) VALUES ('one', 'same')");
+  assertD1Failure(
+    "INSERT INTO d1_contract_unique (id, value) VALUES ('two', 'same')",
+    /UNIQUE constraint failed/i,
+  );
+  executeLocalD1(
+    "CREATE TABLE d1_contract_fk (id TEXT PRIMARY KEY, customer_id TEXT REFERENCES customers(id))",
+  );
+  assertD1Failure(
+    "INSERT INTO d1_contract_fk (id, customer_id) VALUES ('orphan', 'missing-customer')",
+    /FOREIGN KEY constraint failed/i,
+  );
+
+  console.log("Phase 2 local integration: passed (legacy API regression, shared D1 API contract, D1 constraints, and batch rollback).");
 } catch (error) {
   console.error(error);
   console.error(sanitizedLogs());
   process.exitCode = 1;
 } finally {
-  child.kill();
+  await stopWorker();
+  if (process.platform === "win32") {
+    const cleanup = spawn(
+      process.execPath,
+      [
+        "-e",
+        "const fs=require('node:fs');setTimeout(()=>fs.rmSync(process.argv[1],{recursive:true,force:true}),3000)",
+        persistDirectory,
+      ],
+      { detached: true, stdio: "ignore", windowsHide: true },
+    );
+    cleanup.unref();
+  } else {
+    await rm(persistDirectory, { recursive: true, force: true });
+  }
 }

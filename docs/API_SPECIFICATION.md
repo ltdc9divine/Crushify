@@ -1,6 +1,6 @@
 # Crushify API Specification
 
-**Status:** proposed full-product contract. A local-only subset is implemented as described in "Current local implementation"; no production API is configured.
+**Status:** proposed full-product contract. A local-only Our Universe subset is implemented through the shared database contract and the Cloudflare D1 adapter. The Turso adapter is available for database work, but Vercel/Netlify HTTP adapters and production APIs are not configured.
 **Base path:** `/api/v1`. JSON over HTTPS. Public gift reads are separate from private customer APIs.
 
 ## 1. Common contract
@@ -41,7 +41,7 @@
 | `POST /custom-projects/{projectId}/revisions` | Owner | Request a revision against preview-ready work; enforce quote's included rounds/scope. |
 | `GET /g/{slug}` | Public | Render only a published, non-revoked revision with public media. |
 
-### Admin-only API (Cloudflare Access + application role)
+### Admin-only API (host identity gateway + application role; currently Cloudflare Access for the Worker)
 
 - `GET /admin/inquiries`, `GET /admin/projects/{id}`: review and queue work.
 - `POST /admin/projects/{id}/quotes`: create/issue a versioned quote; record scope and revision count.
@@ -109,6 +109,8 @@ No client field for `amount`, `currency` authority, `paid`, `customer_id`, `orde
 
 Keep the present static pages usable while progressively calling the API. Introduce a browser adapter interface (`loadDraft`, `saveDraft`, `uploadAsset`, `createPreview`, `createCheckout`, `publishStatus`) and retain current local-only behavior until each endpoint is ready. API and template schema versions must be explicit; see [TEMPLATE_ENGINE.md](TEMPLATE_ENGINE.md).
 
+The database adapter refactor does not change the existing Our Universe request/response contract. Cloudflare remains the current HTTP runtime until a separately tested Vercel development adapter is added.
+
 ## 7. Current local implementation (Phase 2)
 
 The following routes are implemented for the Our Universe pilot. Local integration tests use Wrangler D1/R2 emulation. The staging D1 has both migrations applied, but no staging Worker or R2 bucket is deployed yet:
@@ -132,3 +134,7 @@ The following routes are implemented for the Our Universe pilot. Local integrati
 | `DELETE /assets/{assetId}` | Owner + CSRF | Delete unreferenced private media. |
 
 `GET /previews/assets/{assetId}` serves media only with the preview bearer. Current local integration coverage includes authentication, owner isolation, body/schema limits, revision conflict, local R2 upload/read/delete, and preview access/expiry. Production mail delivery requires a configured provider. Catalog, order, checkout, payment, publication, customer-requested erasure orchestration, and admin routes remain unimplemented. See [SECURITY_PLAN.md](SECURITY_PLAN.md), [STAGING_DEPLOYMENT.md](STAGING_DEPLOYMENT.md), and [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for deployment gaps.
+
+### Database adapter compatibility
+
+The routes above call the shared `Database` interface and retain their existing request/response behavior. The same API contract runner exercises auth/session, design/revision conflict, preview, and asset ownership flows on local Wrangler D1 and local Turso/libSQL. The Cloudflare Worker is still the only deployed-style HTTP adapter and remains D1-only; selecting Turso is currently supported by the local adapter test harness, not by a Vercel/Netlify API runtime. See [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md) for the value, batch, and error-mapping contract.

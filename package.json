@@ -10,13 +10,18 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "db:apply:local": "wrangler d1 migrations apply crushify-local --local",
+    "db:migrate:turso": "node --experimental-strip-types scripts/migrate-turso.ts",
     "test:integration": "node tests/integration.mjs",
     "db:apply:staging": "wrangler d1 migrations apply crushify-staging-db --remote --config wrangler.staging.jsonc",
     "deploy:staging": "wrangler deploy --config wrangler.staging.jsonc"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261104.1",
+    "@types/node": "^22.20.5",
     "typescript": "^7.0.2",
     "wrangler": "^4.157.0"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0"
   }
 }

@@ -1,6 +1,6 @@
 # Crushify Security Plan
 
-**Status:** target controls. Phase 2 implements a limited local-only subset for Our Universe (hashed expiring login/preview/upload tokens, owner-scoped draft/media access, CSRF checks, bounded payloads and private media proxy); this is not a security certification or production deployment. Review with a qualified security/privacy professional before launch.
+**Status:** target controls. The local-only Our Universe implementation provides hashed expiring login/preview/upload tokens, owner-scoped draft/media access, CSRF checks, bounded payloads and a private media proxy. A Turso/libSQL adapter and guarded migration CLI are implemented and tested locally only; this is not a security certification or production deployment. Review with a qualified security/privacy professional before launch.
 
 ## 1. Threat model and assets
 
@@ -12,7 +12,7 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 - Enforce application roles (`support`, `designer`, `finance`, `admin`) and least privilege; Access authentication alone does not replace authorization.
 - Step-up MFA/dual review for refunds, manual payment reconciliation, deletion, role changes and unpublishing.
 - Short-lived secure sessions, revocation, audit all privileged actions; no shared accounts.
-- Secrets only in environment-specific Cloudflare secret bindings; rotate/revoke and never include in GitHub/browser/logs.
+- Secrets only in environment-specific server-side secret stores (currently none are configured for Vercel, Netlify, Turso, Cloudinary or SePay); rotate/revoke and never include in GitHub/browser/logs.
 
 ## 3. Customer authentication and authorization
 
@@ -80,3 +80,12 @@ IDOR across every entity; preview expiry/revocation; public slug collision; XSS 
 - A dedicated staging D1 database exists in APAC with migrations `0001` and `0002` applied and no customer data. Remote `PRAGMA foreign_key_check` returned no violations.
 - `wrangler.staging.jsonc` uses the staging-only Worker/D1/R2 names; the Worker is not deployed. R2 is not enabled on the Cloudflare account, so no bucket has been created and no cloud media test has run.
 - No email API key or verified sender identity is configured. The staging checklist is in [STAGING_DEPLOYMENT.md](STAGING_DEPLOYMENT.md). No production resources have been used.
+
+## 12. Database migration stage
+
+- The D1 adapter remains the active Cloudflare Worker database path. The Turso adapter checks/enables foreign-key enforcement and uses parameterized libSQL statements and atomic batches.
+- The Turso migration CLI validates migration checksums, applies migrations transactionally, and runs `PRAGMA foreign_key_check`. It refuses an existing application schema without a migration ledger.
+- Tests use isolated local Wrangler D1 and local Turso/libSQL databases. The shared API contract covers authentication, design/revision, preview, and asset ownership flows; D1 verifies foreign keys, uniqueness, and rollback after a forced revision-write failure, while Turso adapter tests cover constraints, atomic batch rollback, `RETURNING`, result metadata, and parameter normalization.
+- No Turso URL/token was supplied; no remote Turso connection, D1 data export/import, or remote schema change has occurred. The D1 source remains the active Worker database and is not deleted or rewritten.
+- `.env.example` contains placeholders only. Do not copy production credentials into checked-in files; configure secrets server-side for each environment.
+- A future data transfer must use an encrypted export outside the repository, a reviewed data-classification/transform plan, an isolated destination, row-count and foreign-key reconciliation, and a restore rehearsal. Never copy session, login-token, rate-limit, upload-capability, or preview-capability state without an explicit security/retention decision. See [HOSTING_MIGRATION.md](HOSTING_MIGRATION.md).

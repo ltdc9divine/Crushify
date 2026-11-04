@@ -1,13 +1,13 @@
 # Crushify Implementation Roadmap
 
-**Status:** proposed sequence. Local Sprint 1 foundation is in place; Phase 2 authentication, Our Universe draft API, private media and preview are implemented and integration-tested against local D1/R2 emulation. Phase 3 staging D1 has been created and migrated; R2 is not enabled on the account and no staging Worker has been deployed. Estimates assume one experienced full-stack engineer with product/design decisions available. Production capability is not configured.
+**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 Our Universe foundation remains active and is integration-tested locally. A shared database contract, D1 adapter, Turso/libSQL adapter and guarded migration CLI are implemented and tested locally; no remote Turso migration or data transfer has occurred. Estimates assume one experienced full-stack engineer with product/design decisions available. Production capability is not configured.
 
 ## 1. Priority before launch
 
 1. Resolve policy/business decisions: market/legal entity, approved VND pricing, refunds/cancellation, privacy/retention, terms, publication duration, custom-service scope and support.
 2. Fix product claims and paths: homepage prices/CTA currently are provisional and not connected to checkout; make this explicit until live.
-3. Establish Cloudflare/GitHub production environments, deployment ownership, domain and recovery operations.
-4. Implement security foundation, identity, schema migrations and tests before storing real customer data.
+3. Keep the existing Cloudflare backend available for rollback; verify migration/backup plans before moving any remote data.
+4. Implement the Turso database adapter/migrations, then host adapters and storage adapters as separate tested stages before storing real customer data there.
 5. Implement durable drafts/assets/recipient delivery before checkout; then payment and fulfillment.
 6. Add custom-service workflow atop shared customer/order/payment/asset services.
 
@@ -28,6 +28,8 @@
 - Deliver: staging-only Worker/static homepage, migration/rollback procedure, automated smoke test.
 
 **Progress:** the repository now has a TypeScript Worker skeleton, local Wrangler/D1 configuration, initial numbered schema migration, liveness/readiness routes and unit checks. Staging/production resources, secrets, Cloudflare Access, CI and remote smoke deployment are not configured; Sprint 1 is in progress, not complete.
+
+**Database migration progress:** D1-specific code is now behind a small database interface; the Cloudflare D1 adapter preserves the existing runtime, while the Turso/libSQL adapter and checksum-checked migration runner reuse the immutable SQLite migrations. Local libSQL tests cover repeat application, checksum drift, foreign keys and rejection of an untracked existing schema. No remote resource has been contacted or changed.
 
 ### Sprint 2 — Identity and durable drafts (1–2 weeks)
 
@@ -74,7 +76,7 @@ Foundational code through a staging self-service flow is roughly 6–10 engineer
 
 - Unit and integration tests for validation, owner authorization and state transitions.
 - Browser test for desktop/mobile and at least one reduced-motion path for all five renderers.
-- D1 migration is forward-only, reviewed, checksummed and has recovery instructions.
+- Database migration is forward-only, checksummed and has recovery instructions; validate foreign keys and restore from backup before any remote migration.
 - No secret in source or build artifacts; staging/production resources are distinct.
 - Logs/alerts, documented support behavior, cost metric and rollback plan exist.
 - No payment or publish state depends on client-provided success.
@@ -101,3 +103,9 @@ Indicative Cloudflare list-price snapshot checked 2026-11-04; prices/limits can 
 - Budget monitoring must alert on Worker invocations/CPU, D1 reads/writes/storage, R2 stored bytes/operations, email volume, payment fees and abnormal upload traffic. Keep per-account/customer quotas to bound abuse.
 
 Official references (verify before procurement): [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/), [R2 pricing](https://developers.cloudflare.com/r2/pricing/), [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/). Pricing snapshot is indicative, not a quote or total monthly forecast.
+
+## 8. Database abstraction phase 1B
+
+Business services now depend on the provider-neutral database interface; D1 types remain at the Cloudflare Worker boundary and in the D1 adapter. Local test evidence covers the shared API flows on D1 and Turso/libSQL plus Turso adapter constraints, atomic rollback, result metadata, and parameter handling. The Worker still runs on D1; Turso is not connected to a Vercel/Netlify runtime.
+
+**Still required before any data migration or host cutover:** implement and review a data importer, rehearse encrypted backup/restore, validate a non-production target with real export/import, add the target host's HTTP adapter, and perform separately authorized remote checks. No remote database has been connected, and no data has been migrated. See [HOSTING_MIGRATION.md](HOSTING_MIGRATION.md) for the gated runbook.

@@ -1,12 +1,12 @@
 # Payment and Entitlement Flow
 
-**Status:** design only. No live gateway, checkout, or payment status mutation has been implemented.
-**Provider:** intentionally undecided; select after business-country, settlement, currency, refund and legal review.
+**Status:** design only. No gateway, checkout, webhook, or payment status mutation has been implemented.
+**Requested provider:** SePay is the intended future integration, subject to account, settlement, currency, refund, security and legal checks. No test or live credentials are configured.
 
 ## 1. Authority model
 
 - Browser may request a checkout for a catalog SKU/design revision; it cannot set price, currency, discount amount, entitlement, `PAID`, or fulfillment state.
-- Worker loads current enabled SKU/quote, validates ownership and eligibility, computes totals in integer minor units and creates a local order/payment attempt.
+- The server-side API loads the current enabled SKU/quote, validates ownership and eligibility, computes totals in integer minor units and creates a local order/payment attempt.
 - Provider-hosted checkout/redirect is preferred for the initial launch to reduce handling of card data. Crushify must not collect/store card PAN/CVV.
 - Only a verified provider webhook (or documented administrator reconciliation with evidence and elevated access) can mark a payment successful.
 - The browser return URL is UX only. It displays “processing/confirmed” based on a server read; never fulfills directly from a query parameter or client callback.
@@ -46,8 +46,8 @@ If price changes between draft and checkout, show the authoritative price before
 - Verify signature over exact raw body, timestamp/nonce rules and configured endpoint secret.
 - Insert unique `(provider, event_id)` before processing. Duplicate deliveries return 2xx after recording/confirming prior outcome.
 - Match provider transaction and merchant reference to expected local payment; compare exact amount, currency, merchant account, environment and order state.
-- Apply transition in a D1 transaction where possible; use conditional updates so two concurrent webhooks cannot fulfill twice.
-- Fulfillment/publication is a separate idempotent operation, retryable after a crash. Never keep a D1 transaction open while calling the provider, R2 or email API.
+- Apply transitions in a database transaction where possible; use conditional updates so two concurrent webhooks cannot fulfill twice.
+- Fulfillment/publication is a separate idempotent operation, retryable after a crash. Never keep a database transaction open while calling the provider, storage service or email API.
 - Record only necessary, redacted webhook metadata and payload hash; no card/secret data.
 - Provide reconciliation for missed/out-of-order webhooks using provider API and audited admin action.
 
@@ -72,7 +72,7 @@ The workflow and guards are detailed in [CUSTOM_DESIGN_WORKFLOW.md](CUSTOM_DESIG
 ## 7. Launch checklist
 
 - Contract test provider sandbox signatures, replay, duplicate/out-of-order events, amount mismatch, timeout, refund and webhook retries.
-- Configure separate test/live keys and webhook secrets per environment; secrets only in Cloudflare secret store.
+- Configure separate test/live keys and webhook secrets per environment; keep them only in the selected host's server-side secret store.
 - Verify provider business onboarding, VND settlement support, fees, payout delays, dispute/refund flow, invoice/tax rules and terms.
 - Build support runbook for “charged, not published”, “pending”, refund and custom deposit/balance cases.
 - Do not enable homepage prices or checkout CTAs as purchasable until catalog, terms, support and reconciliation are approved.

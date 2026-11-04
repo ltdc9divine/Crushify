@@ -27,12 +27,11 @@ async function validateAssetReferences(
   return result.results.length === ids.length;
 }
 
-function validateCreatePayload(value: unknown): {
-  templateId?: string;
-  schemaVersion?: number;
-  data?: unknown;
-  error?: string;
-} {
+type CreatePayload =
+  | { error: string }
+  | { templateId: string; schemaVersion: number; data: unknown };
+
+function validateCreatePayload(value: unknown): CreatePayload {
   if (!isRecord(value)) return { error: "Request body must be an object" };
   const allowed = new Set(["template_id", "schema_version", "data"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return { error: "Unsupported request field" };
@@ -190,7 +189,7 @@ async function createDesign(
   const parsed = await readJson(request, requestId);
   if (parsed.response) return parsed.response;
   const payload = validateCreatePayload(parsed.value);
-  if (payload.error) return apiError(requestId, 422, "VALIDATION_ERROR", payload.error);
+  if ("error" in payload) return apiError(requestId, 422, "VALIDATION_ERROR", payload.error);
 
   const template = await env.DB.prepare(
     `SELECT tv.default_data_json

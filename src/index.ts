@@ -1,8 +1,15 @@
 import { handleSessionRoutes } from "./auth.ts";
 import { handleAssetRoutes } from "./assets.ts";
 import { handleDesignRoutes, handlePreviewRoutes } from "./designs.ts";
+import { D1DatabaseAdapter } from "./database/d1.ts";
 import { apiError, jsonResponse } from "./http.ts";
 import type { Env } from "./types.ts";
+
+interface CloudflareEnv extends Omit<Env, "DB" | "ASSETS"> {
+  ASSETS: Fetcher;
+  DB: D1Database;
+  DATABASE_PROVIDER: "d1";
+}
 
 export async function handleApiRequest(
   request: Request,
@@ -34,7 +41,7 @@ export async function handleApiRequest(
       try {
         await env.DB.prepare("SELECT 1").first();
       } catch (error) {
-        console.error("D1 readiness check failed", { request_id: requestId, error });
+        console.error("Database readiness check failed", { request_id: requestId, error });
         return apiError(requestId, 503, "DEPENDENCY_UNAVAILABLE", "Service unavailable");
       }
       return jsonResponse(
@@ -60,9 +67,14 @@ export async function handleApiRequest(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: CloudflareEnv): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/")) return handleApiRequest(request, env);
+    if (url.pathname.startsWith("/api/")) {
+      if (env.DATABASE_PROVIDER !== "d1") {
+        return apiError(crypto.randomUUID(), 500, "DATABASE_CONFIGURATION_ERROR", "Database provider is not configured for this runtime");
+      }
+      return handleApiRequest(request, { ...env, DB: new D1DatabaseAdapter(env.DB) });
+    }
     return env.ASSETS.fetch(request);
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<CloudflareEnv>;

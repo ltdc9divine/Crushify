@@ -1,7 +1,10 @@
+import type { Database } from "./database.ts";
+
 export interface Env {
-  ASSETS: Fetcher;
-  DB: D1Database;
+  ASSETS?: Fetcher;
+  DB: Database;
   MEDIA?: R2Bucket;
+  DATABASE_PROVIDER?: "d1" | "turso";
   ENVIRONMENT?: "local" | "staging" | "production";
   MAIL_PROVIDER?: "resend";
   MAIL_API_KEY?: string;

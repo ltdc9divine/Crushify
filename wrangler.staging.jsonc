@@ -25,6 +25,7 @@
     }
   ],
   "vars": {
+    "DATABASE_PROVIDER": "d1",
     "ENVIRONMENT": "staging",
     "MAIL_PROVIDER": "resend"
   }

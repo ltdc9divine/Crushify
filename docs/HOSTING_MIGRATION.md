@@ -1,0 +1,145 @@
+# Hosting and Backend Migration
+
+## Status and safety boundary
+
+This is a staged migration guide, not a production deployment record.
+
+- The current API is still the Cloudflare Worker using D1 and its existing media binding.
+- The shared SQL contract and Turso/libSQL adapter are implemented. The same API contract tests run against local Wrangler D1 and an ephemeral local Turso/libSQL file database; the migration CLI is tested locally.
+- No remote Turso database has been connected, and no existing D1 data has been exported or imported.
+- Vercel and Netlify API adapters, Cloudinary storage, and SePay payments are not implemented. Do not enable checkout or publication.
+- The local rollback branch `backup/cloudflare-pre-turso-20261104` points to the pre-migration commit. It has not been pushed.
+
+Do not run a remote migration until the destination identity, current D1 data state, export/import plan, backup, restore test, and migration window are explicitly verified. The CLI intentionally refuses untracked existing database schemas.
+
+## Local development
+
+Requirements: Node.js 22.6 or newer and npm.
+
+```powershell
+npm ci
+npm run typecheck
+npm test
+```
+
+The existing Cloudflare app remains locally runnable with Wrangler:
+
+```powershell
+Copy-Item .dev.vars.example .dev.vars
+npm run db:apply:local
+npm run dev
+```
+
+The Turso adapter and migration CLI can be exercised against an isolated local SQLite file; do not use a production URL for tests:
+
+```powershell
+$env:TURSO_DATABASE_URL = "file:crushify-local.db"
+$env:TURSO_AUTH_TOKEN = ""
+npm run db:migrate:turso
+```
+
+The command runs the numbered SQL files in `migrations/`, verifies SHA-256 migration checksums, applies each migration atomically, and runs a foreign-key check. Re-running it against the same schema is a no-op. It fails if application tables exist without a migration ledger or if an applied migration differs from its recorded checksum. Local database files are ignored by Git.
+
+`.env.example` is a placeholder inventory only. The migration CLI reads process environment variables; it does not automatically load `.env`.
+
+## Vercel Development
+
+Vercel Hobby is intended only for personal development, previews, and test data—not commercial order processing.
+
+1. Connect the repository to Vercel and keep the existing static-site output settings for the frontend.
+2. No Vercel API Function adapter exists yet, so the current Cloudflare API is not transparently available through a Vercel deployment.
+3. Do not configure production customer data or live payment credentials in Vercel.
+4. When a Vercel API adapter is implemented, add only development Turso credentials to Vercel's server-side Development environment. Never expose them through `NEXT_PUBLIC_*`, `VITE_*`, or browser code.
+5. Keep test database credentials and webhook secrets separate from any later production candidate.
+
+## Turso/libSQL configuration
+
+Required server-side variables:
+
+- `TURSO_DATABASE_URL`
+- `TURSO_AUTH_TOKEN` (omit only for an isolated local `file:` database)
+
+The migration command is:
+
+```powershell
+npm run db:migrate:turso
+```
+
+Before using a remote database:
+
+1. Confirm the exact Turso organization/database and environment with the account owner.
+2. Confirm whether it is empty. Do not infer this from repository config.
+3. Back up the source and destination, verify the backup, and rehearse restoring into a separate test database.
+4. Export/import existing D1 records only through a separately reviewed data migration; this CLI migrates schema only.
+5. Apply migrations to a fresh or verified empty target, run `PRAGMA foreign_key_check`, and compare table/index/constraint inventories.
+6. Store credentials in the selected host's secret manager and limit token scope/rotation. No remote credential or database has been provided for this stage.
+
+For backups, use the currently supported Turso export/backup workflow for the account and version in use, store encrypted copies outside the repository, record retention/restore ownership, and perform a restore drill before launch. The repository does not yet automate or validate remote backup/restore.
+
+## D1 data export/import procedure (not executed)
+
+The migration command above changes schema only. There is no reviewed D1-to-Turso data importer, and no data migration has been run. Do not treat a successful schema migration or an empty foreign-key check as evidence that customer data was copied.
+
+Before any real transfer, obtain explicit authorization and use a separately verified staging target:
+
+1. Inventory the exact source D1 database, destination Turso database, owners, data classifications, and cutover/rollback window. Confirm both identities without inferring that a database is empty.
+2. Decide which records are durable business data versus ephemeral/security capabilities. In particular, do not transfer sessions, login tokens, rate-limit state, upload capabilities, or preview tokens unless a reviewed requirement explicitly calls for it. Preserve design, customer, revision, and asset metadata only according to the approved retention and storage plan.
+3. Freeze writes for the rehearsal (and for a later approved cutover), take and verify an encrypted source backup, and record its checksum and restore owner. Keep all exports outside the repository.
+4. For a future approved remote export, review the exact Wrangler database name and use an explicit remote flag and output path; the command shape is:
+
+   ```powershell
+   npx wrangler d1 export <verified-d1-name> --remote --output "$env:TEMP\crushify-d1-export.sql"
+   ```
+
+   For local-only practice, substitute `--local` and a dedicated local D1 database. `wrangler d1 export --help` documents `--table`, `--no-schema`, and `--no-data`; select the precise table set and data-only/schema-only mode only after the migration plan is reviewed. Do not run the remote form as part of this phase.
+5. Apply the numbered schema migrations to a fresh, isolated Turso target. Reconcile the export against that schema and transform it using a separately reviewed importer; do not blindly execute the D1 dump or re-import `schema_migrations`. The importer must use parameterized writes, preserve foreign-key ordering and IDs, report rejected rows, and handle sensitive/ephemeral tables as approved.
+6. Compare per-table counts and representative checksums/relationships, verify unique constraints and `PRAGMA foreign_key_check`, test application reads/writes against the target, and rehearse restoring both source and destination backups. Investigate every mismatch before approving cutover.
+7. Keep D1 authoritative and untouched until an approved cutover. Rollback means pausing writes and restoring/routing to the verified source; never attempt an unreviewed reverse import or delete either database.
+
+**Current stage result:** only schema migrations and tests against disposable local databases have run. There is no importer, no remote export, no remote Turso connection, and no data movement.
+
+## Database contract test results
+
+The same API contract runner is used for local D1 integration and the local Turso/libSQL file test. It checks magic-link/session lifecycle, replay rejection, customer ownership, design create/read/update/reload, stale revision `409`, preview bearer access, asset metadata/storage/read/delete, and asset ownership. D1 integration additionally verifies unique/foreign-key rejection and uses a forced revision-write failure to verify that an update batch rolls back. Local Turso adapter tests also verify migrations/checksums, foreign-key and unique constraints, atomic batch rollback, `RETURNING`, insert metadata, and normalized/null parameters. Run `npm test` for the unit/adapter and Turso local-file tests; run `npm run test:integration` for D1/R2, the shared API contract, and D1 constraint/rollback coverage. No remote service is contacted by either test.
+
+## Netlify production candidate
+
+Netlify is only a candidate, not an approved production host. Before configuring it:
+
+1. Verify current Netlify plan terms and account eligibility for the intended commercial template sales model.
+2. Implement and test a Netlify Functions adapter that calls the shared API/business layer; do not duplicate business logic.
+3. Configure static routes and function routing without changing template-owned HTML/CSS/JavaScript.
+4. Add only production-candidate server-side Turso/Cloudinary/SePay secrets after separate security review. Do not activate live payments or publish customer designs as part of this database stage.
+5. Confirm logs, limits, regional/data terms, rate limits, backups, restore, monitoring, and rollback ownership.
+
+No `netlify.toml` or Netlify Function is added in this phase because routing and API adapters have not been implemented.
+
+## Cloudinary
+
+Not implemented. Future server-side variables are listed in `.env.example`:
+
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
+
+The planned flow is an authenticated backend-issued signed upload with strict MIME, size, and asset-ownership checks. Never expose the API secret or use unsigned uploads for private customer media. No Cloudinary account, upload, or asset migration has been configured.
+
+## SePay
+
+Not implemented. The requested future server-side variables are:
+
+- `SEPAY_WEBHOOK_SECRET`
+- `SEPAY_BANK_CODE`
+- `SEPAY_BANK_ACCOUNT`
+- `SEPAY_ACCOUNT_NAME`
+
+Before integration, verify provider account and settlement eligibility, webhook signature/timestamp documentation, test-vs-live separation, reconciliation, refunds, and business/legal requirements. Future webhook verification must authenticate the raw request body before parsing, prevent replay and duplicate transaction use, compare the actual receiving account/amount/reference, and route ambiguous transactions to manual review. No checkout, QR payment, webhook, or paid-state transition is active.
+
+## Rollback checklist
+
+1. Keep Cloudflare Worker/D1/R2 configuration and migrations intact until a deliberate cutover is approved.
+2. The current Worker continues to use the D1 adapter; no runtime switch to Turso has been made.
+3. If a later API-adapter release fails, route traffic back to the last verified Cloudflare Worker release. Do not delete or overwrite either database.
+4. If data has been written to both systems, pause writes and reconcile from a verified backup before choosing an authoritative copy. Do not perform an automatic reverse migration.
+5. Preserve migration logs/checksums and record the reason, operator, and restore point.
+6. Re-enable checkout or publication only after a separate release review; neither exists in the current implementation.
