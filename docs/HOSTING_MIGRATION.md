@@ -4,10 +4,10 @@
 
 This is a staged migration guide, not a production deployment record.
 
-- The current API is still the Cloudflare Worker using D1 and its existing media binding.
+- The current API is still the Cloudflare Worker using D1. The Worker now has selectable R2 and Cloudinary storage adapters; local development and staging config explicitly select R2.
 - The shared SQL contract and Turso/libSQL adapter are implemented. The same API contract tests run against local Wrangler D1 and an ephemeral local Turso/libSQL file database; the migration CLI is tested locally.
 - No remote Turso database has been connected, and no existing D1 data has been exported or imported.
-- Vercel and Netlify API adapters, Cloudinary storage, and SePay payments are not implemented. Do not enable checkout or publication.
+- Vercel and Netlify API adapters and SePay payments are not implemented. The Cloudinary adapter is implemented but has only mock-based tests; no Cloudinary account, credentials, upload, or real-account compatibility check is configured. Do not enable checkout or publication.
 - The local rollback branch `backup/cloudflare-pre-turso-20261104` points to the pre-migration commit. It has not been pushed.
 
 Do not run a remote migration until the destination identity, current D1 data state, export/import plan, backup, restore test, and migration window are explicitly verified. The CLI intentionally refuses untracked existing database schemas.
@@ -116,13 +116,19 @@ No `netlify.toml` or Netlify Function is added in this phase because routing and
 
 ## Cloudinary
 
-Not implemented. Future server-side variables are listed in `.env.example`:
+The server-side adapter is implemented for the current Cloudflare Worker. It uses signed authenticated image uploads, server-generated private IDs, bounded short-lived private downloads, and authenticated deletion. The API secret is never returned to the browser. The existing Worker routes still proxy image bytes and retain their current API response shape.
+
+To select Cloudinary for an isolated test environment, set these server-side values (never `VITE_*` or other browser-exposed variables):
 
 - `CLOUDINARY_CLOUD_NAME`
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
 
-The planned flow is an authenticated backend-issued signed upload with strict MIME, size, and asset-ownership checks. Never expose the API secret or use unsigned uploads for private customer media. No Cloudinary account, upload, or asset migration has been configured.
+Set `STORAGE_PROVIDER=cloudinary` in the Worker environment and add the three credentials through the host's secret manager. The Worker fails closed if a value is missing and does not fall back to R2. The `.env.example` is a placeholder for server-side use; `.dev.vars.example` and both Wrangler configs select `STORAGE_PROVIDER=r2` by default. Local Cloudinary adapter tests use mocked HTTP only. No account credentials were supplied, and no Cloudinary request, real upload, asset migration, or deployment has been run.
+
+Do not switch an environment containing R2-backed asset rows by changing only the variable: storage providers do not share binaries. Plan and test a separate inventory/copy/verification/cutover procedure first. R2 remains available as the configured local/staging provider and rollback adapter; reverting after Cloudinary writes also requires transferring or otherwise reconciling those binaries. No implicit fallback is used.
+
+Cloudinary currently advertises 25 monthly credits on its Free plan; credits are shared across managed storage, image bandwidth and transformations (the exact conversion and feature availability depend on current plan terms). This is not a guaranteed quota or commercial eligibility statement. Check the [current Cloudinary pricing and plan terms](https://cloudinary.com/pricing), authenticated-asset delivery features, account limits, regional/privacy terms, retention, and intended commercial use directly with Cloudinary before selecting it for production. Track credit usage and set upload quotas/alerts.
 
 ## SePay
 
@@ -139,7 +145,8 @@ Before integration, verify provider account and settlement eligibility, webhook 
 
 1. Keep Cloudflare Worker/D1/R2 configuration and migrations intact until a deliberate cutover is approved.
 2. The current Worker continues to use the D1 adapter; no runtime switch to Turso has been made.
-3. If a later API-adapter release fails, route traffic back to the last verified Cloudflare Worker release. Do not delete or overwrite either database.
-4. If data has been written to both systems, pause writes and reconcile from a verified backup before choosing an authoritative copy. Do not perform an automatic reverse migration.
-5. Preserve migration logs/checksums and record the reason, operator, and restore point.
-6. Re-enable checkout or publication only after a separate release review; neither exists in the current implementation.
+3. Keep `STORAGE_PROVIDER=r2` until a reviewed Cloudinary account test and an explicit asset migration/cutover plan are complete. Changing this variable alone is not rollback or migration.
+4. If a later API-adapter release fails, route traffic back to the last verified Cloudflare Worker release. Do not delete or overwrite either database or storage.
+5. If data has been written to both systems, pause writes and reconcile from a verified backup before choosing an authoritative copy. Do not perform an automatic reverse migration.
+6. Preserve migration logs/checksums and record the reason, operator, and restore point.
+7. Re-enable checkout or publication only after a separate release review; neither exists in the current implementation.

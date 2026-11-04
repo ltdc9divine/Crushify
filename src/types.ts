@@ -1,10 +1,16 @@
 import type { Database } from "./database.ts";
+import type { Storage } from "./storage.ts";
 
 export interface Env {
   ASSETS?: Fetcher;
   DB: Database;
+  STORAGE?: Storage;
   MEDIA?: R2Bucket;
   DATABASE_PROVIDER?: "d1" | "turso";
+  STORAGE_PROVIDER?: "r2" | "cloudinary";
+  CLOUDINARY_CLOUD_NAME?: string;
+  CLOUDINARY_API_KEY?: string;
+  CLOUDINARY_API_SECRET?: string;
   ENVIRONMENT?: "local" | "staging" | "production";
   MAIL_PROVIDER?: "resend";
   MAIL_API_KEY?: string;

@@ -471,6 +471,40 @@ try {
     label: "Cloudflare D1 + local R2",
   });
 
+  const assetFailureDesign = await contractRequest("/designs", contract.owner, {
+    method: "POST",
+    mutating: true,
+    json: { template_id: "our-universe", schema_version: 1 },
+  });
+  assert.equal(assetFailureDesign.response.status, 201);
+  executeLocalD1(
+    "CREATE TRIGGER d1_contract_reject_asset_metadata BEFORE UPDATE OF sha256 ON assets " +
+    "WHEN NEW.status = 'QUARANTINED' BEGIN SELECT RAISE(ABORT, 'forced asset metadata failure'); END",
+  );
+  const failedUpload = await uploadImage(contract.owner, assetFailureDesign.body.design_id, makePng());
+  assert.equal(failedUpload.uploaded.status, 502);
+  const inaccessibleFailedUpload = await contractRequest(
+    `/assets/${failedUpload.grant.asset_id}`,
+    contract.owner,
+  );
+  assert.equal(inaccessibleFailedUpload.response.status, 404);
+  executeLocalD1("DROP TRIGGER d1_contract_reject_asset_metadata");
+  const uploadRetry = await fetch(origin + failedUpload.grant.upload_url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${failedUpload.grant.upload_token}`,
+      "Content-Type": "image/png",
+    },
+    body: makePng(),
+  });
+  assert.equal(uploadRetry.status, 204, "failed DB write should clean binary and release the one-time upload token");
+  const completedRetry = await contractRequest(
+    `/assets/${failedUpload.grant.asset_id}/complete`,
+    contract.owner,
+    { method: "POST", mutating: true },
+  );
+  assert.equal(completedRetry.response.status, 200);
+
   const rollbackDesign = await contractRequest("/designs", contract.owner, {
     method: "POST",
     mutating: true,

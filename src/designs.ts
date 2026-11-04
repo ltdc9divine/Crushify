@@ -139,7 +139,7 @@ async function deleteDesign(
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
-  if (!env.MEDIA) return apiError(requestId, 503, "MEDIA_UNAVAILABLE", "Private media storage is unavailable");
+  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
 
   const ownerId = required.session!.customerId;
   const now = nowIso();
@@ -155,7 +155,7 @@ async function deleteDesign(
     "SELECT id, object_key FROM assets WHERE design_id = ? AND customer_id = ? AND status != 'DELETED'",
   ).bind(designId, ownerId).all<{ id: string; object_key: string }>();
   try {
-    for (const asset of assets.results) await env.MEDIA.delete(asset.object_key);
+    for (const asset of assets.results) await env.STORAGE.delete(asset.object_key);
   } catch (error) {
     console.error("Design media deletion failed", { request_id: requestId, design_id: designId, error });
     return apiError(requestId, 503, "DELETION_PENDING", "Design deletion will be retried");
@@ -380,7 +380,7 @@ export async function serveAsset(
   customerId: string,
   designId: string,
 ): Promise<Response> {
-  if (!env.MEDIA) return apiError(requestId, 503, "MEDIA_UNAVAILABLE", "Private media storage is unavailable");
+  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
   const asset = await env.DB.prepare(
     `SELECT object_key, media_type, byte_size FROM assets
      WHERE id = ? AND customer_id = ? AND design_id = ? AND status = 'READY'`,
@@ -390,8 +390,9 @@ export async function serveAsset(
     byte_size: number;
   }>();
   if (!asset) return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
-  const object = await env.MEDIA.get(asset.object_key);
-  if (!object || object.size !== asset.byte_size) {
+  const object = await env.STORAGE.get(asset.object_key);
+  if (!object || object.size !== asset.byte_size || object.contentType !== asset.media_type) {
+    await object?.body?.cancel();
     return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
   }
   return new Response(object.body, {

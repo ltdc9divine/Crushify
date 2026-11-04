@@ -11,7 +11,8 @@
     "not_found_handling": "none"
   },
   "vars": {
-    "DATABASE_PROVIDER": "d1"
+    "DATABASE_PROVIDER": "d1",
+    "STORAGE_PROVIDER": "r2"
   },
   "d1_databases": [
     {

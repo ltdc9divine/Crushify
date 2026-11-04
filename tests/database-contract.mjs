@@ -32,7 +32,7 @@ function makePng() {
   ]);
 }
 
-export async function runDatabaseContract({ request, getMagicToken, label }) {
+export async function runDatabaseContract({ request, getMagicToken, label, beforeAssetDelete }) {
   async function signIn(email) {
     const requested = await request("/customers/session", null, {
       method: "POST",
@@ -179,11 +179,21 @@ export async function runDatabaseContract({ request, getMagicToken, label }) {
     },
   });
   assert.equal(detached.response.status, 200, `${label}: detach asset`);
+  if (beforeAssetDelete) await beforeAssetDelete(grant.body.asset_id);
   const deleted = await request(`/assets/${grant.body.asset_id}`, owner, {
     method: "DELETE",
     mutating: true,
   });
-  assert.equal(deleted.response.status, 200, `${label}: delete asset metadata`);
+  if (beforeAssetDelete) {
+    assert.equal(deleted.response.status, 503, `${label}: preserve metadata on binary-delete failure`);
+    const retriedDelete = await request(`/assets/${grant.body.asset_id}`, owner, {
+      method: "DELETE",
+      mutating: true,
+    });
+    assert.equal(retriedDelete.response.status, 200, `${label}: retry binary and metadata deletion`);
+  } else {
+    assert.equal(deleted.response.status, 200, `${label}: delete asset metadata`);
+  }
   const deletedAssetRead = await request(`/assets/${grant.body.asset_id}`, owner);
   assert.equal(deletedAssetRead.response.status, 404, `${label}: deleted asset is not readable`);
 

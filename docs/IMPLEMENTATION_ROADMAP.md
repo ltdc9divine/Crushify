@@ -1,13 +1,13 @@
 # Crushify Implementation Roadmap
 
-**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 Our Universe foundation remains active and is integration-tested locally. A shared database contract, D1 adapter, Turso/libSQL adapter and guarded migration CLI are implemented and tested locally; no remote Turso migration or data transfer has occurred. Estimates assume one experienced full-stack engineer with product/design decisions available. Production capability is not configured.
+**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 Our Universe foundation remains active and is integration-tested locally. A shared database contract, D1 adapter, Turso/libSQL adapter, guarded migration CLI, and selectable R2/Cloudinary storage adapters are implemented and tested locally (Cloudinary adapter tests use mocks only); no remote Turso migration, Cloudinary account test, or data transfer has occurred. Estimates assume one experienced full-stack engineer with product/design decisions available. Production capability is not configured.
 
 ## 1. Priority before launch
 
 1. Resolve policy/business decisions: market/legal entity, approved VND pricing, refunds/cancellation, privacy/retention, terms, publication duration, custom-service scope and support.
 2. Fix product claims and paths: homepage prices/CTA currently are provisional and not connected to checkout; make this explicit until live.
 3. Keep the existing Cloudflare backend available for rollback; verify migration/backup plans before moving any remote data.
-4. Implement the Turso database adapter/migrations, then host adapters and storage adapters as separate tested stages before storing real customer data there.
+4. Complete the tested Turso database adapter/migrations, then implement host adapters and rehearse storage-provider cutover as separate stages before storing real customer data there.
 5. Implement durable drafts/assets/recipient delivery before checkout; then payment and fulfillment.
 6. Add custom-service workflow atop shared customer/order/payment/asset services.
 
@@ -41,7 +41,8 @@
 ### Sprint 3 — Assets and private preview (1–2 weeks)
 
 - Local Our Universe upload authorization/finalization, PNG/JPEG checks, private R2-compatible access/deletion, and expiring preview tokens are implemented and integration-tested.
-- Still needed: production bucket, image decode/normalization and scanning policy, quotas/cleanup operations, adaptation of other photo templates, security review, renderer version pinning, and production device/browser QA.
+- A provider-neutral storage contract and R2/Cloudinary adapters are implemented. The current Worker defaults explicitly to R2; Cloudinary is signed/authenticated with server-side credentials and mocked in tests only.
+- Still needed: real Cloudinary account compatibility checks, a deliberate asset migration procedure before provider cutover, production bucket/account, image normalization and scanning policy, quotas/cleanup operations, adaptation of other photo templates, security review, renderer version pinning, and production device/browser QA.
 
 ### Sprint 4 — Publication and template rollout (1–2 weeks)
 
@@ -98,11 +99,11 @@ Indicative Cloudflare list-price snapshot checked 2026-11-04; prices/limits can 
 
 - Workers Paid has a **$5 USD/month minimum account charge**; Standard includes 10 million dynamic requests/month and 30 million CPU milliseconds, then listed overage rates apply. Static asset requests are listed as free/unlimited when served as assets; Worker invocations/caching behavior differ. Keep API routes separate from static assets.
 - D1 on Workers Paid lists the first 25 billion rows read/month, 50 million rows written/month and 5 GB storage included, with overage pricing beyond those amounts. Unindexed scans increase rows-read billing; check query metrics.
-- R2 Standard lists 10 GB-month, 1 million Class A ops and 10 million Class B ops/month free, then $0.015/GB-month, $4.50/million Class A and $0.36/million Class B; internet egress is listed free. Image transformations, operation mix, lifecycle, and third-party services still have costs.
+- R2 Standard lists 10 GB-month, 1 million Class A ops and 10 million Class B ops/month free, then $0.015/GB-month, $4.50/million Class A and $0.36/million Class B; internet egress is listed free. Cloudinary currently advertises 25 monthly Free-plan credits shared across managed storage, bandwidth and transformations; verify current credit conversions, authenticated delivery feature availability, plan terms and commercial eligibility before adoption.
 - Dynamic billing only is not the whole launch budget: domain, transactional email, payment provider processing/settlement/refunds, accounting/tax, support, monitoring and any image scanning/service costs are separate.
-- Budget monitoring must alert on Worker invocations/CPU, D1 reads/writes/storage, R2 stored bytes/operations, email volume, payment fees and abnormal upload traffic. Keep per-account/customer quotas to bound abuse.
+- Budget monitoring must alert on Worker invocations/CPU, D1 reads/writes/storage, R2 stored bytes/operations or Cloudinary credits, email volume, payment fees and abnormal upload traffic. Keep per-account/customer quotas to bound abuse.
 
-Official references (verify before procurement): [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/), [R2 pricing](https://developers.cloudflare.com/r2/pricing/), [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/). Pricing snapshot is indicative, not a quote or total monthly forecast.
+Official references (verify before procurement): [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/), [R2 pricing](https://developers.cloudflare.com/r2/pricing/), [Cloudinary pricing](https://cloudinary.com/pricing), [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/). Pricing snapshot is indicative, not a quote or total monthly forecast.
 
 ## 8. Database abstraction phase 1B
 

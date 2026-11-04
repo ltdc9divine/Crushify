@@ -10,6 +10,7 @@ import { handleApiRequest } from "../src/index.ts";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { connectDatabaseFromEnvironment } from "../src/database/provider.ts";
+import type { Storage, StorageObject, StorageUploadOptions } from "../src/storage.ts";
 import { runDatabaseContract } from "./database-contract.mjs";
 
 async function loadMigrations(): Promise<SqlMigration[]> {
@@ -26,31 +27,46 @@ async function loadMigrations(): Promise<SqlMigration[]> {
   }));
 }
 
-function createMediaBinding(): R2Bucket {
+function createStorageBinding(): { storage: Storage; failNextDelete: () => void } {
   const objects = new Map<string, { bytes: Uint8Array; httpMetadata?: R2HTTPMetadata }>();
-  return {
-    async put(key, value, options) {
-      const bytes = value instanceof Uint8Array ? value : new Uint8Array(value as ArrayBuffer);
-      objects.set(key, { bytes: new Uint8Array(bytes), httpMetadata: options?.httpMetadata });
-      return null as never;
+  let shouldFailDelete = false;
+  const storage: Storage = {
+    async upload(key: string, value: Uint8Array, options: StorageUploadOptions) {
+      objects.set(key, {
+        bytes: new Uint8Array(value),
+        httpMetadata: { contentType: options.contentType },
+      });
     },
-    async get(key) {
+    async get(key: string): Promise<StorageObject | null> {
       const stored = objects.get(key);
       if (!stored) return null;
       const bytes = stored.bytes;
       return {
         size: bytes.byteLength,
-        httpMetadata: stored.httpMetadata,
+        contentType: stored.httpMetadata?.contentType ?? "",
         body: new Response(bytes).body,
         async arrayBuffer() {
           return bytes.slice().buffer;
         },
-      } as R2ObjectBody;
+      };
     },
     async delete(key) {
+      if (shouldFailDelete) {
+        shouldFailDelete = false;
+        throw new Error("Injected local binary deletion failure");
+      }
       objects.delete(key);
     },
-  } as unknown as R2Bucket;
+    async privateAssetUrl() {
+      return null;
+    },
+  };
+  return {
+    storage,
+    failNextDelete: () => {
+      shouldFailDelete = true;
+    },
+  };
 }
 
 describe("shared API database contract on local Turso/libSQL", () => {
@@ -67,6 +83,7 @@ describe("shared API database contract on local Turso/libSQL", () => {
         { DATABASE_PROVIDER: "turso", TURSO_DATABASE_URL: pathToFileURL(databasePath).href },
       );
       closeDatabase = close;
+      const media = createStorageBinding();
       const mailer = {
         async fetch(_url: string, init?: RequestInit) {
           const message = JSON.parse(String(init?.body)) as { text: string };
@@ -78,7 +95,7 @@ describe("shared API database contract on local Turso/libSQL", () => {
       };
       const env = {
         DB: database,
-        MEDIA: createMediaBinding(),
+        STORAGE: media.storage,
         APP_ORIGIN: "https://crushify.test",
         MAILER: mailer,
         MAILER_AUTH_TOKEN: "local-contract-mailer",
@@ -129,6 +146,7 @@ describe("shared API database contract on local Turso/libSQL", () => {
           return token;
         },
         label: "Turso local file + fake R2",
+        beforeAssetDelete: async () => media.failNextDelete(),
       });
 
       const integrity = await database.prepare("PRAGMA foreign_key_check").all();

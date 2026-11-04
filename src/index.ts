@@ -2,6 +2,7 @@ import { handleSessionRoutes } from "./auth.ts";
 import { handleAssetRoutes } from "./assets.ts";
 import { handleDesignRoutes, handlePreviewRoutes } from "./designs.ts";
 import { D1DatabaseAdapter } from "./database/d1.ts";
+import { createStorageFromEnvironment } from "./storage/provider.ts";
 import { apiError, jsonResponse } from "./http.ts";
 import type { Env } from "./types.ts";
 
@@ -73,7 +74,20 @@ export default {
       if (env.DATABASE_PROVIDER !== "d1") {
         return apiError(crypto.randomUUID(), 500, "DATABASE_CONFIGURATION_ERROR", "Database provider is not configured for this runtime");
       }
-      return handleApiRequest(request, { ...env, DB: new D1DatabaseAdapter(env.DB) });
+      let storage;
+      try {
+        storage = createStorageFromEnvironment(env, env.MEDIA);
+      } catch (error) {
+        console.error("Storage provider configuration failed", {
+          error: error instanceof Error ? error.message : "Unknown storage configuration error",
+        });
+        return apiError(crypto.randomUUID(), 500, "STORAGE_CONFIGURATION_ERROR", "Storage provider is not configured for this runtime");
+      }
+      return handleApiRequest(request, {
+        ...env,
+        DB: new D1DatabaseAdapter(env.DB),
+        STORAGE: storage,
+      });
     }
     return env.ASSETS.fetch(request);
   },

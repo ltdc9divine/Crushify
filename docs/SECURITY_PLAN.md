@@ -1,6 +1,6 @@
 # Crushify Security Plan
 
-**Status:** target controls. The local-only Our Universe implementation provides hashed expiring login/preview/upload tokens, owner-scoped draft/media access, CSRF checks, bounded payloads and a private media proxy. A Turso/libSQL adapter and guarded migration CLI are implemented and tested locally only; this is not a security certification or production deployment. Review with a qualified security/privacy professional before launch.
+**Status:** target controls. The local-only Our Universe implementation provides hashed expiring login/preview/upload tokens, owner-scoped draft/media access, CSRF checks, bounded payloads and a private media proxy. R2 and Cloudinary storage adapters are available, but Cloudinary is tested only with mocks and has not been used with an account. A Turso/libSQL adapter and guarded migration CLI are implemented and tested locally only; this is not a security certification or production deployment. Review with a qualified security/privacy professional before launch.
 
 ## 1. Threat model and assets
 
@@ -41,11 +41,11 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 ## 6. Upload and private media
 
 - Accept only image formats actually required; validate declared type and file signature, decode successfully, constrain dimensions/pixel count/bytes/quantity, strip EXIF/GPS, normalize to safe raster rendition and reject SVG/active formats unless safely transformed.
-- Upload into unpredictable private R2 keys; never accept client-chosen bucket key/path. Per-customer quotas, concurrency/rate limits and abandoned-upload lifecycle cleanup.
+- Upload into unpredictable private object IDs; never accept a client-chosen bucket key or Cloudinary `public_id`. The R2 adapter preserves legacy key compatibility; the Cloudinary adapter uses signed `authenticated` uploads and server-generated IDs. Keep API secrets server-side. Per-customer quotas, concurrency/rate limits and abandoned-upload lifecycle cleanup remain required.
 - Stage in `QUARANTINED`; verify checksum, size, ownership and malware/content policy before `READY`. Consider image scanning/moderation for public content.
-- Keep originals private. Deliver private media through short-lived authorized Worker response; published renditions are intentionally public and separated.
+- Keep originals private. R2 media is delivered through the authorized Worker proxy. Cloudinary uses authenticated assets and short-lived private download URLs behind the same owner/preview authorization checks; real-account behavior and account feature availability have not been verified. Published renditions are intentionally public and separated.
 - CORS allows exact Crushify origins only. Avoid bucket-wide public access; do not treat CORS as authorization.
-- Deletion removes metadata/publication references and schedules R2 deletion, backup expiry and cache purge; record completion/failure for retry.
+- Deletion marks metadata pending before provider deletion and marks it deleted only after success; failed binary deletion remains pending for retry. Uploads attempt binary cleanup if the metadata write fails; failed cleanup is also marked pending. Provider changes require a separate binary migration; there is no automatic cross-provider fallback.
 
 ## 7. Application security controls
 
@@ -61,7 +61,7 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 - Correlate with request IDs; redact email where feasible, all tokens, cookies, signatures, upload URLs and provider secrets.
 - Audit authentication/admin actions, state changes, payment event outcomes and publication/revocation. Restrict logs and set retention.
 - Define retention/deletion by data class: abandoned drafts, originals, published assets, brief/contact records, payment evidence and legal/audit records. Do not promise erasure that conflicts with required records; explain exceptions.
-- Alert on invalid signature spikes, authorization denials/IDOR patterns, upload failures/quota anomalies, D1/R2 errors, webhook backlog, unusual admin actions and cost anomalies.
+- Alert on invalid signature spikes, authorization denials/IDOR patterns, upload failures/quota anomalies, D1/storage-provider errors, webhook backlog, unusual admin actions and cost anomalies.
 - Document incident triage, key rotation, payment reconciliation, customer notification, publication revocation and restore procedure.
 
 ## 9. Required pre-launch tests
@@ -71,7 +71,8 @@ IDOR across every entity; preview expiry/revocation; public slug collision; XSS 
 ## 10. Phase 2 implementation limits
 
 - Local email testing logs a one-time sign-in link to the Wrangler console. The Resend provider adapter is implemented but has no credentials/sender configured; non-local login fails closed until those are configured. Magic-link tokens are placed in URL fragments, not HTTP query strings.
-- The upload URL is a short-lived Worker capability, not a presigned R2 URL. Production R2 bucket, CORS, lifecycle, quotas, abandoned-upload cleanup, image normalization/scanning and operational retry monitoring are not configured.
+- The upload URL is a short-lived Worker capability, not a browser-facing Cloudinary signature or presigned R2 URL. `STORAGE_PROVIDER=r2|cloudinary` selects exactly one adapter and fails closed if its binding/credentials are missing. Cloudinary uses signed authenticated upload requests from the Worker; only mocked adapter tests have run. No Cloudinary credentials/account, actual Cloudinary upload/read/delete, provider compatibility test, or storage migration has been performed.
+- Production R2 bucket, CORS, lifecycle, quotas, abandoned-upload cleanup, image normalization/scanning and operational retry monitoring are not configured. Switching providers does not move existing binaries; a separate migration and reconciliation plan is required. Do not assume changing the provider setting is a safe rollback after writes.
 - Session cookies are `Secure` outside explicit local test mode. `ENVIRONMENT=staging` disables local mail mode even if `LOCAL_TEST_MODE` is accidentally set. Preview capabilities are passed in the Authorization header; the browser link carries the token in its fragment. These flows have local integration coverage only.
 - No admin authentication, checkout/payment protection, published media, production rate limiting/WAF policy, backup/restore, deletion-retention policy, security assessment, or production secrets/deployment is implemented.
 

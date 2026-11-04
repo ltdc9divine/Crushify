@@ -1,6 +1,7 @@
 import { requireCsrf, requireSession } from "./auth.ts";
 import { apiError, MAX_IMAGE_BYTES, nowIso, randomToken, readBoundedBody, readJson, safeId, sha256, jsonResponse } from "./http.ts";
 import { serveAsset } from "./designs.ts";
+import { StorageError } from "./storage.ts";
 import type { Env } from "./types.ts";
 import type { UniverseDesign } from "./universe.ts";
 
@@ -68,7 +69,7 @@ async function createUpload(
   env: Env,
   requestId: string,
 ): Promise<Response> {
-  if (!env.MEDIA) return apiError(requestId, 503, "MEDIA_UNAVAILABLE", "Private media storage is unavailable");
+  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
   const required = await requireSession(request, env, requestId);
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
@@ -103,7 +104,7 @@ async function createUpload(
   if ((count?.count ?? 0) >= 6) return apiError(requestId, 409, "PHOTO_LIMIT", "Design already has six photos");
 
   const id = safeId();
-  const key = `private/${randomToken(32)}`;
+  const key = `private/${randomToken(32)}-${mediaType === "image/png" ? "png" : "jpg"}`;
   const token = randomToken();
   const now = nowIso();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
@@ -135,7 +136,7 @@ async function uploadContent(
   requestId: string,
   assetId: string,
 ): Promise<Response> {
-  if (!env.MEDIA) return apiError(requestId, 503, "MEDIA_UNAVAILABLE", "Private media storage is unavailable");
+  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
   const token = bearerToken(request);
   if (!token) return apiError(requestId, 401, "UNAUTHENTICATED", "Valid upload capability required");
   const session = await env.DB.prepare(
@@ -183,28 +184,52 @@ async function uploadContent(
 
   const digest = await sha256(bytes);
   try {
-    await env.MEDIA.put(session.object_key, bytes, {
-      httpMetadata: { contentType: info.contentType, cacheControl: "private, no-store" },
-      customMetadata: { sha256: digest, width: String(info.width), height: String(info.height) },
+    await env.STORAGE.upload(session.object_key, bytes, {
+      contentType: info.contentType,
+      sha256: digest,
+      width: info.width,
+      height: info.height,
     });
-    await env.DB.prepare(
+    const stored = await env.DB.prepare(
       `UPDATE assets
        SET sha256 = ?, width = ?, height = ?, status = 'QUARANTINED', updated_at = ?
        WHERE id = ? AND customer_id = ? AND status = 'PENDING'`,
     ).bind(digest, info.width, info.height, nowIso(), assetId, session.customer_id).run();
+    if (stored.meta.changes !== 1) throw new Error("Uploaded asset metadata could not be persisted");
   } catch (error) {
+    let binaryRemoved = false;
     try {
-      await env.MEDIA.delete(session.object_key);
+      await env.STORAGE.delete(session.object_key);
+      binaryRemoved = true;
     } catch (cleanupError) {
       console.error("Failed to clean up incomplete media upload", {
         request_id: requestId,
         asset_id: assetId,
-        error: cleanupError,
+        error: cleanupError instanceof Error ? cleanupError.message : "Unknown storage cleanup error",
       });
     }
-    await env.DB.prepare("UPDATE asset_upload_sessions SET used_at = NULL WHERE id = ?")
-      .bind(session.upload_id).run();
-    console.error("Media upload failed", { request_id: requestId, asset_id: assetId, error });
+    if (binaryRemoved) {
+      await env.DB.prepare("UPDATE asset_upload_sessions SET used_at = NULL WHERE id = ?")
+        .bind(session.upload_id).run();
+    } else {
+      try {
+        await env.DB.prepare(
+          "UPDATE assets SET status = 'DELETION_PENDING', updated_at = ? WHERE id = ? AND status = 'PENDING'",
+        ).bind(nowIso(), assetId).run();
+      } catch (stateError) {
+        console.error("Failed to mark incomplete upload for cleanup", {
+          request_id: requestId,
+          asset_id: assetId,
+          error: stateError instanceof Error ? stateError.message : "Unknown database error",
+        });
+      }
+    }
+    console.error("Media upload failed", {
+      request_id: requestId,
+      asset_id: assetId,
+      error: error instanceof StorageError ? error.message :
+        error instanceof Error ? error.message : "Unknown upload error",
+    });
     return apiError(requestId, 502, "UPLOAD_FAILED", "Image upload failed; retry the upload");
   }
   return new Response(null, {
@@ -219,7 +244,7 @@ async function completeUpload(
   requestId: string,
   assetId: string,
 ): Promise<Response> {
-  if (!env.MEDIA) return apiError(requestId, 503, "MEDIA_UNAVAILABLE", "Private media storage is unavailable");
+  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
   const required = await requireSession(request, env, requestId);
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
@@ -238,15 +263,15 @@ async function completeUpload(
   }>();
   if (!asset) return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
   if (asset.status !== "QUARANTINED") return apiError(requestId, 409, "UPLOAD_NOT_READY", "Upload content is not ready");
-  const object = await env.MEDIA.get(asset.object_key);
-  if (!object || object.size !== asset.byte_size || object.httpMetadata?.contentType !== asset.media_type) {
+  const object = await env.STORAGE.get(asset.object_key);
+  if (!object || object.size !== asset.byte_size || object.contentType !== asset.media_type) {
     return apiError(requestId, 409, "UPLOAD_NOT_READY", "Uploaded image is unavailable");
   }
   const bytes = new Uint8Array(await object.arrayBuffer());
   const info = detectImage(bytes);
   if (!info || info.contentType !== asset.media_type || await sha256(bytes) !== asset.sha256 ||
       info.width !== asset.width || info.height !== asset.height) {
-    await env.MEDIA.delete(asset.object_key);
+    await env.STORAGE.delete(asset.object_key);
     await env.DB.prepare(
       "UPDATE assets SET status = 'REJECTED', updated_at = ? WHERE id = ? AND customer_id = ?",
     ).bind(nowIso(), assetId, required.session!.customerId).run();
@@ -273,7 +298,7 @@ async function deleteAsset(
   requestId: string,
   assetId: string,
 ): Promise<Response> {
-  if (!env.MEDIA) return apiError(requestId, 503, "MEDIA_UNAVAILABLE", "Private media storage is unavailable");
+  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
   const required = await requireSession(request, env, requestId);
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
@@ -300,7 +325,7 @@ async function deleteAsset(
     "UPDATE assets SET status = 'DELETION_PENDING', updated_at = ? WHERE id = ? AND customer_id = ?",
   ).bind(nowIso(), assetId, required.session!.customerId).run();
   try {
-    await env.MEDIA.delete(asset.object_key);
+    await env.STORAGE.delete(asset.object_key);
   } catch (error) {
     console.error("Asset deletion failed", { request_id: requestId, asset_id: assetId, error });
     return apiError(requestId, 503, "DELETION_PENDING", "Asset deletion will be retried");

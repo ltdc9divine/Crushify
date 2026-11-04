@@ -128,12 +128,18 @@ The following routes are implemented for the Our Universe pilot. Local integrati
 | `POST /designs/{designId}/preview` | Owner + CSRF | Create a short-lived, revocable preview capability. |
 | `GET /previews` | Preview bearer token | Read the preview; token is sent in the Authorization header. |
 | `POST /assets/upload-url` | Customer + CSRF | Create an opaque upload capability for a private image. |
-| `PUT /assets/{assetId}/content` | Upload capability | Stream a bounded PNG/JPEG to the Worker's private R2 binding. |
-| `POST /assets/{assetId}/complete` | Owner + CSRF | Recheck object size, type and digest before marking it ready. |
+| `PUT /assets/{assetId}/content` | Upload capability | Validate PNG/JPEG signature, dimensions and size, then stream to the configured private storage provider. |
+| `POST /assets/{assetId}/complete` | Owner + CSRF | Recheck stored object size, type, digest and dimensions before marking it ready. |
 | `GET /assets/{assetId}` | Owner | Read private media through the Worker. |
 | `DELETE /assets/{assetId}` | Owner + CSRF | Delete unreferenced private media. |
 
-`GET /previews/assets/{assetId}` serves media only with the preview bearer. Current local integration coverage includes authentication, owner isolation, body/schema limits, revision conflict, local R2 upload/read/delete, and preview access/expiry. Production mail delivery requires a configured provider. Catalog, order, checkout, payment, publication, customer-requested erasure orchestration, and admin routes remain unimplemented. See [SECURITY_PLAN.md](SECURITY_PLAN.md), [STAGING_DEPLOYMENT.md](STAGING_DEPLOYMENT.md), and [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for deployment gaps.
+`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Cloudflare Worker selects exactly one private storage adapter with `STORAGE_PROVIDER=r2|cloudinary`; missing configuration fails closed, with no cross-provider fallback. Local integration coverage exercises the Worker and R2 emulator. Adapter tests mock Cloudinary's signed authenticated upload, bounded private download and deletion; they do not prove compatibility with a real Cloudinary account. Production mail delivery requires a configured provider. Catalog, order, checkout, payment, publication, customer-requested erasure orchestration, and admin routes remain unimplemented. See [SECURITY_PLAN.md](SECURITY_PLAN.md), [STAGING_DEPLOYMENT.md](STAGING_DEPLOYMENT.md), and [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for deployment gaps.
+
+### Storage adapter contract
+
+Business routes use `Storage` for private binary upload, read, deletion and private URL generation; database asset metadata remains in the selected database adapter. `R2StorageAdapter` keeps the existing private Worker-proxied R2 behavior, including legacy R2 object-key compatibility. `CloudinaryStorageAdapter` creates authenticated (`type=authenticated`) image assets using server-generated public IDs, signed requests and short-lived private download URLs. The Cloudinary API secret stays server-side. The upload API remains Worker-proxied and keeps its current request/response format; it does not expose a direct signed upload URL to the browser.
+
+Cloudinary is selected only when `STORAGE_PROVIDER=cloudinary` and all three server-side values are set: `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`. R2 requires `STORAGE_PROVIDER=r2` and the `MEDIA` binding. Do not switch providers against existing asset rows without a separately planned binary migration: each adapter reads only its own provider's objects, and a config flip is not a data migration. Upload cleanup is attempted if metadata persistence fails; failed cleanup is marked `DELETION_PENDING` for retry. Deletion likewise records pending state before deleting the binary and marks metadata `DELETED` only after successful storage deletion.
 
 ### Database adapter compatibility
 
