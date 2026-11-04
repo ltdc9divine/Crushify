@@ -1,0 +1,7 @@
+ENVIRONMENT=staging
+APP_ORIGIN=https://crushify-staging.<workers-dev-subdomain>.workers.dev
+MAIL_PROVIDER=resend
+MAIL_FROM_EMAIL=Crushify <noreply@your-verified-domain>
+
+# Store the Resend API key as a Worker secret. Do not put it in this file:
+# npx wrangler secret put MAIL_API_KEY --config wrangler.staging.jsonc

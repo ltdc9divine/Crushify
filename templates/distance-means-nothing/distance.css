@@ -37,8 +37,11 @@ select option{color:#111}.hint{font-size:12px;opacity:.7;margin:4px 0}
 #final{position:absolute;inset:0;display:grid;place-content:center;gap:16px;text-align:center;background:#080d20e6;backdrop-filter:blur(6px);animation:pop 1.2s}
 #final p{font:italic 500 clamp(24px,4vw,44px)/1.35 'Playfair Display',serif;margin:0}#final button{justify-self:center;padding:9px 18px;border-radius:999px;border:1px solid var(--ui);background:none}
 #final small{font:500 26px 'Caveat',cursive}
+#homeEditor{display:inline-block;margin-top:12px;padding:7px 14px;border:1px solid #ffffff30;border-radius:99px;color:inherit;text-decoration:none}
+#homeStage{display:none;position:absolute;top:14px;right:14px;z-index:4;padding:7px 14px;border:1px solid #ffffff30;border-radius:99px;background:#080d20b3;color:inherit;text-decoration:none;backdrop-filter:blur(8px)}
+body.view #homeStage,body.tab-stage #homeStage{display:block}
 #tabs{display:none}body.view #editor,body.view #tabs{display:none}body.view #app{grid-template-columns:1fr}
-@media(max-width:800px){#app{grid-template-columns:1fr;height:calc(100% - 48px)}#editor,#stage{grid-area:1/1}#stage{display:none}body.tab-stage #stage{display:block}body.tab-stage #editor{display:none}
+@media(max-width:800px){#app{grid-template-columns:1fr;height:calc(100% - 48px)}#editor,#stage{grid-area:1/1}#stage{display:none}body.tab-stage #stage,body.view #stage{display:block}body.tab-stage #editor{display:none}
  #tabs{display:flex;position:fixed;bottom:0;left:0;right:0;height:48px;background:var(--pur)}#tabs button{flex:1;border:0;background:none}#tabs .on{box-shadow:inset 0 -2px var(--ui)}
  body.view #app{height:100%}#clocks{bottom:132px}#count{bottom:222px}.clk{min-width:0;padding:8px 10px}.clk .t{font-size:20px}#tools button{padding:6px 9px;font-size:12px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

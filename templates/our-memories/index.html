@@ -6,7 +6,7 @@
 <title>Kỷ niệm đôi mình — Crushify</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;1,500&family=Dancing+Script:wght@500&display=swap">
-<link rel="stylesheet" href="our-memories.css">
+<link rel="stylesheet" href="our-memories.css?v=3">
 </head>
 <body>
 <div id="tabs"><button data-v="ed">Chỉnh sửa</button><button data-v="pv">Xem trước</button></div>
@@ -37,12 +37,13 @@
     <label>Hiệu ứng<select id="anim"><option value="cinematic">Điện ảnh</option><option value="dreamy">Mộng mơ</option><option value="nostalgic">Hoài niệm</option><option value="minimal">Tối giản</option></select></label>
     <label class="row"><input id="motion" type="checkbox" checked> Bật chuyển động</label>
   </details>
-  <div class="actions"><button id="asRecipient">Xem như người nhận</button><button id="exp">Tải dữ liệu JSON</button></div>
+  <div class="actions"><button id="asRecipient">Xem như người nhận</button><button id="exp">Tải dữ liệu JSON</button><a id="homeEditor" href="../../index.html">← Crushify</a></div>
 </aside>
 <main id="stage">
   <canvas id="c"></canvas>
   <div id="fb" hidden></div>
   <header class="hud">
+    <a id="homeStage" href="../../index.html" aria-label="Quay lại trang chủ Crushify">← Crushify</a>
     <button id="snd">Bật âm thanh</button><button id="reset">Đặt lại góc nhìn</button><button id="rot">Tự xoay</button><button id="prt">Hạt sáng</button>
     <button id="backEdit" class="only-edit">Quay lại chỉnh sửa</button>
   </header>

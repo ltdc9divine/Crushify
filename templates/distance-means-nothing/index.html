@@ -3,7 +3,7 @@
 <title>Xa mặt không cách lòng — Crushify</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Playfair+Display:ital,wght@0,500;1,500&family=Caveat:wght@500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="distance.css">
+<link rel="stylesheet" href="distance.css?v=3">
 <!-- To avoid CDN dependence, copy three@0.160.0 (build/three.module.js + examples/jsm) to assets/vendor/ and point these URLs there. -->
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 </head><body>
@@ -28,9 +28,11 @@
   <label>Chủ đề<select data-k="theme"><option value="midnight-distance">Khoảng cách giữa đêm</option><option value="blue-aurora">Cực quang xanh</option><option value="rose-galaxy">Thiên hà hồng</option><option value="golden-horizon">Chân trời vàng</option></select></label>
   <label>Hiệu ứng<select data-k="animation"><option value="cinematic">Điện ảnh</option><option value="dreamy">Mộng mơ</option><option value="cosmic">Vũ trụ</option><option value="minimal">Tối giản</option></select></label></details>
  <div class="row"><button id="copyLink" type="button">Sao chép liên kết người nhận</button><button id="viewAs" type="button">Xem trước như người nhận</button></div>
+ <a id="homeEditor" href="../../index.html">← Crushify</a>
 </aside>
 <main id="stage">
  <div id="gl"></div><div id="fallback" hidden><i class="p a"></i><i class="p b"></i></div>
+ <a id="homeStage" href="../../index.html" aria-label="Quay lại trang chủ Crushify">← Crushify</a>
  <header id="title"><h1></h1><p id="sub"></p></header>
  <div id="phase" aria-live="polite"></div>
  <section id="clocks"></section><section id="count"></section>

@@ -1,0 +1,2 @@
+APP_ORIGIN=http://127.0.0.1:8787
+LOCAL_TEST_MODE=true

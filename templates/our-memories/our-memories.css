@@ -67,16 +67,20 @@ fieldset{border:1px solid #ffffff20;border-radius:10px;margin:8px 0;padding:6px}
 #themes{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 #themes button{background:var(--c);border:1px solid #fff4;border-radius:8px;padding:9px;font-size:12px}
 .actions{display:flex;gap:8px;margin-top:14px;position:sticky;bottom:0}
+#homeEditor{display:inline-block;padding:8px 12px;border:1px solid #ffffff30;border-radius:99px;color:inherit;text-decoration:none}
+#homeStage{display:none}
+body.recipient #homeStage,body.pv #homeStage{display:inline-block}
 #tabs{display:none}
 @media(max-width:800px){
  #stage{left:0}
  #editor{width:100%;top:46px;display:none}
- body:not(.pv) #editor{display:block}
- body:not(.pv) #stage{visibility:hidden}
+ body:not(.pv):not(.recipient) #editor{display:block}
+ body:not(.pv):not(.recipient) #stage{visibility:hidden}
  #tabs{display:flex;position:fixed;top:0;left:0;right:0;height:46px;z-index:20;background:#12020c}
  #tabs button{flex:1;background:none;border:0;border-bottom:2px solid transparent}
  body.pv #tabs [data-v=pv],body:not(.pv) #tabs [data-v=ed]{border-color:var(--ac)}
- body.recipient #stage{top:0}
+ body.recipient #editor{display:none}
+ body.recipient #stage{top:0;visibility:visible}
  #stage{top:46px}
  #hero{left:5vw;right:5vw;max-width:none;top:auto;bottom:90px;transform:none;text-align:center}
  body.open #hero{transform:translateX(-30px)}

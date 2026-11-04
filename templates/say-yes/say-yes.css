@@ -16,7 +16,7 @@ body.fade #veil{animation:vin 2.6s ease forwards}
 #note{position:absolute;top:60px;left:50%;transform:translateX(-50%);z-index:4;background:#0007;border:1px dashed var(--ac);padding:6px 12px;border-radius:8px;font-size:13px;margin:0}
 /* cards */
 .card{position:absolute;left:5vw;top:50%;transform:translateY(-44%);width:min(460px,42vw);max-height:80vh;overflow:auto;z-index:3;opacity:0;pointer-events:none;transition:opacity 1s,transform 1s}
-body.ask[data-ph=intro] #ask,body[data-ph=yes] #yesP,body[data-ph=no] #noP{opacity:1;pointer-events:auto;transform:translateY(-50%)}
+body[data-ph=intro] #ask,body[data-ph=yes] #yesP,body[data-ph=no] #noP{opacity:1;pointer-events:auto;transform:translateY(-50%)}
 #qSub{font:italic 500 22px "Cormorant Garamond",serif;color:var(--ac);margin:0 0 6px}
 #qMain,#yesH{font:700 clamp(36px,4.6vw,64px)/1.04 "Cormorant Garamond",serif;margin:0 0 24px;text-shadow:0 2px 30px #000a}
 #yesH{font-size:clamp(28px,3.4vw,46px);margin-bottom:12px}
@@ -51,7 +51,7 @@ select option{color:#000}label.row{display:flex;gap:8px;align-items:center}label
  #tabs button{flex:1;background:none;border:0;border-bottom:2px solid transparent}
  body.pv #tabs [data-v=pv],body:not(.pv) #tabs [data-v=ed]{border-color:var(--ac)}
  .card{left:5vw;right:5vw;width:auto;top:auto;bottom:6vh;max-height:46vh;text-align:center;transform:translateY(20px)}
- body.ask[data-ph=intro] #ask,body[data-ph=yes] #yesP,body[data-ph=no] #noP{transform:none}
+ body[data-ph=intro] #ask,body[data-ph=yes] #yesP,body[data-ph=no] #noP{transform:none}
  .btns{justify-content:center}.hud button{padding:6px 10px;font-size:12px}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}#veil{display:none}}

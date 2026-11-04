@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "crushify-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-11-01",
+  "workers_dev": true,
+  "assets": {
+    "directory": ".",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"],
+    "not_found_handling": "none"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "crushify-staging-db",
+      "database_id": "6e852b64-f2d6-41cb-9827-ca3454580b58",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "crushify-staging-media"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "staging",
+    "MAIL_PROVIDER": "resend"
+  }
+}

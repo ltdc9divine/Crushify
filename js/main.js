@@ -17,7 +17,11 @@
     window.location.assign(card.dataset.href);
   }));
   chips.forEach(chip => chip.addEventListener('click', () => {
-    chips.forEach(item => item.classList.toggle('active', item === chip));
+    chips.forEach(item => {
+      const active = item === chip;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-pressed', String(active));
+    });
     const filter = chip.dataset.filter;
     cards.forEach(card => card.classList.toggle('is-hidden', filter !== 'all' && card.dataset.category !== filter));
   }));

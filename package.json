@@ -1,0 +1,22 @@
+{
+  "name": "crushify",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "db:apply:local": "wrangler d1 migrations apply crushify-local --local",
+    "test:integration": "node tests/integration.mjs",
+    "db:apply:staging": "wrangler d1 migrations apply crushify-staging-db --remote --config wrangler.staging.jsonc",
+    "deploy:staging": "wrangler deploy --config wrangler.staging.jsonc"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261104.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.157.0"
+  }
+}
