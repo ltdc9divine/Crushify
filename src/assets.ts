@@ -59,6 +59,13 @@ function validDimensions(width: number, height: number): boolean {
   return width > 0 && height > 0 && width <= 8192 && height <= 8192 && width * height <= 40_000_000;
 }
 
+function uploadMaxBytes(env: Env): number {
+  const configured = env.UPLOAD_MAX_BYTES;
+  return typeof configured === "number" && Number.isSafeInteger(configured) && configured > 0
+    ? Math.min(configured, MAX_IMAGE_BYTES)
+    : MAX_IMAGE_BYTES;
+}
+
 function bearerToken(request: Request): string | null {
   const match = request.headers.get("authorization")?.match(/^Bearer ([A-Za-z0-9_-]{30,100})$/);
   return match?.[1] ?? null;
@@ -89,8 +96,9 @@ async function createUpload(
     media_type: string;
     size: number;
   };
-  if (size < 1 || size > MAX_IMAGE_BYTES) {
-    return apiError(requestId, 413, "PAYLOAD_TOO_LARGE", "Image must be 5 MB or smaller");
+  const maxBytes = uploadMaxBytes(env);
+  if (size < 1 || size > maxBytes) {
+    return apiError(requestId, 413, "PAYLOAD_TOO_LARGE", `Image must be ${Math.floor(maxBytes / (1024 * 1024))} MB or smaller`);
   }
   const design = await env.DB.prepare(
     "SELECT id FROM designs WHERE id = ? AND customer_id = ? AND status = 'DRAFT'",
@@ -125,7 +133,7 @@ async function createUpload(
     upload_url: `/api/v1/assets/${id}/content`,
     upload_token: token,
     expires_at: expiresAt,
-    max_bytes: MAX_IMAGE_BYTES,
+    max_bytes: maxBytes,
     method: "PUT",
   }, 201, requestId);
 }
@@ -153,15 +161,17 @@ async function uploadContent(
   }>();
   if (!session) return apiError(requestId, 401, "INVALID_UPLOAD_TOKEN", "Upload capability is invalid or expired");
   const declaredLength = Number(request.headers.get("content-length") ?? 0);
-  if (declaredLength > MAX_IMAGE_BYTES || (declaredLength > 0 && declaredLength !== session.byte_size)) {
+  const maxBytes = uploadMaxBytes(env);
+  if (session.byte_size > maxBytes || declaredLength > maxBytes ||
+      (declaredLength > 0 && declaredLength !== session.byte_size)) {
     return apiError(requestId, 413, "PAYLOAD_TOO_LARGE", "Image size does not match the upload request");
   }
   let bytes: Uint8Array;
   try {
-    bytes = await readBoundedBody(request, MAX_IMAGE_BYTES);
+    bytes = await readBoundedBody(request, maxBytes);
   } catch (error) {
     if (error instanceof RangeError) {
-      return apiError(requestId, 413, "PAYLOAD_TOO_LARGE", "Image must be 5 MB or smaller");
+      return apiError(requestId, 413, "PAYLOAD_TOO_LARGE", `Image must be ${Math.floor(maxBytes / (1024 * 1024))} MB or smaller`);
     }
     return apiError(requestId, 400, "INVALID_BODY", "Could not read image data");
   }

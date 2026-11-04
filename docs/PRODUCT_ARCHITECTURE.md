@@ -1,6 +1,6 @@
 # Crushify Product & System Architecture
 
-**Status:** architecture migration in progress. Cloudflare Worker/D1/R2 remains the current backend; a provider-neutral SQL contract and Turso/libSQL migration path have been added but no remote database or host has been changed. Payment and publication remain unimplemented.
+**Status:** architecture migration in progress. Cloudflare Worker/D1/R2 remains available as the rollback runtime. A Vercel Node Functions adapter now reuses the shared API router and Turso/Cloudinary adapters; it has been tested locally against isolated Turso and in-memory storage, but not on a Vercel deployment or external accounts. No remote database or host has been changed. Payment and publication remain unimplemented.
 **Audit basis:** repository contents and local browser checks on 2026-11-04.
 **Decision boundary:** this design does not select a payment provider, set production prices, or claim legal/compliance approval.
 
@@ -15,7 +15,7 @@ Both use the same customer identity, design/assets, order/payment ledger, and pu
 
 ## 2. Audited starting point
 
-The repository has five standalone templates and a local-only Cloudflare Worker/D1/R2 backend for Our Universe authentication, drafts, private media and previews. The current Worker continues to use D1. A provider-neutral database contract, D1 adapter, Turso/libSQL adapter and checksum-verified transactional migration CLI now share the existing SQLite migrations. These changes have only been tested against local libSQL; no Turso database has been connected or migrated. Vercel/Netlify API adapters, Cloudinary storage, order/payment services and publication are not implemented.
+The repository has five standalone templates and a local-only Cloudflare Worker/D1/R2 backend for Our Universe authentication, drafts, private media and previews. The current Worker continues to use D1/R2. A provider-neutral database contract, D1 adapter, Turso/libSQL adapter and checksum-verified transactional migration CLI share the existing SQLite migrations. The Vercel catch-all Node Function reuses the existing HTTP router and is integration-tested with a local Turso file and mock storage; no Vercel deployment or remote Turso database has been connected. R2/Cloudinary adapters exist, but Cloudinary is tested only with mocked HTTP. Netlify, order/payment services and publication are not implemented.
 
 The homepage shows sample prices of 39,000/79,000/129,000 VND and links to the template gallery; its own note labels them provisional. It does not create an order or start checkout. The homepage contains a preview-modal shell/handler but has no `.preview-btn` trigger in its current gallery; card links navigate to the templates directly. The previous integration findings are recorded in [PRODUCT-INTEGRATION-AUDIT.md](../PRODUCT-INTEGRATION-AUDIT.md).
 
@@ -36,15 +36,15 @@ Admin (MFA/role protected) ───────> future admin API
 Rollback path: Cloudflare Worker ──> D1 + R2
 ```
 
-The Turso adapter and migrations are implemented locally. The Vercel/Netlify HTTP adapters, Cloudinary/SePay adapters and deployment configurations are not implemented. Cloudflare remains the active backend during this staged migration; do not point new code at customer data until an explicit, verified data migration plan exists.
+The Vercel HTTP adapter and Turso/Cloudinary runtime wiring are implemented locally; the Cloudflare Worker/D1/R2 adapter remains available. Netlify, SePay and deployment configuration are not implemented. Do not point new code at customer data until an explicit, verified database and binary data migration plan exists.
 
 ### Runtime boundaries
 
 - Keep the present frontend and each template's own CSS, JavaScript, and 3D experience. Add only small shared browser modules/adapters when a template opts in.
-- Use Workers Static Assets for the homepage, template source files, and versioned static assets. Static assets are not a per-customer HTML publishing database.
+- Use Cloudflare Workers Static Assets or Vercel static hosting for the homepage, template source files, and versioned assets. Static assets are not a per-customer HTML publishing database.
 - Route `/api/v1/*`, authenticated previews, future payment webhooks, and gift slugs through the selected server-side API adapter. Keep public static routes cacheable independently of API responses.
 - Use the database contract for metadata and state transitions only. Turso/libSQL uses the existing SQLite migrations; never put image bytes/base64 in the database.
-- Keep original and draft media private in the future storage adapter. Cloudinary signed uploads are planned; no client upload signature or Cloudinary secret is currently exposed.
+- Keep original and draft media private in the selected storage adapter. Cloudinary signed authenticated uploads use server-side secrets; no upload signature or Cloudinary secret is exposed to clients.
 - A published gift uses a high-entropy slug, e.g. `/g/<random-token>`. The public renderer resolves a published design version and its pinned template version. Do not expose a draft or an enumerable D1 ID.
 
 ### Environments
@@ -56,12 +56,12 @@ Keep local, Vercel development, and any later Netlify production-candidate resou
 ### Self-service
 
 1. Browser obtains public catalog/template metadata and creates an anonymous or email-verified customer session.
-2. Browser loads template defaults and edits local data. Draft operations send versioned JSON to the Worker; the server validates against that template's registered schema.
-3. Images upload to private R2 through short-lived upload sessions; Worker validates authorization, limits, object key, checksum and finalization.
+2. Browser loads template defaults and edits local data. Draft operations send versioned JSON to the selected API runtime; the server validates against that template's registered schema.
+3. Images upload through short-lived upload sessions; the selected server adapter validates authorization, limits, object key, checksum and finalization before using private storage.
 4. Preview uses the same pinned recipient renderer and a short-lived preview capability, but reads a draft only after authorization. Preview URLs are not gift URLs.
 5. Checkout is created server-side from an enabled catalog price and the current design version. Browser-submitted amounts are ignored.
 6. Payment confirmation comes only from a verified provider webhook or a documented, audited admin reconciliation. The success/return page is informational.
-7. Once paid, Worker atomically finalizes the order, pins immutable design/template versions, assigns a random slug and queues/records publishing. Publish is idempotent and can be retried.
+7. Once paid, the API runtime atomically finalizes the order, pins immutable design/template versions, assigns a random slug and queues/records publishing. Publish is idempotent and can be retried.
 
 ### Custom Design
 

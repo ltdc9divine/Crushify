@@ -4,10 +4,10 @@
 
 This is a staged migration guide, not a production deployment record.
 
-- The current API is still the Cloudflare Worker using D1. The Worker now has selectable R2 and Cloudinary storage adapters; local development and staging config explicitly select R2.
+- The Cloudflare Worker remains available with D1/R2 for rollback. A Vercel Node Functions catch-all now uses the shared API router with Turso and Cloudinary adapters.
 - The shared SQL contract and Turso/libSQL adapter are implemented. The same API contract tests run against local Wrangler D1 and an ephemeral local Turso/libSQL file database; the migration CLI is tested locally.
 - No remote Turso database has been connected, and no existing D1 data has been exported or imported.
-- Vercel and Netlify API adapters and SePay payments are not implemented. The Cloudinary adapter is implemented but has only mock-based tests; no Cloudinary account, credentials, upload, or real-account compatibility check is configured. Do not enable checkout or publication.
+- The Vercel adapter additionally passes the shared API contract over a local Node HTTP server using a local Turso file and in-memory media. It has not been deployed or tested on Vercel. Cloudinary HTTP is mock-tested only; no Cloudinary account, credentials, upload, or real-account compatibility check is configured. Netlify and SePay are not implemented. Do not enable checkout or publication.
 - The local rollback branch `backup/cloudflare-pre-turso-20261104` points to the pre-migration commit. It has not been pushed.
 
 Do not run a remote migration until the destination identity, current D1 data state, export/import plan, backup, restore test, and migration window are explicitly verified. The CLI intentionally refuses untracked existing database schemas.
@@ -42,20 +42,34 @@ The command runs the numbered SQL files in `migrations/`, verifies SHA-256 migra
 
 `.env.example` is a placeholder inventory only. The migration CLI reads process environment variables; it does not automatically load `.env`.
 
-## Vercel Development
+## Vercel Development and Hobby Preview
 
-Vercel Hobby is intended only for personal development, previews, and test data—not commercial order processing.
+The Node Function at `api/[...path].ts` forwards HTTP requests to the shared `handleApiRequest` router. It buffers only bounded bodies, preserves multi-value `Set-Cookie`, imposes a 30-second request-body read timeout, supports only explicit methods, and keeps API responses private. Static root and `/templates/<id>/` paths are served directly by Vercel; no SPA fallback or API rewrite is configured. CORS preflight is limited to the exact configured `APP_ORIGIN` (or Vercel's deployment URL for a Preview if no override is set); credentialed requests never receive wildcard CORS.
 
-1. Connect the repository to Vercel and keep the existing static-site output settings for the frontend.
-2. No Vercel API Function adapter exists yet, so the current Cloudflare API is not transparently available through a Vercel deployment.
-3. Do not configure production customer data or live payment credentials in Vercel.
-4. When a Vercel API adapter is implemented, add only development Turso credentials to Vercel's server-side Development environment. Never expose them through `NEXT_PUBLIC_*`, `VITE_*`, or browser code.
-5. Keep test database credentials and webhook secrets separate from any later production candidate.
+Vercel Hobby is only for personal development, previews, and synthetic test data. Its terms and account eligibility must be checked before use; it must not be used for commercial sales, live checkout, or payment collection. No Vercel account, deployment, or CLI session was used in this phase.
+
+For Vercel local development:
+
+1. Install/use Vercel CLI and create the ignored `.local` directory.
+2. Copy `.env.example` to `.env.local` only if a user-owned `.env.local` does not already exist. The example uses `file:.local/crushify-vercel.db`, `STORAGE_PROVIDER=mock`, `LOCAL_TEST_MODE=true`, and `APP_ORIGIN=http://localhost:3000`.
+3. Run `npm run db:migrate:turso` against that local file database, then run `vercel dev`. Local `mock` storage is accepted only with local test mode; do not deploy those values.
+4. The Vercel function limit is set to 4 MiB for images, below Vercel's documented 4.5 MB function request/response payload limit; the Cloudflare Worker retains its existing 5 MiB limit. The create-upload response advertises the runtime's actual limit. See [Vercel Function limits](https://vercel.com/docs/functions/limitations#request-body-size).
+
+For a Vercel Preview:
+
+1. Use a dedicated, non-production Turso test database and a separate Cloudinary test account/folder; Vercel serverless filesystems are ephemeral and must not be used for persistent databases.
+2. Set server-only `DATABASE_PROVIDER=turso`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `STORAGE_PROVIDER=cloudinary`, `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`.
+3. Configure `APP_ORIGIN` to the exact preview origin if using a stable alias. Otherwise the adapter derives the deployment origin from Vercel's server-provided `VERCEL_URL`. Never use browser-visible prefixes such as `NEXT_PUBLIC_` or `VITE_`.
+4. Keep `LOCAL_TEST_MODE` disabled in Preview/Production. Set an appropriate Resend test sender if magic-link email is required; the Cloudflare-only `MAILER` binding is not used by Vercel.
+5. Do not add production customer data or enable checkout. Cloudinary adapter behavior is not verified against a real account.
+
+No `vercel.json` is required: conventional `api/` routing creates the function, and root static hosting preserves direct template paths without rewriting those routes to HTML.
 
 ## Turso/libSQL configuration
 
 Required server-side variables:
 
+- `DATABASE_PROVIDER=turso`
 - `TURSO_DATABASE_URL`
 - `TURSO_AUTH_TOKEN` (omit only for an isolated local `file:` database)
 
@@ -116,7 +130,7 @@ No `netlify.toml` or Netlify Function is added in this phase because routing and
 
 ## Cloudinary
 
-The server-side adapter is implemented for the current Cloudflare Worker. It uses signed authenticated image uploads, server-generated private IDs, bounded short-lived private downloads, and authenticated deletion. The API secret is never returned to the browser. The existing Worker routes still proxy image bytes and retain their current API response shape.
+The server-side adapter is implemented for both the Cloudflare Worker and Vercel runtime. It uses signed authenticated image uploads, server-generated private IDs, bounded short-lived private downloads, and authenticated deletion. The API secret is never returned to the browser. Both runtimes proxy image bytes and retain the current API response shape.
 
 To select Cloudinary for an isolated test environment, set these server-side values (never `VITE_*` or other browser-exposed variables):
 
@@ -124,7 +138,7 @@ To select Cloudinary for an isolated test environment, set these server-side val
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
 
-Set `STORAGE_PROVIDER=cloudinary` in the Worker environment and add the three credentials through the host's secret manager. The Worker fails closed if a value is missing and does not fall back to R2. The `.env.example` is a placeholder for server-side use; `.dev.vars.example` and both Wrangler configs select `STORAGE_PROVIDER=r2` by default. Local Cloudinary adapter tests use mocked HTTP only. No account credentials were supplied, and no Cloudinary request, real upload, asset migration, or deployment has been run.
+Set `STORAGE_PROVIDER=cloudinary` and add the three credentials through the host's secret manager. Both Vercel and Worker runtime selectors fail closed if configuration is missing and do not fall back to R2. `.dev.vars.example` and Wrangler configs explicitly select R2; `.env.example` selects in-memory mock only for local Vercel development. Local Cloudinary adapter tests use mocked HTTP only. No account credentials were supplied, and no Cloudinary request, real upload, asset migration, or deployment has been run.
 
 Do not switch an environment containing R2-backed asset rows by changing only the variable: storage providers do not share binaries. Plan and test a separate inventory/copy/verification/cutover procedure first. R2 remains available as the configured local/staging provider and rollback adapter; reverting after Cloudinary writes also requires transferring or otherwise reconciling those binaries. No implicit fallback is used.
 

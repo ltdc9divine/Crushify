@@ -32,16 +32,24 @@ python -m http.server 5500
 
 Sau đó truy cập `http://localhost:5500`.
 
-## Triển khai lên Vercel
+## Vercel Development và API
 
-1. Tạo kho lưu trữ GitHub và tải nội dung thư mục này lên.
-2. Nhập kho lưu trữ vào Vercel.
-3. Chọn cấu hình framework: **Other**.
-4. Để trống lệnh build.
-5. Thư mục đầu ra: `.`
-6. Triển khai.
+Vercel Functions adapter dùng chung API router và business logic hiện có. API runtime yêu cầu Turso và Cloudinary (hoặc storage mock chỉ trong local test); Worker D1/R2 vẫn được giữ nguyên để rollback. Chưa deploy lên Vercel và không dùng Vercel Hobby cho hoạt động thương mại, bán hàng, checkout hoặc nhận thanh toán.
 
-Vercel hosting theo hướng dẫn trên chỉ phục vụ trang tĩnh; Worker/API cần triển khai riêng trên Cloudflare Workers. Chưa cấu hình triển khai backend trên Vercel.
+Với Node.js 22.6+ và Vercel CLI đã cài:
+
+```powershell
+New-Item -ItemType Directory -Force .local
+if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
+$env:TURSO_DATABASE_URL = "file:.local/crushify-vercel.db"
+$env:TURSO_AUTH_TOKEN = ""
+npm run db:migrate:turso
+vercel dev
+```
+
+`.env.local` dùng `STORAGE_PROVIDER=mock` và `LOCAL_TEST_MODE=true` cho dữ liệu thử cục bộ. Không dùng file SQLite trên Vercel Preview/Production; Preview phải dùng Turso test database riêng và Cloudinary account riêng, secrets cấu hình qua Vercel server-side environment. `APP_ORIGIN` phải là origin chính xác của ứng dụng. API routes mặc định không cache; function giới hạn ảnh ở 4 MiB để nằm dưới giới hạn payload của serverless platform. Checkout và thanh toán chưa tồn tại.
+
+Khi import repository lên Vercel, chọn **Other**, giữ project root ở repository root, không cần build command hay `vercel.json` cho static paths và catch-all function. Các trang template tiếp tục được phục vụ từ thư mục tĩnh `templates/`; không rewrite API thành HTML và không thay đổi tài nguyên riêng của template.
 
 ## Kiểm tra nhanh
 
@@ -75,7 +83,7 @@ The local Cloudflare Worker serves the existing static site and exposes:
 - `GET /api/v1/health/ready` — D1 connectivity readiness.
 - Customer email magic-link request/verification, session, and CSRF-protected sign-out.
 - Owner-scoped Our Universe drafts with schema validation and optimistic revision checks.
-- Private R2-compatible image upload, verification, read, and deletion through the Worker.
+- Private image upload, verification, read, and deletion through the selected adapter.
 - Short-lived bearer preview tokens for Our Universe, including private preview photos.
 
 `LOCAL_TEST_MODE=true` makes the local adapter print a one-time sign-in link in the Wrangler console; it does not send email. The Worker proxies image bytes to its private R2 binding; it does not issue presigned R2 URLs. `.dev.vars` is local-only and must not be committed.
@@ -88,7 +96,7 @@ npm test
 npm run test:integration
 ```
 
-The integration test exercises local D1 and Wrangler's local R2 emulation. The current Worker continues to use D1; the shared database contract and Turso/libSQL adapter are being introduced separately. No remote Turso migration, Vercel API adapter, production R2 bucket, email provider, Cloudflare account bindings/secrets, staging deployment, or remote smoke test is configured. Do not deploy this local setup or use production customer data.
+The integration test exercises local D1 and Wrangler's local R2 emulation. The Cloudflare Worker continues to use D1/R2. The Vercel Node adapter is locally integration-tested against an isolated Turso file database and in-memory storage, but has not been tested on Vercel itself. No remote Turso migration, production storage, email provider, Cloudflare account bindings/secrets, or staging deployment is configured. Do not use production customer data.
 
 To apply the existing numbered SQLite migrations to a **new or verified empty** Turso database, set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the server environment and run:
 

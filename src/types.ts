@@ -19,6 +19,7 @@ export interface Env {
   MAILER_AUTH_TOKEN?: string;
   APP_ORIGIN?: string;
   LOCAL_TEST_MODE?: string;
+  UPLOAD_MAX_BYTES?: number;
 }
 
 export interface Session {

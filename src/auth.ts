@@ -226,7 +226,8 @@ export async function handleSessionRoutes(
       return apiError(requestId, 400, "VALIDATION_ERROR", "A valid email is required");
     }
     const now = Math.floor(Date.now() / 1000);
-    const ip = request.headers.get("cf-connecting-ip") ?? "local";
+    const ip = request.headers.get("cf-connecting-ip") ??
+      request.headers.get("x-vercel-forwarded-for") ?? "local";
     const ipAllowed = await applyRateLimit(env, `login-ip:${ip}`, now, 10, 600);
     const emailAllowed = await applyRateLimit(env, `login-email:${emailNormalized}`, now, 3, 900);
     if (!ipAllowed || !emailAllowed) {
@@ -284,7 +285,8 @@ export async function handleSessionRoutes(
         Object.keys(parsed.value).length !== 1 || typeof (parsed.value as { token?: unknown }).token !== "string") {
       return apiError(requestId, 400, "VALIDATION_ERROR", "A sign-in token is required");
     }
-    const ip = request.headers.get("cf-connecting-ip") ?? "local";
+    const ip = request.headers.get("cf-connecting-ip") ??
+      request.headers.get("x-vercel-forwarded-for") ?? "local";
     if (!await applyRateLimit(env, `verify-ip:${ip}`, Math.floor(Date.now() / 1000), 20, 600)) {
       return apiError(requestId, 429, "RATE_LIMITED", "Too many verification attempts");
     }

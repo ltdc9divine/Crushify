@@ -1,6 +1,6 @@
 # Crushify API Specification
 
-**Status:** proposed full-product contract. A local-only Our Universe subset is implemented through the shared database contract and the Cloudflare D1 adapter. The Turso adapter is available for database work, but Vercel/Netlify HTTP adapters and production APIs are not configured.
+**Status:** proposed full-product contract. The local Our Universe API subset is implemented through the shared router. Cloudflare D1/R2 and Vercel Turso/Cloudinary runtime adapters exist; D1/R2 integration and the Vercel adapter are tested only locally. No production API deployment or real provider credentials have been used.
 **Base path:** `/api/v1`. JSON over HTTPS. Public gift reads are separate from private customer APIs.
 
 ## 1. Common contract
@@ -130,10 +130,10 @@ The following routes are implemented for the Our Universe pilot. Local integrati
 | `POST /assets/upload-url` | Customer + CSRF | Create an opaque upload capability for a private image. |
 | `PUT /assets/{assetId}/content` | Upload capability | Validate PNG/JPEG signature, dimensions and size, then stream to the configured private storage provider. |
 | `POST /assets/{assetId}/complete` | Owner + CSRF | Recheck stored object size, type, digest and dimensions before marking it ready. |
-| `GET /assets/{assetId}` | Owner | Read private media through the Worker. |
+| `GET /assets/{assetId}` | Owner | Read private media through the selected API runtime. |
 | `DELETE /assets/{assetId}` | Owner + CSRF | Delete unreferenced private media. |
 
-`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Cloudflare Worker selects exactly one private storage adapter with `STORAGE_PROVIDER=r2|cloudinary`; missing configuration fails closed, with no cross-provider fallback. Local integration coverage exercises the Worker and R2 emulator. Adapter tests mock Cloudinary's signed authenticated upload, bounded private download and deletion; they do not prove compatibility with a real Cloudinary account. Production mail delivery requires a configured provider. Catalog, order, checkout, payment, publication, customer-requested erasure orchestration, and admin routes remain unimplemented. See [SECURITY_PLAN.md](SECURITY_PLAN.md), [STAGING_DEPLOYMENT.md](STAGING_DEPLOYMENT.md), and [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for deployment gaps.
+`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Cloudflare Worker selects exactly one private storage adapter with `STORAGE_PROVIDER=r2|cloudinary`; the Vercel Node adapter selects Cloudinary or local-test-only in-memory storage. Missing configuration fails closed, with no cross-provider fallback. Local integration coverage exercises the Worker/R2 emulator and the Vercel HTTP adapter with local Turso/mock storage. Cloudinary's signed authenticated upload, bounded private download and deletion are mocked only; they do not prove compatibility with a real Cloudinary account. Production mail delivery requires a configured provider. Catalog, order, checkout, payment, publication, customer-requested erasure orchestration, and admin routes remain unimplemented. See [SECURITY_PLAN.md](SECURITY_PLAN.md), [STAGING_DEPLOYMENT.md](STAGING_DEPLOYMENT.md), and [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for deployment gaps.
 
 ### Storage adapter contract
 
@@ -141,6 +141,10 @@ Business routes use `Storage` for private binary upload, read, deletion and priv
 
 Cloudinary is selected only when `STORAGE_PROVIDER=cloudinary` and all three server-side values are set: `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`. R2 requires `STORAGE_PROVIDER=r2` and the `MEDIA` binding. Do not switch providers against existing asset rows without a separately planned binary migration: each adapter reads only its own provider's objects, and a config flip is not a data migration. Upload cleanup is attempted if metadata persistence fails; failed cleanup is marked `DELETION_PENDING` for retry. Deletion likewise records pending state before deleting the binary and marks metadata `DELETED` only after successful storage deletion.
 
+### Vercel runtime adapter
+
+`api/[...path].ts` converts Node `IncomingMessage`/`ServerResponse` to Web `Request`/`Response` and calls the same `handleApiRequest` used by the Worker. It preserves multiple session/CSRF cookies, supports GET/POST/PUT/PATCH/DELETE/OPTIONS, rejects other methods, bounds JSON to 64 KiB and binary image upload bodies to 4 MiB, and applies a 30-second request-body read timeout. The Vercel runtime requires `DATABASE_PROVIDER=turso` with `TURSO_DATABASE_URL` and, for remote URLs, `TURSO_AUTH_TOKEN`; it rejects local `file:` databases outside Vercel Development. It requires `STORAGE_PROVIDER=cloudinary` and Cloudinary credentials except for `STORAGE_PROVIDER=mock`, which is available only in Vercel Development with `LOCAL_TEST_MODE=true`. The Turso connection is initialized on first API use and reused per warm function instance; migrations are never run on request. `APP_ORIGIN` must match exactly for credentialed CORS and CSRF; Preview may use the deployment-specific `VERCEL_URL` when no fixed origin is configured. No Vercel deployment or external credential test has run.
+
 ### Database adapter compatibility
 
-The routes above call the shared `Database` interface and retain their existing request/response behavior. The same API contract runner exercises auth/session, design/revision conflict, preview, and asset ownership flows on local Wrangler D1 and local Turso/libSQL. The Cloudflare Worker is still the only deployed-style HTTP adapter and remains D1-only; selecting Turso is currently supported by the local adapter test harness, not by a Vercel/Netlify API runtime. See [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md) for the value, batch, and error-mapping contract.
+The routes above call the shared `Database` interface and retain their existing request/response behavior. The same API contract runner exercises auth/session, design/revision conflict, preview, and asset ownership flows on local Wrangler D1 and local Turso/libSQL. Both the Cloudflare Worker (D1/R2) and Vercel (Turso/Cloudinary) adapters exist; local integration exercises Cloudflare with D1/R2 and Vercel with Turso/mock storage. See [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md) for the value, batch, and error-mapping contract.

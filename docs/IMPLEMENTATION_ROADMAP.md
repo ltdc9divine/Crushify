@@ -1,6 +1,6 @@
 # Crushify Implementation Roadmap
 
-**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 Our Universe foundation remains active and is integration-tested locally. A shared database contract, D1 adapter, Turso/libSQL adapter, guarded migration CLI, and selectable R2/Cloudinary storage adapters are implemented and tested locally (Cloudinary adapter tests use mocks only); no remote Turso migration, Cloudinary account test, or data transfer has occurred. Estimates assume one experienced full-stack engineer with product/design decisions available. Production capability is not configured.
+**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 Our Universe foundation remains available and is integration-tested locally. The shared router has a Vercel Node Functions adapter tested against isolated local Turso and mock storage; R2/Cloudinary adapters are implemented, but Cloudinary uses mocked HTTP tests only. No Vercel deployment, remote Turso migration, Cloudinary account test, or data transfer has occurred. Production capability is not configured.
 
 ## 1. Priority before launch
 
@@ -42,7 +42,8 @@
 
 - Local Our Universe upload authorization/finalization, PNG/JPEG checks, private R2-compatible access/deletion, and expiring preview tokens are implemented and integration-tested.
 - A provider-neutral storage contract and R2/Cloudinary adapters are implemented. The current Worker defaults explicitly to R2; Cloudinary is signed/authenticated with server-side credentials and mocked in tests only.
-- Still needed: real Cloudinary account compatibility checks, a deliberate asset migration procedure before provider cutover, production bucket/account, image normalization and scanning policy, quotas/cleanup operations, adaptation of other photo templates, security review, renderer version pinning, and production device/browser QA.
+- Vercel API adapter reuses the same router and database/storage interfaces, caps uploads at 4 MiB, and uses local Turso/mock storage for tests; Vercel Hobby is not intended for commercial processing.
+- Still needed: real Vercel deployment validation, real Turso/Cloudinary account compatibility checks, a deliberate asset migration procedure before provider cutover, production buckets/accounts, image normalization and scanning policy, quotas/cleanup operations, adaptation of other photo templates, security review, renderer version pinning, and production device/browser QA.
 
 ### Sprint 4 — Publication and template rollout (1–2 weeks)
 
