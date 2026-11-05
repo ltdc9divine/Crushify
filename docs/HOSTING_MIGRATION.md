@@ -8,6 +8,7 @@ This is a staged migration guide, not a production deployment record.
 - The shared SQL contract and Turso/libSQL adapter are implemented. The same API contract tests run against local Wrangler D1 and an ephemeral local Turso/libSQL file database; the migration CLI is tested locally.
 - No remote Turso database has been connected, and no existing D1 data has been exported or imported.
 - The Vercel adapter additionally passes the shared API contract over a local Node HTTP server using a local Turso file and in-memory media. It has not been deployed or tested on Vercel. Cloudinary HTTP is mock-tested only; no Cloudinary account, credentials, upload, or real-account compatibility check is configured. Netlify and SePay are not implemented. Do not enable checkout or publication.
+- Phase 4 browser checks on 2026-11-05 covered the homepage and all five template paths at 1366×768, 1440×900, 390×844, and 375×812 through the local Worker/static server. All routes returned 200, had no horizontal overflow, and showed their canvas; Distance Means Nothing also showed its designed two-planet fallback with WebGL disabled. The unauthenticated Our Universe editor's `GET /customers/me` returns the expected 401 and presents sign-in. Vercel CLI is authenticated but this repository is not linked to a Vercel project, so `vercel dev` and Preview deployment were not run. Remote Turso and Cloudinary credentials and the remote-test safety flag are absent.
 - The local rollback branch `backup/cloudflare-pre-turso-20261104` points to the pre-migration commit. It has not been pushed.
 
 Do not run a remote migration until the destination identity, current D1 data state, export/import plan, backup, restore test, and migration window are explicitly verified. The CLI intentionally refuses untracked existing database schemas.
@@ -46,7 +47,7 @@ The command runs the numbered SQL files in `migrations/`, verifies SHA-256 migra
 
 The Node Function at `api/[...path].ts` forwards HTTP requests to the shared `handleApiRequest` router. It buffers only bounded bodies, preserves multi-value `Set-Cookie`, imposes a 30-second request-body read timeout, supports only explicit methods, and keeps API responses private. Static root and `/templates/<id>/` paths are served directly by Vercel; no SPA fallback or API rewrite is configured. CORS preflight is limited to the exact configured `APP_ORIGIN` (or Vercel's deployment URL for a Preview if no override is set); credentialed requests never receive wildcard CORS.
 
-Vercel Hobby is only for personal development, previews, and synthetic test data. Its terms and account eligibility must be checked before use; it must not be used for commercial sales, live checkout, or payment collection. No Vercel account, deployment, or CLI session was used in this phase.
+Vercel Hobby is only for personal development, previews, and synthetic test data. Its terms and account eligibility must be checked before use; it must not be used for commercial sales, live checkout, or payment collection. The CLI account is authenticated, but this repository has no `.vercel` project link and no deployment was performed.
 
 For Vercel local development:
 

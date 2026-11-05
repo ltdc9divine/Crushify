@@ -59,6 +59,8 @@ Sau khi cập nhật giao diện hoặc đường dẫn, chạy `node --check` c
 2. Các trang `templates/<template>/index.html` tải CSS, JavaScript và tài nguyên của chính mẫu đó.
 3. Mở các tương tác chính trên desktop và viewport di động; kiểm tra console và Network không có lỗi tải tài nguyên.
 
+Responsive baseline đã được kiểm tra trên trình duyệt tại 1366×768, 1440×900, 390×844 và 375×812. Đã sửa tràn ngang trang chủ; Distance Means Nothing mở canvas hoặc fallback khi xem trên mobile. Các kiểm tra này không thay thế kiểm thử thiết bị thật hoặc Vercel Preview.
+
 ## Phạm vi hiện tại
 
 - Trang chủ responsive, điều hướng menu, bộ lọc mẫu quà và cửa sổ xem trước.

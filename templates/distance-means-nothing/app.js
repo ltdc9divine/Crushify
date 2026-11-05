@@ -63,8 +63,13 @@ addEventListener('keydown',e=>{if(e.key==='Escape'){panel.hidden=true;$('#final'
 function setView(v){document.body.classList.toggle('view',v);scene?.resize()}
 $('#viewAs').onclick=()=>{setView(true);scene?.start();history.replaceState(null,'','#preview')};
 $('#copyLink').onclick=async e=>{const d={...S,memories:[]},u=location.href.split('#')[0]+'#v='+b64e(d);try{await navigator.clipboard.writeText(u);e.target.textContent='Đã sao chép liên kết'}catch{prompt('Sao chép liên kết này',u)}setTimeout(()=>e.target.textContent='Sao chép liên kết người nhận',2000)};
-$$('#tabs button').forEach(b=>b.onclick=()=>{$$('#tabs button').forEach(x=>x.classList.toggle('on',x===b));document.body.classList.toggle('tab-stage',b.dataset.t==='stage');scene?.resize()});
+const mobileTabs=matchMedia('(max-width:800px)');let mobileTabChosen=false;
+const selectMobileTab=stage=>{$$('#tabs button').forEach(b=>{const selected=b.dataset.t===(stage?'stage':'editor');b.classList.toggle('on',selected);b.setAttribute('aria-pressed',String(selected))});document.body.classList.toggle('tab-stage',stage);scene?.resize()};
+$$('#tabs button').forEach(b=>b.onclick=()=>{mobileTabChosen=true;selectMobileTab(b.dataset.t==='stage')});
 if(recipient||location.hash==='#preview')document.body.classList.add('view');
+if(mobileTabs.matches&&!document.body.classList.contains('view'))selectMobileTab(true);
+mobileTabs.addEventListener('change',event=>{if(event.matches&&!mobileTabChosen&&!document.body.classList.contains('view'))selectMobileTab(true)});
+addEventListener('resize',()=>{if(mobileTabs.matches&&!mobileTabChosen&&!document.body.classList.contains('view'))selectMobileTab(true)});
 // ---------- boot ----------
 bind();render();
 (async()=>{try{const {DistanceScene}=await import('./DistanceScene.js');scene=new DistanceScene($('#gl'),{onPick,onPhase});glOK=true;scene.apply(S,th());scene.start()}

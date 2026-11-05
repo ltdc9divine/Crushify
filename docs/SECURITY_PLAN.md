@@ -67,6 +67,8 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 
 ## 9. Required pre-launch tests
 
+Local responsive browser regression on 2026-11-05 exercised the homepage and five template routes at 1366×768, 1440×900, 390×844, and 375×812 on synthetic/local data. No remote Turso or Cloudinary credentials were configured; these checks do not establish hosted-provider or production security.
+
 IDOR across every entity; preview expiry/revocation; public slug collision; XSS payloads in all template fields/captions; upload MIME/polyglot/oversize/decompression abuse; CSRF; brute-force; webhook bad signature/replay/amount mismatch/duplicate/out-of-order; concurrent coupon/order redemption; stale revision conflict; publication cache leak; backup restore and deletion workflow.
 
 ## 10. Phase 2 implementation limits
