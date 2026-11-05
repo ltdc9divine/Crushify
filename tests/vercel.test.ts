@@ -3,6 +3,7 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createServer, type AddressInfo, type IncomingMessage } from "node:http";
 import { PassThrough } from "node:stream";
 import { createClient } from "@libsql/client";
@@ -15,6 +16,7 @@ import { MemoryStorageAdapter } from "../src/storage/mock.ts";
 import { createVercelApiHandler, VERCEL_UPLOAD_MAX_BYTES } from "../src/platform/vercel.ts";
 import nodeHandler, { readVercelRequestBody } from "../api/[...path].ts";
 import { runDatabaseContract } from "./database-contract.mjs";
+import { runPaymentContract } from "./payment-contract.mjs";
 
 async function loadMigrations(): Promise<SqlMigration[]> {
   const directory = join(process.cwd(), "migrations");
@@ -43,6 +45,8 @@ describe("Vercel API runtime adapter", () => {
     const databaseUrl = pathToFileURL(databasePath).href;
     const migrationClient = createClient({ url: databaseUrl, intMode: "number" });
     const tokenQueue: string[] = [];
+    const webhookSecret = randomBytes(32).toString("hex");
+    const receivingAccount = "0000000000";
     let closeRuntimeDatabase = () => undefined;
     let databaseConnections = 0;
     const storage: Storage = new MemoryStorageAdapter();
@@ -51,6 +55,9 @@ describe("Vercel API runtime adapter", () => {
       TURSO_DATABASE_URL: databaseUrl,
       STORAGE_PROVIDER: "mock",
       LOCAL_TEST_MODE: "true",
+      PAYMENT_MODE: "mock",
+      SEPAY_WEBHOOK_SECRET: webhookSecret,
+      SEPAY_BANK_ACCOUNT: receivingAccount,
       APP_ORIGIN: "https://crushify.test",
       VERCEL_ENV: "development",
     }, {
@@ -64,7 +71,7 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2]);
+      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3]);
       const live = await handler(requestWithOrigin("/health/live", "https://crushify.test"));
       assert.equal(live.status, 200);
       const ready = await handler(requestWithOrigin("/health/ready", "https://crushify.test"));
@@ -75,12 +82,13 @@ describe("Vercel API runtime adapter", () => {
         headers: {
           Origin: "https://crushify.test",
           "Access-Control-Request-Method": "POST",
-          "Access-Control-Request-Headers": "content-type,x-csrf-token",
+          "Access-Control-Request-Headers": "content-type,idempotency-key,x-csrf-token",
         },
       }));
       assert.equal(preflight.status, 204);
       assert.equal(preflight.headers.get("access-control-allow-origin"), "https://crushify.test");
       assert.equal(preflight.headers.get("access-control-allow-credentials"), "true");
+      assert.match(preflight.headers.get("access-control-allow-headers") ?? "", /idempotency-key/i);
 
       const deniedPreflight = await handler(new Request("https://crushify.test/api/v1/designs", {
         method: "OPTIONS",
@@ -146,6 +154,63 @@ describe("Vercel API runtime adapter", () => {
             const token = tokenQueue.shift();
             assert.ok(token, "Vercel local-test email should capture a magic link token");
             return token;
+          },
+          label: "Vercel adapter + Turso local file + mock storage",
+        });
+        await runPaymentContract({
+          request: async (path: string, session?: { cookies: string[]; csrf: string }, options = {}) => {
+            const settings = options as {
+              method?: string;
+              mutating?: boolean;
+              json?: unknown;
+              token?: string;
+              headers?: HeadersInit;
+              body?: BodyInit;
+            };
+            const headers = new Headers(settings.headers);
+            if (session?.cookies.length) headers.set("Cookie", session.cookies.join("; "));
+            if (settings.mutating ||
+                ["POST", "PUT", "PATCH", "DELETE"].includes(settings.method ?? "")) {
+              headers.set("Origin", "https://crushify.test");
+              if (session?.csrf) headers.set("X-CSRF-Token", session.csrf);
+            }
+            if (settings.json !== undefined) headers.set("Content-Type", "application/json");
+            const response = await handler(new Request(`https://crushify.test/api/v1${path}`, {
+              method: settings.method ?? "GET",
+              headers,
+              body: settings.json === undefined ? settings.body : JSON.stringify(settings.json),
+            }));
+            const body = response.status === 204 ||
+              !response.headers.get("content-type")?.includes("application/json")
+              ? null
+              : await response.json();
+            return { response, body };
+          },
+          async seedPrice(amount) {
+            await migrationClient.execute({
+              sql: `INSERT INTO template_prices (
+                id, template_id, schema_version, currency, amount_minor, is_active, created_at, updated_at
+              ) VALUES (?, 'our-universe', 1, 'VND', ?, 1, ?, ?)`,
+              args: [`test-price-${crypto.randomUUID()}`, amount, new Date().toISOString(), new Date().toISOString()],
+            });
+          },
+          owner: contract.owner,
+          designId: contract.designId,
+          webhookSecret,
+          receivingAccount,
+          async expireOrder(orderId: string) {
+            await migrationClient.execute({
+              sql: "UPDATE orders SET expires_at = ? WHERE id = ?",
+              args: ["2000-01-01T00:00:00.000Z", orderId],
+            });
+          },
+          async inspectWebhookOutcomes(transactionIds: string[]) {
+            const result = await migrationClient.execute({
+              sql: `SELECT outcome FROM payment_webhook_events
+                WHERE provider = 'SEPAY' AND event_id IN (?, ?)`,
+              args: transactionIds,
+            });
+            return result.rows.map((row) => String(row.outcome));
           },
           label: "Vercel adapter + Turso local file + mock storage",
         });
@@ -277,7 +342,7 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2]);
+      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3]);
       process.env.DATABASE_PROVIDER = "turso";
       process.env.TURSO_DATABASE_URL = databaseUrl;
       process.env.TURSO_AUTH_TOKEN = "";

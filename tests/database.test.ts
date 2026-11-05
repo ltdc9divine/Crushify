@@ -30,7 +30,7 @@ describe("Turso/libSQL migrations", () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     try {
       const migrations = await loadMigrations();
-      assert.deepEqual(await applyMigrations(client, migrations), [1, 2]);
+      assert.deepEqual(await applyMigrations(client, migrations), [1, 2, 3]);
       assert.deepEqual(await applyMigrations(client, migrations), []);
 
       const ledger = await client.execute(
@@ -39,6 +39,7 @@ describe("Turso/libSQL migrations", () => {
       assert.deepEqual(ledger.rows.map((row) => [row.version, row.name]), [
         [1, "initial_schema"],
         [2, "auth_previews_and_uploads"],
+        [3, "local_test_payments"],
       ]);
 
       const foreignKeys = await client.execute("PRAGMA foreign_keys");

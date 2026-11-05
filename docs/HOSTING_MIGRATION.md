@@ -7,7 +7,8 @@ This is a staged migration guide, not a production deployment record.
 - The Cloudflare Worker remains available with D1/R2 for rollback. A Vercel Node Functions catch-all now uses the shared API router with Turso and Cloudinary adapters.
 - The shared SQL contract and Turso/libSQL adapter are implemented. The same API contract tests run against local Wrangler D1 and an ephemeral local Turso/libSQL file database; the migration CLI is tested locally.
 - No remote Turso database has been connected, and no existing D1 data has been exported or imported.
-- The Vercel adapter additionally passes the shared API contract over a local Node HTTP server using a local Turso file and in-memory media. It has not been deployed or tested on Vercel. Cloudinary HTTP is mock-tested only; no Cloudinary account, credentials, upload, or real-account compatibility check is configured. Netlify and SePay are not implemented. Do not enable checkout or publication.
+- The Vercel adapter additionally passes the shared API contract over a local Node HTTP server using a local Turso file and in-memory media. It has not been deployed or tested on Vercel. Cloudinary HTTP is mock-tested only; no Cloudinary account, credentials, upload, or real-account compatibility check is configured.
+- The local-only order/SePay webhook prototype is tested with generated HMAC secrets, synthetic prices and account fixtures against local D1 and Turso. It does not connect to SePay, collect money, activate prices, grant entitlements, publish designs, or support production. Vercel Preview/Production forcibly omit the payment settings.
 - Phase 4 browser checks on 2026-11-05 covered the homepage and all five template paths at 1366×768, 1440×900, 390×844, and 375×812 through the local Worker/static server. All routes returned 200, had no horizontal overflow, and showed their canvas; Distance Means Nothing also showed its designed two-planet fallback with WebGL disabled. The unauthenticated Our Universe editor's `GET /customers/me` returns the expected 401 and presents sign-in. Vercel CLI is authenticated but this repository is not linked to a Vercel project, so `vercel dev` and Preview deployment were not run. Remote Turso and Cloudinary credentials and the remote-test safety flag are absent.
 - The local rollback branch `backup/cloudflare-pre-turso-20261104` points to the pre-migration commit. It has not been pushed.
 
@@ -30,6 +31,10 @@ Copy-Item .dev.vars.example .dev.vars
 npm run db:apply:local
 npm run dev
 ```
+
+Payment tests are local-only. The checked-in `.dev.vars.example` does not contain a webhook secret or bank credentials. For development, set `PAYMENT_MODE=mock` and generate a random `SEPAY_WEBHOOK_SECRET` in the ignored `.dev.vars`; do not use a secret from any live account. `mock` never creates a QR. `sepay-test` additionally requires Test mode bank code/account configured in the SePay dashboard; do not copy Live bank settings. The checkout UI is `/checkout/?design_id=<owned-draft-id>` and requires a signed-in local session plus an active test price. Migration `0003` intentionally seeds no prices; test runners seed synthetic VND 50,000 prices only into disposable databases.
+
+The local SePay callback path is `POST /api/v1/payments/sepay/webhook`. To test against SePay's actual Test mode, create a Test mode bank account and webhook in its dashboard, select HMAC-SHA256, set the callback URL to a publicly reachable HTTPS test endpoint, and simulate an incoming transfer. This needs SePay account access and explicit isolated Test mode credentials; no such account was used during this implementation. Do not point Test mode at a Live endpoint or use a Live account for development.
 
 The Turso adapter and migration CLI can be exercised against an isolated local SQLite file; do not use a production URL for tests:
 
@@ -62,7 +67,7 @@ For a Vercel Preview:
 2. Set server-only `DATABASE_PROVIDER=turso`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `STORAGE_PROVIDER=cloudinary`, `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`.
 3. Configure `APP_ORIGIN` to the exact preview origin if using a stable alias. Otherwise the adapter derives the deployment origin from Vercel's server-provided `VERCEL_URL`. Never use browser-visible prefixes such as `NEXT_PUBLIC_` or `VITE_`.
 4. Keep `LOCAL_TEST_MODE` disabled in Preview/Production. Set an appropriate Resend test sender if magic-link email is required; the Cloudflare-only `MAILER` binding is not used by Vercel.
-5. Do not add production customer data or enable checkout. Cloudinary adapter behavior is not verified against a real account.
+5. Do not add production customer data or enable checkout. The adapter does not pass payment mode or SePay secrets in Preview/Production. Cloudinary adapter behavior is not verified against a real account.
 
 No `vercel.json` is required: conventional `api/` routing creates the function, and root static hosting preserves direct template paths without rewriting those routes to HTML.
 
@@ -145,16 +150,11 @@ Do not switch an environment containing R2-backed asset rows by changing only th
 
 Cloudinary currently advertises 25 monthly credits on its Free plan; credits are shared across managed storage, image bandwidth and transformations (the exact conversion and feature availability depend on current plan terms). This is not a guaranteed quota or commercial eligibility statement. Check the [current Cloudinary pricing and plan terms](https://cloudinary.com/pricing), authenticated-asset delivery features, account limits, regional/privacy terms, retention, and intended commercial use directly with Cloudinary before selecting it for production. Track credit usage and set upload quotas/alerts.
 
-## SePay
+## SePay local prototype and production gate
 
-Not implemented. The requested future server-side variables are:
+The code currently supports only `PAYMENT_MODE=mock|sepay-test` in a local runtime with `LOCAL_TEST_MODE=true`. Server-only variables are `SEPAY_WEBHOOK_SECRET`, `SEPAY_BANK_CODE`, `SEPAY_BANK_ACCOUNT`, and `SEPAY_ACCOUNT_NAME`; no values belong in source control or browser variables. `sepay-test` constructs a VietQR image URL only when local Test mode bank settings exist. `mock` produces no QR. The migration adds an empty price catalog, not real prices.
 
-- `SEPAY_WEBHOOK_SECRET`
-- `SEPAY_BANK_CODE`
-- `SEPAY_BANK_ACCOUNT`
-- `SEPAY_ACCOUNT_NAME`
-
-Before integration, verify provider account and settlement eligibility, webhook signature/timestamp documentation, test-vs-live separation, reconciliation, refunds, and business/legal requirements. Future webhook verification must authenticate the raw request body before parsing, prevent replay and duplicate transaction use, compare the actual receiving account/amount/reference, and route ambiguous transactions to manual review. No checkout, QR payment, webhook, or paid-state transition is active.
+Not implemented: SePay Live mode, production webhooks, admin reconciliation, refunds, scheduled retry/reconciliation jobs, entitlement, fulfillment, publication, custom deposit/balance payments, or price management UI. Do not enable live checkout or send/receive actual money. See [SEPAY_SETUP.md](SEPAY_SETUP.md) for Test mode steps and [SEPAY_PRICING_AND_PROMOTIONS.md](SEPAY_PRICING_AND_PROMOTIONS.md) for the sourced pricing snapshot and eligibility caveats.
 
 ## Rollback checklist
 
@@ -164,4 +164,4 @@ Before integration, verify provider account and settlement eligibility, webhook 
 4. If a later API-adapter release fails, route traffic back to the last verified Cloudflare Worker release. Do not delete or overwrite either database or storage.
 5. If data has been written to both systems, pause writes and reconcile from a verified backup before choosing an authoritative copy. Do not perform an automatic reverse migration.
 6. Preserve migration logs/checksums and record the reason, operator, and restore point.
-7. Re-enable checkout or publication only after a separate release review; neither exists in the current implementation.
+7. Keep checkout/payment disabled outside local tests. Enable any future production purchase or publication only after a separate release review; no commercial flow is approved.

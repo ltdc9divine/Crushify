@@ -1,6 +1,6 @@
 # Crushify API Specification
 
-**Status:** proposed full-product contract. The local Our Universe API subset is implemented through the shared router. Cloudflare D1/R2 and Vercel Turso/Cloudinary runtime adapters exist; D1/R2 integration and the Vercel adapter are tested only locally. No production API deployment or real provider credentials have been used.
+**Status:** proposed full-product contract with a local-only order/SePay webhook subset. Cloudflare D1/R2 and Vercel Turso/mock runtime paths are tested only with local synthetic data. No production API deployment or real provider credentials have been used.
 **Base path:** `/api/v1`. JSON over HTTPS. Public gift reads are separate from private customer APIs.
 
 ## 1. Common contract
@@ -132,8 +132,24 @@ The following routes are implemented for the Our Universe pilot. Local integrati
 | `POST /assets/{assetId}/complete` | Owner + CSRF | Recheck stored object size, type, digest and dimensions before marking it ready. |
 | `GET /assets/{assetId}` | Owner | Read private media through the selected API runtime. |
 | `DELETE /assets/{assetId}` | Owner + CSRF | Delete unreferenced private media. |
+| `POST /orders` | Customer + CSRF + `Idempotency-Key` | Create a local test order from an owned Our Universe draft and an active server-side price; client amounts are rejected. |
+| `GET /orders` | Customer | List up to 50 own self-service orders. |
+| `GET /orders/{orderId}` / `GET /orders/{orderId}/status` | Owner | Read own order and payment status; ownership failures return 404. |
+| `POST /payments/sepay/webhook` | SePay HMAC-SHA256 | Verify raw-body signature and ±300-second timestamp, persist event, then process idempotently or mark for manual review. |
 
-`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Cloudflare Worker selects exactly one private storage adapter with `STORAGE_PROVIDER=r2|cloudinary`; the Vercel Node adapter selects Cloudinary or local-test-only in-memory storage. Missing configuration fails closed, with no cross-provider fallback. Local integration coverage exercises the Worker/R2 emulator and the Vercel HTTP adapter with local Turso/mock storage. Cloudinary's signed authenticated upload, bounded private download and deletion are mocked only; they do not prove compatibility with a real Cloudinary account. Production mail delivery requires a configured provider. Catalog, order, checkout, payment, publication, customer-requested erasure orchestration, and admin routes remain unimplemented. See [SECURITY_PLAN.md](SECURITY_PLAN.md), [STAGING_DEPLOYMENT.md](STAGING_DEPLOYMENT.md), and [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for deployment gaps.
+`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Worker selects one private storage adapter; Vercel uses Cloudinary or local-test-only mock storage. Order routes are available only when `LOCAL_TEST_MODE=true`, the runtime is local, `PAYMENT_MODE=mock|sepay-test`, and a local webhook secret is configured. The new price table starts empty, so order creation returns `PRICE_UNAVAILABLE` until a test price is explicitly inserted into a disposable local database. No live checkout, production prices, fulfillment, entitlement, publication, refund, custom-project payment, or admin reconciliation exists. See [SEPAY_SETUP.md](SEPAY_SETUP.md) and [SECURITY_PLAN.md](SECURITY_PLAN.md).
+
+### Implemented local order contract
+
+Create order with `POST /api/v1/orders`, an owner session, CSRF token, and `Idempotency-Key` header (16–128 ASCII letters/digits/period/underscore/colon/hyphen):
+
+```json
+{ "design_id": "owned-draft-uuid" }
+```
+
+The server accepts no other body fields; it loads the active template/version and price, snapshots the current draft revision, uses VND integer amounts, and expires the order after 15 minutes. A retry with the same key and same design returns the same order; reuse for a different design returns 409. `payment.qr_url` is null in mock mode; SePay Test mode requires explicit local Test mode bank settings and creates a QR. The order/payment reference is the same CRF-prefixed value. The browser checkout lives at `/checkout/?design_id=...` and is a local-test UI, not a purchase CTA.
+
+For `POST /api/v1/payments/sepay/webhook`, only JSON bodies up to 64 KiB are accepted. HMAC uses `X-SePay-Timestamp` and `X-SePay-Signature: sha256=<hex>` over `{timestamp}.{raw_body}`. Verified but unmatched/mismatched/late events are retained and acknowledged with HTTP 200 `{"success":true}` only after recording `MANUAL_REVIEW`; invalid/expired signatures are rejected. A payment becomes successful only for a matching reference, incoming transfer, configured receiving account, exact amount, unexpired pending order, and unique provider transaction ID. No browser endpoint can set a payment or order to paid.
 
 ### Storage adapter contract
 

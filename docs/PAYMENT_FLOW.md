@@ -1,14 +1,15 @@
 # Payment and Entitlement Flow
 
-**Status:** design only. No gateway, checkout, webhook, or payment status mutation has been implemented.
-**Requested provider:** SePay is the intended future integration, subject to account, settlement, currency, refund, security and legal checks. No test or live credentials are configured.
+**Status:** local-only order and SePay webhook verification prototype. Synthetic local tests run against D1 and Turso/libSQL; no provider account has been connected, no real transaction was made, and no live checkout or publication is enabled.
+**Provider:** SePay Test mode is the only future provider path considered here. Production/live mode is deliberately disabled in both runtimes.
 
 ## 1. Authority model
 
 - Browser may request a checkout for a catalog SKU/design revision; it cannot set price, currency, discount amount, entitlement, `PAID`, or fulfillment state.
-- The server-side API loads the current enabled SKU/quote, validates ownership and eligibility, computes totals in integer minor units and creates a local order/payment attempt.
-- Provider-hosted checkout/redirect is preferred for the initial launch to reduce handling of card data. Crushify must not collect/store card PAN/CVV.
-- Only a verified provider webhook (or documented administrator reconciliation with evidence and elevated access) can mark a payment successful.
+- The server loads an active `template_prices` row; the browser cannot submit a price or currency. The table is empty until a local test price is explicitly inserted.
+- The server creates a pending order and payment attempt from an owned Our Universe draft, with the current design revision snapshotted. Order creation is idempotent and expires after 15 minutes.
+- In `mock` mode, no QR is emitted. In `sepay-test` mode, a QR is emitted only from explicit local SePay Test mode bank settings.
+- Only a valid HMAC-signed webhook with fresh timestamp, unique transaction, exact payment reference, incoming transfer, receiving account and exact amount can mark a pending payment/order successful. There is no admin reconciliation endpoint.
 - The browser return URL is UX only. It displays “processing/confirmed” based on a server read; never fulfills directly from a query parameter or client callback.
 
 ## 2. Self-service state machine
@@ -18,38 +19,29 @@ Design DRAFT ── valid save ──> DRAFT revision N
      │
      └── checkout request ──> Order AWAITING_PAYMENT + Payment PENDING
                                   │
-                    signed paid webhook ──> Payment SUCCEEDED
-                                  │
-                                  └── atomic order PAID + entitlement
-                                                │
-                                                └── publish job
-                                                      ├── FULFILLED + URL
-                                                      └── retryable FULFILLING
+                    signed paid webhook ──> Payment SUCCEEDED + Order PAID
 ```
 
-Failure/cancel/expiry transitions never grant entitlement. Refund events transition order through refund states and may unpublish/revoke based on the disclosed product/refund policy. That policy must be decided before implementation.
+Failure, mismatch, cancellation or expiry never grants entitlement. Mismatch/late/unmatched signed events are stored for manual review. The persisted base schema has review flags rather than new `MANUAL_REVIEW` enum values; the API exposes an effective `MANUAL_REVIEW` status. No fulfillment, entitlement, refund or publication transition is implemented.
 
-## 3. Checkout creation
+## 3. Local order creation
 
-1. Authenticate customer and load design by owner ID.
-2. Validate active template/version, asset readiness, design revision and SKU compatibility.
-3. Resolve server price from versioned catalog. Apply eligible coupon server-side under usage constraints.
-4. Create `orders`, `order_items` price snapshots and `payments` attempt with an idempotency key.
-5. Call provider using a unique merchant reference and server amount/currency. Store provider checkout/session ID and expiry.
-6. Return only checkout URL, opaque order ID and expiry.
-7. If provider creation times out, reconcile using idempotency/merchant reference; do not create duplicate charge attempts.
+1. Require local runtime, `LOCAL_TEST_MODE=true`, `PAYMENT_MODE=mock|sepay-test`, a local webhook secret, customer session and CSRF.
+2. Require an owned DRAFT Our Universe design and active template/version.
+3. Load the active server-side VND template price; no active price currently exists. Do not populate production prices from homepage copy or assumptions.
+4. Insert order, item and pending payment through the shared database batch. Client fields besides `design_id` are rejected. The item snapshots template and design revision.
+5. Return the order reference, amount, 15-minute expiry and a QR URL only when explicitly configured for SePay Test mode.
 
-If price changes between draft and checkout, show the authoritative price before redirect. Save the exact design revision used for the order; lock or snapshot it so checkout payment cannot publish a later, unpurchased revision.
+`GET /checkout/?design_id=...` is a local-only experimental view. It requires an existing login and an explicitly activated local test price. It polls only the owner-scoped order status. It does not publish or create an entitlement.
 
 ## 4. Webhook and idempotency
 
-- Verify signature over exact raw body, timestamp/nonce rules and configured endpoint secret.
-- Insert unique `(provider, event_id)` before processing. Duplicate deliveries return 2xx after recording/confirming prior outcome.
-- Match provider transaction and merchant reference to expected local payment; compare exact amount, currency, merchant account, environment and order state.
-- Apply transitions in a database transaction where possible; use conditional updates so two concurrent webhooks cannot fulfill twice.
-- Fulfillment/publication is a separate idempotent operation, retryable after a crash. Never keep a database transaction open while calling the provider, storage service or email API.
-- Record only necessary, redacted webhook metadata and payload hash; no card/secret data.
-- Provide reconciliation for missed/out-of-order webhooks using provider API and audited admin action.
+- Verify `X-SePay-Signature` (`sha256=<hex>`) over the exact raw JSON body with `X-SePay-Timestamp`; reject timestamps outside ±300 seconds before parsing.
+- Insert unique `(provider,event_id)` and exact raw JSON/hash before processing. Duplicate transaction IDs are also unique on `(provider,provider_payment_id)` in `payments`.
+- Match `code` exactly to the generated payment reference; require `transferType=in`, configured receiving account, exact integer `transferAmount`, pending payment/order, and unexpired order.
+- Use conditional database updates/batches so simultaneous identical webhooks do not grant twice. A verified mismatch/unmatched/late event is retained as `MANUAL_REVIEW`; never mark paid from the return URL.
+- SePay must receive HTTP 200/201 with `{"success":true}` after durable processing. Storage/processing failure returns an error so configured provider retry can retry. No background queue/reconciliation job exists.
+- Webhook raw payloads can contain account and transaction data; protect access and retention before any production use.
 
 ## 5. Custom project payments
 
@@ -63,7 +55,7 @@ The workflow and guards are detailed in [CUSTOM_DESIGN_WORKFLOW.md](CUSTOM_DESIG
 
 ## 6. Coupons, refunds and reconciliation
 
-- Normalize coupon codes; validate active window, template/SKU eligibility, currency, per-customer limit and global remaining count at checkout.
+- Coupons, refunds, reconciliation jobs, admin actions and custom deposit/balance payments are not implemented.
 - Reserve/redemption strategy must avoid concurrent oversubscription. Count redemption once under idempotent transaction and release reservation on expiry/failure if using reservations.
 - Refund is a provider operation initiated by authorized server/admin; store refund reference/events, never mark refunded just because frontend asked.
 - Reconcile pending payments on schedule or manually; compare local orders with provider settlement/export and report amount/currency/reference mismatches.

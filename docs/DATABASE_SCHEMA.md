@@ -1,9 +1,9 @@
 # Crushify Database Schema
 
-**Status:** SQLite schema contract shared by the current Cloudflare D1 backend and the staged Turso/libSQL target. Migrations `0001` and `0002` are applied to local Wrangler D1 and are also applied to an ephemeral Turso/libSQL file database by tests; no persistent or remote Turso database has been migrated.
+**Status:** SQLite schema contract shared by the current Cloudflare D1 backend and the staged Turso/libSQL target. Migrations `0001`–`0003` are applied to local Wrangler D1 and an ephemeral Turso/libSQL file database by tests; no persistent or remote Turso database has been migrated.
 **Schema baseline:** `schema_migrations` starts at version `1`; each later migration is immutable and transactional where D1 supports it.
 
-**Implementation note:** `migrations/0001_initial_schema.sql` is the baseline; `migrations/0002_auth_previews_and_uploads.sql` adds the local Phase 2 authentication, preview, upload, rate-limit, and Our Universe v1 seed. Business services use a provider-neutral database interface. D1-specific types and calls are limited to the Cloudflare Worker boundary and D1 adapter; the 69 database operations in `auth.ts`, `designs.ts`, and `assets.ts` use the shared interface. `npm run db:migrate:turso` applies these same migrations once, transactionally, with SHA-256 checksums and a foreign-key check. It refuses to modify an existing schema with no migration ledger. The adapters have been tested against local Wrangler D1 and local libSQL only; no remote Turso migration or D1 data transfer has occurred. Treat applied migrations as immutable.
+**Implementation note:** `migrations/0001_initial_schema.sql` is the baseline; `0002_auth_previews_and_uploads.sql` adds local authentication, preview, upload, rate-limit, and Our Universe v1 seed; `0003_local_test_payments.sql` adds the empty price catalog and payment-review/webhook fields. Business services use a provider-neutral database interface. D1-specific calls remain within the Cloudflare Worker boundary and D1 adapter. `npm run db:migrate:turso` applies migrations with SHA-256 checksums and a foreign-key check. No remote Turso migration or D1 data transfer has occurred. Treat applied migrations as immutable.
 
 ## 1. Conventions
 
@@ -275,3 +275,13 @@ Both adapters normalize booleans to SQLite integers, `Date` values to UTC ISO st
 ## 7. D1 data export/import boundary
 
 Schema migration and data migration are separate operations. The checked-in migration runner handles schema only; no D1-to-Turso data importer exists, and no data has been transferred. Before any future transfer, classify records to retain, regenerate, revoke, or exclude (in particular sessions, login tokens, rate-limit rows, upload capabilities, and preview tokens). Export sensitive SQL outside the repository to encrypted storage, import only into an explicitly verified empty test target, compare per-table counts and key relationships, run foreign-key and uniqueness checks, and rehearse restore before requesting approval for any remote operation. A detailed gated runbook is in [HOSTING_MIGRATION.md](HOSTING_MIGRATION.md).
+
+## 8. Local payment schema extension
+
+Migration `0003_local_test_payments.sql` is forward-only and adds:
+
+- `template_prices`, keyed by template/schema version, with VND integer amounts and at most one active row. It is intentionally empty: no product price has been approved or activated.
+- Nullable order/payment references, the purchased design revision, an idempotency request hash, and manual-review flags. Existing `orders.status` and `payments.status` checks remain unchanged; API responses expose `MANUAL_REVIEW` when the review flag is set.
+- `payment_webhook_events.raw_payload` and `review_reason`, retaining the exact decoded webhook JSON and its SHA-256 hash for audit/reconciliation. Restrict database/log access and define retention before production.
+
+The local self-service order path snapshots the active template price and draft revision into the existing order/item/payment tables. Tests insert a clearly synthetic VND 50,000 price into disposable D1/Turso databases only. Migration 0003 inserts no catalog rows, does not alter existing customer records, and has not been applied to remote D1/Turso.

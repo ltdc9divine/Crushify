@@ -1,0 +1,179 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #38252d;
+  background: #fff7f8;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(ellipse at 82% 10%, rgba(251, 205, 215, 0.55), transparent 38rem),
+    #fff7f8;
+}
+
+.checkout-shell {
+  width: min(100% - 32px, 720px);
+  margin: 0 auto;
+  padding: 34px 0 56px;
+}
+
+.brand {
+  display: inline-block;
+  margin: 0 0 22px 4px;
+  color: #a93458;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+}
+
+.checkout-card {
+  padding: clamp(24px, 6vw, 48px);
+  border: 1px solid #f1d8df;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 24px 70px rgba(109, 43, 66, 0.1);
+}
+
+.environment-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  margin: 0 0 18px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: #fff0d6;
+  color: #805000;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 7vw, 2.6rem);
+  line-height: 1.12;
+}
+
+.intro {
+  max-width: 52ch;
+  margin: 14px 0 24px;
+  color: #705b63;
+  line-height: 1.65;
+}
+
+.notice {
+  padding: 14px 16px;
+  border: 1px solid #f1d8df;
+  border-radius: 12px;
+  background: #fff8fa;
+  color: #67434f;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.notice[data-state="error"] {
+  border-color: #efb4b4;
+  background: #fff4f3;
+  color: #8d2929;
+}
+
+.notice[data-state="success"] {
+  border-color: #b6dfc7;
+  background: #f1fbf4;
+  color: #24633b;
+}
+
+.order-panel {
+  margin-top: 20px;
+  padding: 18px;
+  border: 1px solid #f1d8df;
+  border-radius: 16px;
+}
+
+.order-details {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+}
+
+.order-details div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.order-details dt {
+  color: #705b63;
+}
+
+.order-details dd {
+  margin: 0;
+  font-weight: 700;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.qr-panel {
+  margin-top: 22px;
+  text-align: center;
+}
+
+.qr-panel img {
+  display: block;
+  width: min(100%, 300px);
+  aspect-ratio: 1;
+  margin: 0 auto;
+  object-fit: contain;
+  border: 1px solid #f1d8df;
+  border-radius: 14px;
+}
+
+.qr-panel p,
+.mock-note,
+.footer-note {
+  color: #705b63;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.mock-note {
+  margin: 18px 0 0;
+  padding: 13px 15px;
+  border-radius: 12px;
+  background: #f5f2ff;
+}
+
+.footer-note {
+  margin: 24px 0 0;
+  font-size: 0.82rem;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 480px) {
+  .checkout-shell {
+    width: min(100% - 20px, 720px);
+    padding-top: 20px;
+  }
+
+  .checkout-card {
+    padding: 22px 18px;
+    border-radius: 18px;
+  }
+
+  .order-details div {
+    align-items: flex-start;
+  }
+}

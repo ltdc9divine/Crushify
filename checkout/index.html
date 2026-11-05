@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#fff7f8">
+  <link rel="icon" href="data:,">
+  <title>Thanh toán thử nghiệm | Crushify</title>
+  <link rel="stylesheet" href="./checkout.css">
+  <script src="./checkout.js" defer></script>
+</head>
+<body>
+  <main class="checkout-shell">
+    <a class="brand" href="/">Crushify</a>
+    <section class="checkout-card" aria-labelledby="page-title">
+      <p class="environment-badge">BẢN THỬ NGHIỆM · KHÔNG CHUYỂN TIỀN THẬT</p>
+      <h1 id="page-title">Hoàn tất món quà</h1>
+      <p class="intro">Đơn hàng chỉ được xác nhận sau khi máy chủ kiểm tra webhook hợp lệ.</p>
+
+      <div id="notice" class="notice" role="status" aria-live="polite">Đang kiểm tra phiên đăng nhập…</div>
+
+      <section id="order-panel" class="order-panel" hidden aria-label="Thông tin đơn hàng">
+        <dl class="order-details">
+          <div><dt>Mã đơn</dt><dd id="order-reference">—</dd></div>
+          <div><dt>Tổng tiền</dt><dd id="order-total">—</dd></div>
+          <div><dt>Trạng thái</dt><dd id="order-status">—</dd></div>
+          <div><dt>Thời hạn</dt><dd id="order-expiry">—</dd></div>
+        </dl>
+        <div id="qr-panel" class="qr-panel" hidden>
+          <img id="payment-qr" alt="Mã QR thanh toán thử nghiệm SePay">
+          <p>Chỉ dùng tài khoản Test mode của SePay. Không quét mã này bằng tài khoản ngân hàng thật.</p>
+        </div>
+        <p id="mock-note" class="mock-note" hidden>
+          Chế độ mock không tạo mã QR hoặc giao dịch ngân hàng. Webhook kiểm thử được xác minh phía máy chủ.
+        </p>
+      </section>
+      <p class="footer-note">Thanh toán và xuất bản trực tiếp chưa được bật. Không có URL quà tặng nào được tạo ở bước này.</p>
+    </section>
+  </main>
+</body>
+</html>

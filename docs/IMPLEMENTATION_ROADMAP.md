@@ -1,6 +1,6 @@
 # Crushify Implementation Roadmap
 
-**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 Our Universe foundation remains available and is integration-tested locally. The shared router has a Vercel Node Functions adapter tested against isolated local Turso and mock storage; R2/Cloudinary adapters are implemented, but Cloudinary uses mocked HTTP tests only. No Vercel deployment, remote Turso migration, Cloudinary account test, or data transfer has occurred. Production capability is not configured.
+**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 Our Universe foundation remains available and is integration-tested locally. The shared router has a Vercel Node Functions adapter tested against isolated local Turso and mock storage. A local-only order/SePay webhook prototype is covered by synthetic D1/Turso tests; no SePay account, live transaction, production price, Vercel deployment, remote Turso migration, Cloudinary account test, or data transfer has occurred. Production capability is not configured.
 
 ## 1. Priority before launch
 
@@ -8,7 +8,7 @@
 2. Fix product claims and paths: homepage prices/CTA currently are provisional and not connected to checkout; make this explicit until live.
 3. Keep the existing Cloudflare backend available for rollback; verify migration/backup plans before moving any remote data.
 4. Complete the tested Turso database adapter/migrations, then implement host adapters and rehearse storage-provider cutover as separate stages before storing real customer data there.
-5. Implement durable drafts/assets/recipient delivery before checkout; then payment and fulfillment.
+5. Implement durable drafts/assets/recipient delivery before enabling checkout; the current local payment prototype is not a launch-ready payment flow.
 6. Add custom-service workflow atop shared customer/order/payment/asset services.
 
 ## 2. Proposed sprint plan
@@ -36,7 +36,7 @@
 - Local Our Universe pilot: customer magic-link/session lifecycle, owner-scoped draft CRUD, schema validation and optimistic revision conflict handling are implemented.
 - Still needed: production email service, account lifecycle/privacy, catalog/template registry and server schema mapping for the other four apps.
 - Implement restore/save status and account deletion request foundations.
-- Our Universe is the first adapter pilot; four other templates remain unconnected. No checkout.
+- Our Universe is the first adapter pilot; four other templates remain unconnected. Production checkout remains disabled; see Sprint 5 for the local-only payment prototype.
 
 ### Sprint 3 — Assets and private preview (1–2 weeks)
 
@@ -55,9 +55,9 @@
 
 ### Sprint 5 — Checkout/payment (1–2 weeks plus provider onboarding)
 
-- Provider adapter, server-priced catalog/SKUs, order snapshots, hosted checkout, signed webhooks, idempotency, reconciliation/refund paths.
-- Test sandbox duplicates/replay/timeout/out-of-order/amount mismatch and fulfillment retry.
-- Turn on a limited private beta only after finance, support, terms and operational alerts are ready.
+- **Local prototype complete:** server-priced order snapshots, idempotency, 15-minute expiry, responsive checkout status page, HMAC-SHA256 SePay webhook verification, duplicate handling, and mismatch/manual-review states. Active prices are not seeded; checkout is disabled outside local test mode.
+- **Still required:** provider-account Test mode run, production candidate adapter/hosting approval, approved real catalog/pricing and terms, rate limits, admin reconciliation/review, durable webhook retry/monitoring, refunds, entitlement and fulfillment design, and independent security review.
+- Do not enable a purchase CTA or live payment. A SePay Test mode integration needs a provider account and isolated bank/webhook settings; no real banking/payment credentials have been supplied.
 
 ### Sprint 6 — Custom design workflow (1–2 weeks)
 
@@ -93,7 +93,7 @@ Foundational code through a staging self-service flow is roughly 6–10 engineer
 
 ## 6. Current commercial readiness verdict
 
-Current project is a **static catalog plus a local-only backend prototype**. Our Universe now has locally tested authentication, durable D1 drafts, private media and preview; the other four templates remain on their prior client-side flows. Nothing is commerce-ready: production identity/storage, paid entitlement, checkout/payment, durable publication, admin operations, privacy/retention, and production deployment/recovery are absent. Do not accept real orders until the relevant roadmap gates pass.
+Current project is a **static catalog plus a local-only backend prototype**. Our Universe has locally tested authentication, durable D1 drafts, private media and preview. Local order/webhook code does not provide production checkout: the price catalog is empty, payment modes fail closed outside local development, and no entitlement, fulfillment, refund, publication, admin review or production deployment exists. Do not accept real orders until the relevant roadmap gates pass.
 
 ## 7. Cost and quota monitoring
 

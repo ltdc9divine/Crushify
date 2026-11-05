@@ -47,7 +47,7 @@ npm run db:migrate:turso
 vercel dev
 ```
 
-`.env.local` dùng `STORAGE_PROVIDER=mock` và `LOCAL_TEST_MODE=true` cho dữ liệu thử cục bộ. Không dùng file SQLite trên Vercel Preview/Production; Preview phải dùng Turso test database riêng và Cloudinary account riêng, secrets cấu hình qua Vercel server-side environment. `APP_ORIGIN` phải là origin chính xác của ứng dụng. API routes mặc định không cache; function giới hạn ảnh ở 4 MiB để nằm dưới giới hạn payload của serverless platform. Checkout và thanh toán chưa tồn tại.
+`.env.local` dùng `STORAGE_PROVIDER=mock` và `LOCAL_TEST_MODE=true` cho dữ liệu thử cục bộ. Không dùng file SQLite trên Vercel Preview/Production; Preview phải dùng Turso test database riêng và Cloudinary account riêng, secrets cấu hình qua Vercel server-side environment. `APP_ORIGIN` phải là origin chính xác của ứng dụng. API routes mặc định không cache; function giới hạn ảnh ở 4 MiB để nằm dưới giới hạn payload của serverless platform. Checkout/thanh toán chỉ có prototype local-only; không bật trên Vercel Preview/Production.
 
 Khi import repository lên Vercel, chọn **Other**, giữ project root ở repository root, không cần build command hay `vercel.json` cho static paths và catch-all function. Các trang template tiếp tục được phục vụ từ thư mục tĩnh `templates/`; không rewrite API thành HTML và không thay đổi tài nguyên riêng của template.
 
@@ -108,7 +108,7 @@ npm run db:migrate:turso
 
 The migration command checks applied migration checksums and foreign keys, runs each migration transactionally, and refuses databases containing application tables without a migration ledger. It does not connect automatically or migrate existing D1 data. See [docs/HOSTING_MIGRATION.md](docs/HOSTING_MIGRATION.md) for the staged migration status and safeguards.
 
-The other four templates still use their existing browser-side draft/media flows. Checkout, payment/webhooks, order management, publishing, admin tooling, and production customer workflows are not implemented. Displayed prices remain informational and must not be treated as an active offer.
+The other four templates still use their existing browser-side draft/media flows. A local-only order and SePay HMAC webhook prototype is present for synthetic tests, but the price catalog is empty and payment modes are disabled outside local development. It does not collect real money, grant entitlements, publish designs, or enable checkout in Vercel Preview/Production. Displayed prices remain informational and must not be treated as an active offer. See [docs/SEPAY_SETUP.md](docs/SEPAY_SETUP.md).
 
 ## Cloudflare staging
 

@@ -1,6 +1,7 @@
 import { handleSessionRoutes } from "./auth.ts";
 import { handleAssetRoutes } from "./assets.ts";
 import { handleDesignRoutes, handlePreviewRoutes } from "./designs.ts";
+import { handlePaymentRoutes } from "./payments.ts";
 import { D1DatabaseAdapter } from "./database/d1.ts";
 import { createStorageFromEnvironment } from "./storage/provider.ts";
 import { apiError, jsonResponse } from "./http.ts";
@@ -60,6 +61,8 @@ export async function handleApiRequest(
     if (assetResponse) return assetResponse;
     const previewResponse = await handlePreviewRoutes(request, env, url.pathname, requestId);
     if (previewResponse) return previewResponse;
+    const paymentResponse = await handlePaymentRoutes(request, env, url.pathname, requestId);
+    if (paymentResponse) return paymentResponse;
     return apiError(requestId, 404, "NOT_FOUND", "Route not found");
   } catch (error) {
     console.error("API request failed", { request_id: requestId, path: url.pathname, error });

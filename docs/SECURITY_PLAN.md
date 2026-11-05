@@ -1,6 +1,6 @@
 # Crushify Security Plan
 
-**Status:** target controls. The local-only Our Universe implementation provides hashed expiring login/preview/upload tokens, owner-scoped draft/media access, CSRF checks, bounded payloads and a private media proxy. The shared router is tested through Cloudflare D1/R2 and the Vercel Node adapter with local Turso/mock storage. Cloudinary is tested only with mocks and has not been used with an account. This is not a security certification or production deployment. Review with a qualified security/privacy professional before launch.
+**Status:** target controls plus a local-only order/webhook prototype. Local synthetic tests cover raw-body HMAC, timestamp expiry, duplicate and concurrent deliveries, amount/account mismatch and owner-scoped order status on D1 and Turso. No provider account, live transaction, production secrets, or production deployment has been used. This is not a security certification. Review with a qualified security/privacy professional before launch.
 
 ## 1. Threat model and assets
 
@@ -95,3 +95,14 @@ IDOR across every entity; preview expiry/revocation; public slug collision; XSS 
 - No Turso URL/token was supplied; no remote Turso connection, D1 data export/import, or remote schema change has occurred. The D1 source remains the active Worker database and is not deleted or rewritten.
 - `.env.example` contains placeholders only. Do not copy production credentials into checked-in files; configure secrets server-side for each environment.
 - A future data transfer must use an encrypted export outside the repository, a reviewed data-classification/transform plan, an isolated destination, row-count and foreign-key reconciliation, and a restore rehearsal. Never copy session, login-token, rate-limit, upload-capability, or preview-capability state without an explicit security/retention decision. See [HOSTING_MIGRATION.md](HOSTING_MIGRATION.md).
+
+## 13. Phase 5 payment limits and controls
+
+- Order and webhook routes fail closed unless the runtime is local, `LOCAL_TEST_MODE=true`, `PAYMENT_MODE=mock|sepay-test`, and a local-only `SEPAY_WEBHOOK_SECRET` is configured. The Vercel adapter does not pass payment mode or secrets from Preview/Production into the shared API.
+- The server only reads price from `template_prices`; migration 0003 adds the empty catalog and deliberately seeds no prices. Never activate an assumed price or use test fixtures outside a disposable local database.
+- Orders require owner session, CSRF and a request-bound idempotency key. Amount/currency/status fields from the browser are rejected. Order lookup is owner-scoped and non-enumerable.
+- SePay callbacks are limited to 64 KiB, authenticate exact raw bytes using HMAC-SHA256 and a ±300-second timestamp, and persist the event before processing. Database uniqueness/conditional updates protect provider transaction idempotency and concurrent retry behavior.
+- A payment can become successful only for an incoming transfer with exact payment reference, configured receiving account, exact amount, unique transaction ID, and an unexpired pending order. Unmatched, malformed, mismatched and late events enter manual review; browser redirects cannot change state.
+- Raw webhook JSON includes financial account/transaction information. Current prototype has no production retention/access policy, alerting, dead-letter queue, scheduled reconciliation or admin review UI. Do not expose it to customer endpoints or logs.
+- Local unit and integration tests use generated per-run HMAC secrets, a synthetic `0000000000` receiving-account fixture, and an artificial VND 50,000 price in isolated databases. No bank transfer or SePay endpoint is contacted by tests.
+- No live checkout, published pricing, entitlement, fulfillment, refund handling, admin reconciliation or automatic publication exists. A valid local test payment only changes local order/payment status.

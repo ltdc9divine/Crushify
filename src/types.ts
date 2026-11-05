@@ -19,6 +19,11 @@ export interface Env {
   MAILER_AUTH_TOKEN?: string;
   APP_ORIGIN?: string;
   LOCAL_TEST_MODE?: string;
+  PAYMENT_MODE?: "mock" | "sepay-test";
+  SEPAY_WEBHOOK_SECRET?: string;
+  SEPAY_BANK_CODE?: string;
+  SEPAY_BANK_ACCOUNT?: string;
+  SEPAY_ACCOUNT_NAME?: string;
   UPLOAD_MAX_BYTES?: number;
 }
 

@@ -1,8 +1,8 @@
 # Crushify Product & System Architecture
 
-**Status:** architecture migration in progress. Cloudflare Worker/D1/R2 remains available as the rollback runtime. A Vercel Node Functions adapter now reuses the shared API router and Turso/Cloudinary adapters; it has been tested locally against isolated Turso and in-memory storage, but not on a Vercel deployment or external accounts. No remote database or host has been changed. Payment and publication remain unimplemented.
-**Audit basis:** repository contents and local browser checks on 2026-11-04.
-**Decision boundary:** this design does not select a payment provider, set production prices, or claim legal/compliance approval.
+**Status:** architecture migration in progress. Cloudflare Worker/D1/R2 remains available as the rollback runtime. A Vercel Node Functions adapter reuses the shared API router and Turso/Cloudinary adapters; local tests use isolated Turso and in-memory storage. Local-only orders and SePay HMAC webhook verification are implemented for synthetic tests. No provider account, production price, remote database, host, or payment has been used. Publication remains unimplemented.
+**Audit basis:** repository contents and local browser checks on 2026-11-05.
+**Decision boundary:** SePay is only wired for local `mock`/Test mode behavior. This design does not set production prices or claim legal/compliance approval.
 
 ## 1. Product scope
 
@@ -15,7 +15,7 @@ Both use the same customer identity, design/assets, order/payment ledger, and pu
 
 ## 2. Audited starting point
 
-The repository has five standalone templates and a local-only Cloudflare Worker/D1/R2 backend for Our Universe authentication, drafts, private media and previews. The current Worker continues to use D1/R2. A provider-neutral database contract, D1 adapter, Turso/libSQL adapter and checksum-verified transactional migration CLI share the existing SQLite migrations. The Vercel catch-all Node Function reuses the existing HTTP router and is integration-tested with a local Turso file and mock storage; no Vercel deployment or remote Turso database has been connected. R2/Cloudinary adapters exist, but Cloudinary is tested only with mocked HTTP. Netlify, order/payment services and publication are not implemented.
+The repository has five standalone templates and a local-only Cloudflare Worker/D1/R2 backend for Our Universe authentication, drafts, private media and previews. The current Worker continues to use D1/R2. A provider-neutral database contract, D1 adapter, Turso/libSQL adapter and checksum-verified transactional migration CLI share the existing SQLite migrations. The Vercel catch-all Node Function reuses the existing HTTP router and is integration-tested with a local Turso file and mock storage; no Vercel deployment or remote Turso database has been connected. R2/Cloudinary adapters exist, but Cloudinary is tested only with mocked HTTP. Local-only orders and SePay HMAC webhook verification are implemented for synthetic tests; there are no active prices, production payments, fulfillment, entitlement, or publication.
 
 The homepage shows sample prices of 39,000/79,000/129,000 VND and links to the template gallery; its own note labels them provisional. It does not create an order or start checkout. The homepage contains a preview-modal shell/handler but has no `.preview-btn` trigger in its current gallery; card links navigate to the templates directly. The previous integration findings are recorded in [PRODUCT-INTEGRATION-AUDIT.md](../PRODUCT-INTEGRATION-AUDIT.md).
 
@@ -30,19 +30,19 @@ Browser (current HTML/CSS/JavaScript + template-specific renderers)
                                       ├── payment adapter ────> SePay
                                       └── email adapter
 
-SePay webhook ── signed event ───> future API adapter
+SePay Test mode webhook ─ signed event ─> local-only API route
 Admin (MFA/role protected) ───────> future admin API
 
 Rollback path: Cloudflare Worker ──> D1 + R2
 ```
 
-The Vercel HTTP adapter and Turso/Cloudinary runtime wiring are implemented locally; the Cloudflare Worker/D1/R2 adapter remains available. Netlify, SePay and deployment configuration are not implemented. Do not point new code at customer data until an explicit, verified database and binary data migration plan exists.
+The Vercel HTTP adapter and Turso/Cloudinary runtime wiring are implemented locally; the Cloudflare Worker/D1/R2 adapter remains available. SePay Live, Netlify, production payment configuration and deployment remain unimplemented. Do not point new code at customer data until an explicit, verified database and binary data migration plan exists.
 
 ### Runtime boundaries
 
 - Keep the present frontend and each template's own CSS, JavaScript, and 3D experience. Add only small shared browser modules/adapters when a template opts in.
 - Use Cloudflare Workers Static Assets or Vercel static hosting for the homepage, template source files, and versioned assets. Static assets are not a per-customer HTML publishing database.
-- Route `/api/v1/*`, authenticated previews, future payment webhooks, and gift slugs through the selected server-side API adapter. Keep public static routes cacheable independently of API responses.
+- Route `/api/v1/*`, authenticated previews, local-only payment webhooks, and future gift slugs through the selected server-side API adapter. Keep public static routes cacheable independently of API responses.
 - Use the database contract for metadata and state transitions only. Turso/libSQL uses the existing SQLite migrations; never put image bytes/base64 in the database.
 - Keep original and draft media private in the selected storage adapter. Cloudinary signed authenticated uploads use server-side secrets; no upload signature or Cloudinary secret is exposed to clients.
 - A published gift uses a high-entropy slug, e.g. `/g/<random-token>`. The public renderer resolves a published design version and its pinned template version. Do not expose a draft or an enumerable D1 ID.

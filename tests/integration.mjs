@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
@@ -7,6 +8,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { runDatabaseContract } from "./database-contract.mjs";
+import { runPaymentContract } from "./payment-contract.mjs";
 
 const root = process.cwd();
 const devVars = resolve(root, ".dev.vars");
@@ -17,6 +19,8 @@ if (!existsSync(devVars)) {
 const persistDirectory = await mkdtemp(join(tmpdir(), "crushify-d1-contract-"));
 const port = 8787;
 const origin = `http://127.0.0.1:${port}`;
+const webhookSecret = randomBytes(32).toString("hex");
+const receivingAccount = "0000000000";
 const child = spawn(
   process.execPath,
   [
@@ -30,6 +34,12 @@ const child = spawn(
     "http",
     "--persist-to",
     persistDirectory,
+    "--var",
+    "PAYMENT_MODE:mock",
+    "--var",
+    `SEPAY_WEBHOOK_SECRET:${webhookSecret}`,
+    "--var",
+    `SEPAY_BANK_ACCOUNT:${receivingAccount}`,
   ],
   { cwd: root, stdio: ["ignore", "pipe", "pipe"] },
 );
@@ -60,6 +70,11 @@ function executeLocalD1(sql) {
     sql,
     "--json",
   ], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+function queryLocalD1(sql) {
+  const result = JSON.parse(executeLocalD1(sql));
+  return result[0]?.results || [];
 }
 
 function assertD1Failure(sql, pattern) {
@@ -253,6 +268,37 @@ try {
   assert.equal(created.response.status, 201);
   const designId = created.body.design_id;
   assert.equal(created.body.data.sender, "Minh");
+  await runPaymentContract({
+    request: json,
+    async seedPrice(amount) {
+      executeLocalD1(
+        `INSERT INTO template_prices (
+          id, template_id, schema_version, currency, amount_minor, is_active, created_at, updated_at
+        ) VALUES (
+          'payment-test-price', 'our-universe', 1, 'VND', ${amount}, 1,
+          '${new Date().toISOString()}', '${new Date().toISOString()}'
+        )`,
+      );
+    },
+    owner: first,
+    designId,
+    webhookSecret,
+    receivingAccount,
+    expireOrder(orderId) {
+      executeLocalD1(
+        `UPDATE orders SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = '${orderId}'`,
+      );
+    },
+    inspectWebhookOutcomes(transactionIds) {
+      const values = transactionIds.map((id) => `'${id}'`).join(", ");
+      const rows = queryLocalD1(
+        `SELECT outcome FROM payment_webhook_events
+          WHERE provider = 'SEPAY' AND event_id IN (${values})`,
+      );
+      return rows.map((row) => row.outcome);
+    },
+    label: "Cloudflare Worker + local D1/R2",
+  });
 
   const oversized = await json(`/designs/${designId}`, first, {
     method: "PUT",
@@ -551,7 +597,7 @@ try {
     /FOREIGN KEY constraint failed/i,
   );
 
-  console.log("Phase 2 local integration: passed (legacy API regression, shared D1 API contract, D1 constraints, and batch rollback).");
+  console.log("Local integration: passed (D1 API and payment contracts, legacy regression, constraints, and batch rollback).");
 } catch (error) {
   console.error(error);
   console.error(sanitizedLogs());

@@ -9,7 +9,7 @@ import type { Env } from "../types.ts";
 
 export const VERCEL_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
 const allowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
-const allowedHeaders = new Set(["authorization", "content-type", "x-csrf-token"]);
+const allowedHeaders = new Set(["authorization", "content-type", "idempotency-key", "x-csrf-token"]);
 
 export interface VercelEnvironment {
   DATABASE_PROVIDER?: string;
@@ -26,6 +26,11 @@ export interface VercelEnvironment {
   LOCAL_TEST_MODE?: string;
   VERCEL_ENV?: string;
   VERCEL_URL?: string;
+  PAYMENT_MODE?: string;
+  SEPAY_WEBHOOK_SECRET?: string;
+  SEPAY_BANK_CODE?: string;
+  SEPAY_BANK_ACCOUNT?: string;
+  SEPAY_ACCOUNT_NAME?: string;
 }
 
 interface DatabaseConnection {
@@ -252,6 +257,19 @@ export function createVercelApiHandler(
           environment.VERCEL_ENV === "development" && appEnvironment === "local"
         ? "true"
         : undefined,
+      PAYMENT_MODE: environment.VERCEL_ENV === "development" &&
+          environment.LOCAL_TEST_MODE === "true" &&
+          (environment.PAYMENT_MODE === "mock" || environment.PAYMENT_MODE === "sepay-test")
+        ? environment.PAYMENT_MODE
+        : undefined,
+      SEPAY_WEBHOOK_SECRET: environment.VERCEL_ENV === "development" &&
+          environment.LOCAL_TEST_MODE === "true" ? environment.SEPAY_WEBHOOK_SECRET : undefined,
+      SEPAY_BANK_CODE: environment.VERCEL_ENV === "development" &&
+          environment.LOCAL_TEST_MODE === "true" ? environment.SEPAY_BANK_CODE : undefined,
+      SEPAY_BANK_ACCOUNT: environment.VERCEL_ENV === "development" &&
+          environment.LOCAL_TEST_MODE === "true" ? environment.SEPAY_BANK_ACCOUNT : undefined,
+      SEPAY_ACCOUNT_NAME: environment.VERCEL_ENV === "development" &&
+          environment.LOCAL_TEST_MODE === "true" ? environment.SEPAY_ACCOUNT_NAME : undefined,
       UPLOAD_MAX_BYTES: VERCEL_UPLOAD_MAX_BYTES,
     };
 
