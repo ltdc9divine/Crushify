@@ -22,7 +22,7 @@ The route is `POST /api/v1/payments/sepay/webhook`. It accepts JSON up to 64 KiB
    );
    ```
 
-5. Sign in through the local Our Universe flow, create an owned draft, then open `/checkout/?design_id=<draft-id>`. The order requires a session and CSRF token. Mock mode displays no QR and does not provide a public “mark paid” action.
+5. Sign in through the local Our Universe flow, create an owned draft, then open `/checkout/?design_id=<draft-id>`. The order requires a session and CSRF token. Mock mode displays no QR or transfer details and does not provide a public “mark paid” action.
 6. Run `npm test` and `npm run test:integration` to exercise generated signed webhook fixtures. These tests use synthetic prices and a per-run secret; they do not call SePay or any bank.
 
 The example price is a test fixture only, not a Crushify offer or recommended price. Remove disposable database files rather than attempting to reuse test orders as customer data.
@@ -32,8 +32,8 @@ The example price is a test fixture only, not a Crushify offer or recommended pr
 The project has not been connected to a SePay account. To run an actual provider sandbox check after getting approval and access:
 
 1. In `my.sepay.vn`, switch to **Test mode** and create a Test mode bank account. Do not copy Live bank settings or secrets.
-2. Configure SePay's payment-code parser to recognize the generated `CRF` reference in transfer content. Create a Test mode webhook pointing to an isolated, publicly reachable test endpoint. SePay's Test mode can simulate transfers and uses the same JSON payload and HMAC-SHA256 mechanism as Live; use HMAC rather than “No authentication.”
-3. Store the generated Test mode webhook secret and Test mode bank code/account only in the local server environment. Select `PAYMENT_MODE=sepay-test`. Do not expose secrets or bank settings in frontend variables.
+2. Configure SePay's payment-code parser to recognize the generated `CRP` payment reference in transfer content. `CRF` identifies the separate order reference and must not be used to match a transfer. Create a Test mode webhook pointing to an isolated, publicly reachable test endpoint. SePay's Test mode can simulate transfers and uses the same JSON payload and HMAC-SHA256 mechanism as Live; use HMAC rather than “No authentication.”
+3. Store the generated Test mode webhook secret and Test mode bank code/account only in the local server environment. Select `PAYMENT_MODE=sepay-test`. The authenticated order response supplies the Test mode transfer details and a copyable payment reference to the checkout; no bank settings are compiled into frontend assets. Do not expose webhook secrets in frontend variables.
 4. Activate a synthetic catalog row only in the disposable local database. Configure the receiving account to exactly match the Test mode account.
 5. Simulate an incoming transfer with the exact payment reference and amount; verify a single order changes to `PAID`. Then test under/overpayment, wrong receiving account, outgoing transfer, unmatched reference, replay, and webhook retry. Confirm mismatches become `MANUAL_REVIEW`.
 6. Check SePay's webhook history and confirm the endpoint returns HTTP 200 or 201 with JSON `{"success":true}` only after the event is durably recorded. Keep the test endpoint and data isolated.
@@ -48,7 +48,9 @@ SePay Test mode requires account access and may have account-specific limits. It
 | `SEPAY_WEBHOOK_SECRET` | HMAC verification | Local Test mode secret only; keep server-side. |
 | `SEPAY_BANK_CODE` | Test mode QR instructions | Required only for `sepay-test`; never pass to browser as configuration. |
 | `SEPAY_BANK_ACCOUNT` | Expected incoming account and QR instructions | Must be the isolated Test mode account. |
-| `SEPAY_ACCOUNT_NAME` | Reserved for future display/verification | Not used to authorize a payment. |
+| `SEPAY_ACCOUNT_NAME` | Optional account name shown in owner-scoped Test mode instructions | Display only; it is not used to authorize a payment. |
+
+`PaymentProvider` is the provider boundary for creating transfer instructions, verifying signed webhooks, parsing payloads, and normalizing transactions. SePay is currently the sole implementation. `CRF` order references and `CRP` payment references are separate random values; only the `CRP` reference is matched to the webhook's `code`.
 
 Vercel Preview and Production do not pass these settings into the API runtime. Cloudflare remote deployments have not been changed. There is intentionally no documented production activation procedure.
 

@@ -8,7 +8,8 @@
 - Browser may request a checkout for a catalog SKU/design revision; it cannot set price, currency, discount amount, entitlement, `PAID`, or fulfillment state.
 - The server loads an active `template_prices` row; the browser cannot submit a price or currency. The table is empty until a local test price is explicitly inserted.
 - The server creates a pending order and payment attempt from an owned Our Universe draft, with the current design revision snapshotted. Order creation is idempotent and expires after 15 minutes.
-- In `mock` mode, no QR is emitted. In `sepay-test` mode, a QR is emitted only from explicit local SePay Test mode bank settings.
+- Order references (`CRF...`) and payment references (`CRP...`) are separate random values. Only the payment reference is included in transfer instructions and matched against a webhook.
+- In `mock` mode, no QR or bank instructions are emitted. In `sepay-test` mode, an owner-scoped QR and transfer details are returned only from explicit local SePay Test mode bank settings.
 - Only a valid HMAC-signed webhook with fresh timestamp, unique transaction, exact payment reference, incoming transfer, receiving account and exact amount can mark a pending payment/order successful. There is no admin reconciliation endpoint.
 - The browser return URL is UX only. It displays “processing/confirmed” based on a server read; never fulfills directly from a query parameter or client callback.
 
@@ -30,7 +31,7 @@ Failure, mismatch, cancellation or expiry never grants entitlement. Mismatch/lat
 2. Require an owned DRAFT Our Universe design and active template/version.
 3. Load the active server-side VND template price; no active price currently exists. Do not populate production prices from homepage copy or assumptions.
 4. Insert order, item and pending payment through the shared database batch. Client fields besides `design_id` are rejected. The item snapshots template and design revision.
-5. Return the order reference, amount, 15-minute expiry and a QR URL only when explicitly configured for SePay Test mode.
+5. Return the separate order/payment references, amount, 15-minute expiry and owner-scoped bank instructions only when explicitly configured for SePay Test mode.
 
 `GET /checkout/?design_id=...` is a local-only experimental view. It requires an existing login and an explicitly activated local test price. It polls only the owner-scoped order status. It does not publish or create an entitlement.
 
@@ -38,7 +39,7 @@ Failure, mismatch, cancellation or expiry never grants entitlement. Mismatch/lat
 
 - Verify `X-SePay-Signature` (`sha256=<hex>`) over the exact raw JSON body with `X-SePay-Timestamp`; reject timestamps outside ±300 seconds before parsing.
 - Insert unique `(provider,event_id)` and exact raw JSON/hash before processing. Duplicate transaction IDs are also unique on `(provider,provider_payment_id)` in `payments`.
-- Match `code` exactly to the generated payment reference; require `transferType=in`, configured receiving account, exact integer `transferAmount`, pending payment/order, and unexpired order.
+- Match `code` exactly to the generated `CRP` payment reference; require `transferType=in`, configured receiving account, exact integer `transferAmount`, pending payment/order, and unexpired order.
 - Use conditional database updates/batches so simultaneous identical webhooks do not grant twice. A verified mismatch/unmatched/late event is retained as `MANUAL_REVIEW`; never mark paid from the return URL.
 - SePay must receive HTTP 200/201 with `{"success":true}` after durable processing. Storage/processing failure returns an error so configured provider retry can retry. No background queue/reconciliation job exists.
 - Webhook raw payloads can contain account and transaction data; protect access and retention before any production use.

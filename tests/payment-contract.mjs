@@ -60,6 +60,12 @@ export async function runPaymentContract({
   assert.equal(created.body.status, "AWAITING_PAYMENT");
   assert.equal(created.body.payment.status, "PENDING");
   assert.equal(created.body.payment.qr_url, null, `${label}: mock mode never presents a bank QR`);
+  assert.equal(created.body.payment.instructions, null, `${label}: mock mode has no bank instructions`);
+  assert.equal(created.body.payment.mock_mode, true);
+  assert.match(created.body.order_reference, /^CRF[A-F0-9]{16}$/);
+  assert.match(created.body.payment.reference, /^CRP[A-F0-9]{16}$/);
+  assert.notEqual(created.body.order_reference, created.body.payment.reference,
+    `${label}: order and payment references are independent`);
 
   const retried = await createRequest();
   assert.equal(retried.response.status, 200, `${label}: idempotent retry`);
@@ -178,6 +184,24 @@ export async function runPaymentContract({
   assert.equal(wrongAccount.response.status, 200);
   const accountReview = await request(`/orders/${wrongAccountOrder.body.order_id}/status`, owner);
   assert.equal(accountReview.body.status, "MANUAL_REVIEW");
+
+  const overpaymentOrder = await createRequest(`overpayment-${randomUUID()}`);
+  const overpaymentPayload = JSON.stringify({
+    id: Number(`${Date.now()}`.slice(-8)) + 8,
+    accountNumber: receivingAccount,
+    code: overpaymentOrder.body.payment.reference,
+    transferType: "in",
+    transferAmount: TEST_AMOUNT_VND + 1,
+  });
+  const overpayment = await request("/payments/sepay/webhook", null, {
+    method: "POST",
+    headers: signedHeaders(webhookSecret, overpaymentPayload),
+    body: overpaymentPayload,
+  });
+  assert.equal(overpayment.response.status, 200);
+  const overpaymentReview = await request(`/orders/${overpaymentOrder.body.order_id}/status`, owner);
+  assert.equal(overpaymentReview.body.status, "MANUAL_REVIEW",
+    `${label}: overpayment never marks an order paid`);
 
   const competingOrder = await createRequest(`competing-${randomUUID()}`);
   assert.equal(competingOrder.response.status, 201);

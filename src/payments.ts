@@ -3,17 +3,17 @@ import { DatabaseError } from "./database.ts";
 import { apiError, jsonResponse, nowIso, readBoundedBody, readJson, safeId, sha256 } from "./http.ts";
 import {
   createOrderId,
+  createOrderReference,
   createPaymentReference,
-  createSePayQrUrl,
-  parseWebhookBody,
+  sepayPaymentProvider,
   SEPAY_WEBHOOK_MAX_BYTES,
-  verifySePaySignature,
   type SePayWebhookPayload,
 } from "./payments/sepay.ts";
+import type { NormalizedPaymentTransaction } from "./payments/provider.ts";
 import type { Env } from "./types.ts";
 
 const ORDER_LIFETIME_MINUTES = 15;
-const PAYMENT_PROVIDER = "SEPAY";
+const PAYMENT_PROVIDER = sepayPaymentProvider.id;
 
 interface OrderRow {
   id: string;
@@ -63,15 +63,23 @@ function paymentModeError(requestId: string, env: Env): Response | null {
     return apiError(requestId, 503, "PAYMENT_CONFIGURATION_ERROR", "Local webhook verification is not configured");
   }
   if (env.PAYMENT_MODE === "sepay-test" &&
-      (!env.SEPAY_BANK_CODE || !env.SEPAY_BANK_ACCOUNT)) {
+      (!env.SEPAY_BANK_CODE || !/^[A-Z0-9]{2,20}$/i.test(env.SEPAY_BANK_CODE) ||
+       !env.SEPAY_BANK_ACCOUNT || !/^\d{5,20}$/.test(env.SEPAY_BANK_ACCOUNT))) {
     return apiError(requestId, 503, "PAYMENT_CONFIGURATION_ERROR", "SePay Test mode bank settings are incomplete");
   }
   return null;
 }
 
-function paymentQr(env: Env, amount: number, reference: string): string | null {
-  if (env.PAYMENT_MODE !== "sepay-test") return null;
-  return createSePayQrUrl(env.SEPAY_BANK_CODE, env.SEPAY_BANK_ACCOUNT, amount, reference);
+function paymentInstructions(env: Env, amount: number, reference: string) {
+  if (env.PAYMENT_MODE !== "mock" && env.PAYMENT_MODE !== "sepay-test") return null;
+  return sepayPaymentProvider.createInstructions({
+    mode: env.PAYMENT_MODE,
+    amountMinor: amount,
+    reference,
+    bankCode: env.SEPAY_BANK_CODE,
+    bankAccount: env.SEPAY_BANK_ACCOUNT,
+    accountName: env.SEPAY_ACCOUNT_NAME,
+  });
 }
 
 function responseOrder(row: OrderRow, env: Env) {
@@ -81,6 +89,9 @@ function responseOrder(row: OrderRow, env: Env) {
   const paymentStatus = row.payment_review_required_item
     ? "MANUAL_REVIEW"
     : row.payment_status;
+  const instructions = status === "AWAITING_PAYMENT" && paymentStatus === "PENDING"
+    ? paymentInstructions(env, row.total_minor, row.payment_reference)
+    : null;
   return {
     order_id: row.id,
     order_reference: row.order_reference,
@@ -97,7 +108,18 @@ function responseOrder(row: OrderRow, env: Env) {
       provider: PAYMENT_PROVIDER,
       status: paymentStatus,
       reference: row.payment_reference,
-      qr_url: paymentQr(env, row.total_minor, row.payment_reference),
+      mock_mode: env.PAYMENT_MODE === "mock",
+      qr_url: instructions?.qrUrl ?? null,
+      instructions: instructions
+        ? {
+          bank_code: instructions.bankCode,
+          bank_account: instructions.bankAccount,
+          account_name: instructions.accountName,
+          amount_minor: instructions.amountMinor,
+          reference: instructions.reference,
+          qr_url: instructions.qrUrl,
+        }
+        : null,
     },
   };
 }
@@ -232,8 +254,8 @@ async function createOrder(
 
   const orderId = createOrderId();
   const paymentId = safeId();
-  const orderReference = createPaymentReference();
-  const paymentReference = orderReference;
+  const orderReference = createOrderReference();
+  const paymentReference = createPaymentReference();
   const now = nowIso();
   const expiresAt = new Date(Date.now() + ORDER_LIFETIME_MINUTES * 60_000).toISOString();
   const amount = design.amount_minor;
@@ -325,15 +347,21 @@ async function listOrders(
   return jsonResponse({ orders }, 200, requestId);
 }
 
-function webhookMismatch(payload: SePayWebhookPayload, payment: PaymentRow, env: Env): string | null {
-  if (payload.transferType !== "in") return "Transfer is not incoming";
-  if (!env.SEPAY_BANK_ACCOUNT || payload.accountNumber !== env.SEPAY_BANK_ACCOUNT) {
+function webhookMismatch(
+  transaction: NormalizedPaymentTransaction,
+  payment: PaymentRow,
+  env: Env,
+): string | null {
+  if (sepayPaymentProvider.mapStatus(transaction) !== "SUCCEEDED") {
+    return "Transfer is not incoming";
+  }
+  if (!env.SEPAY_BANK_ACCOUNT || transaction.receivingAccount !== env.SEPAY_BANK_ACCOUNT) {
     return "Receiving account does not match";
   }
-  if (typeof payload.code !== "string" || payload.code !== payment.payment_reference) {
+  if (!transaction.paymentReference || transaction.paymentReference !== payment.payment_reference) {
     return "Payment reference does not match";
   }
-  if (!Number.isSafeInteger(payload.transferAmount) || payload.transferAmount !== payment.amount_minor) {
+  if (transaction.amountMinor !== payment.amount_minor) {
     return "Transfer amount does not match";
   }
   return null;
@@ -387,7 +415,8 @@ async function processWebhookEvent(
   }
 
   const parsed = JSON.parse(stored.raw_payload) as SePayWebhookPayload;
-  const payment = typeof parsed.code === "string"
+  const transaction = sepayPaymentProvider.normalizeTransaction(parsed);
+  const payment = transaction.paymentReference
     ? await env.DB.prepare(
       `SELECT p.id, p.order_id, o.order_reference, o.status AS order_status,
               o.payment_review_required, p.status AS payment_status,
@@ -395,14 +424,14 @@ async function processWebhookEvent(
               p.provider_payment_id, o.expires_at
        FROM payments p JOIN orders o ON o.id = p.order_id
        WHERE p.provider = ? AND p.payment_reference = ?`,
-    ).bind(PAYMENT_PROVIDER, parsed.code).first<PaymentRow>()
+    ).bind(PAYMENT_PROVIDER, transaction.paymentReference).first<PaymentRow>()
     : null;
   if (!payment) {
     await markWebhookReview(env, eventId, "No order matches this payment reference");
     return;
   }
 
-  const mismatch = webhookMismatch(parsed, payment, env);
+  const mismatch = webhookMismatch(transaction, payment, env);
   if (mismatch) {
     await markWebhookReview(env, eventId, mismatch, payment);
     return;
@@ -482,11 +511,11 @@ async function handleSepayWebhook(
       tooLarge ? "Webhook payload is too large" : "Could not read webhook payload",
     );
   }
-  if (!await verifySePaySignature(request.headers, rawBody, secret)) {
+  if (!await sepayPaymentProvider.verifyWebhook(request.headers, rawBody, secret)) {
     return apiError(requestId, 401, "INVALID_WEBHOOK_SIGNATURE", "Webhook signature is invalid or expired");
   }
 
-  const parsed = await parseWebhookBody(rawBody);
+  const parsed = await sepayPaymentProvider.parseWebhook(rawBody);
   const payloadHash = await sha256(rawBody);
   await env.DB.prepare(
     `INSERT INTO payment_webhook_events (

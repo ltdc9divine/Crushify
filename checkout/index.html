@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-  <meta name="theme-color" content="#fff7f8">
+  <meta name="theme-color" content="#140d1b">
   <link rel="icon" href="data:,">
   <title>Thanh toán thử nghiệm | Crushify</title>
   <link rel="stylesheet" href="./checkout.css">
@@ -29,7 +29,24 @@
         </dl>
         <div id="qr-panel" class="qr-panel" hidden>
           <img id="payment-qr" alt="Mã QR thanh toán thử nghiệm SePay">
-          <p>Chỉ dùng tài khoản Test mode của SePay. Không quét mã này bằng tài khoản ngân hàng thật.</p>
+          <p class="test-warning">Chỉ dùng tài khoản Test mode của SePay. Không quét mã này bằng tài khoản ngân hàng thật.</p>
+          <dl class="transfer-details">
+            <div><dt>Ngân hàng</dt><dd id="payment-bank">—</dd></div>
+            <div>
+              <dt>Số tài khoản</dt>
+              <dd><span id="payment-account">—</span><button class="copy-button" type="button" data-copy-target="payment-account">Sao chép</button></dd>
+            </div>
+            <div><dt>Chủ tài khoản</dt><dd id="payment-account-name">—</dd></div>
+            <div>
+              <dt>Số tiền</dt>
+              <dd><span id="payment-amount">—</span><button class="copy-button" id="copy-amount" type="button">Sao chép</button></dd>
+            </div>
+            <div>
+              <dt>Nội dung chuyển khoản</dt>
+              <dd><span id="payment-reference">—</span><button class="copy-button" type="button" data-copy-target="payment-reference">Sao chép</button></dd>
+            </div>
+          </dl>
+          <p id="copy-feedback" class="copy-feedback" role="status" aria-live="polite"></p>
         </div>
         <p id="mock-note" class="mock-note" hidden>
           Chế độ mock không tạo mã QR hoặc giao dịch ngân hàng. Webhook kiểm thử được xác minh phía máy chủ.

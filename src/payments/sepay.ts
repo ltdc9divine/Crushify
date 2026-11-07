@@ -1,4 +1,10 @@
 import { safeId, sha256 } from "../http.ts";
+import type {
+  NormalizedPaymentTransaction,
+  ParsedProviderWebhook,
+  PaymentProvider,
+  ProviderPaymentStatus,
+} from "./provider.ts";
 
 export const SEPAY_WEBHOOK_MAX_BYTES = 64 * 1024;
 export const SEPAY_TIMESTAMP_TOLERANCE_SECONDS = 300;
@@ -11,12 +17,7 @@ export interface SePayWebhookPayload {
   transferAmount?: number;
 }
 
-export interface ParsedWebhook {
-  eventId: string;
-  transactionId: string | null;
-  payload: SePayWebhookPayload | null;
-  reviewReason: string | null;
-}
+export type ParsedWebhook = ParsedProviderWebhook<SePayWebhookPayload>;
 
 function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== right.byteLength) return false;
@@ -107,9 +108,17 @@ export async function parseWebhookBody(rawBody: Uint8Array): Promise<ParsedWebho
   };
 }
 
-export function createPaymentReference(): string {
+function createReference(prefix: "CRF" | "CRP"): string {
   const suffix = crypto.getRandomValues(new Uint8Array(8));
-  return `CRF${[...suffix].map((byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+  return `${prefix}${[...suffix].map((byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+}
+
+export function createOrderReference(): string {
+  return createReference("CRF");
+}
+
+export function createPaymentReference(): string {
+  return createReference("CRP");
 }
 
 export function createOrderId(): string {
@@ -131,3 +140,38 @@ export function createSePayQrUrl(
   url.searchParams.set("des", paymentReference);
   return url.toString();
 }
+
+export const sepayPaymentProvider: PaymentProvider<SePayWebhookPayload> = {
+  id: "SEPAY",
+  createInstructions(input) {
+    if (input.mode !== "sepay-test") return null;
+    const qrUrl = createSePayQrUrl(input.bankCode, input.bankAccount, input.amountMinor, input.reference);
+    if (!qrUrl || !input.bankCode || !input.bankAccount) return null;
+    return {
+      bankCode: input.bankCode.toUpperCase(),
+      bankAccount: input.bankAccount,
+      accountName: input.accountName?.trim() || null,
+      amountMinor: input.amountMinor,
+      reference: input.reference,
+      qrUrl,
+    };
+  },
+  verifyWebhook: verifySePaySignature,
+  parseWebhook: parseWebhookBody,
+  normalizeTransaction(payload): NormalizedPaymentTransaction {
+    return {
+      transactionId: typeof payload.id === "number" || typeof payload.id === "string"
+        ? String(payload.id)
+        : null,
+      paymentReference: typeof payload.code === "string" ? payload.code : null,
+      receivingAccount: typeof payload.accountNumber === "string" ? payload.accountNumber : null,
+      direction: payload.transferType === "in" || payload.transferType === "out"
+        ? payload.transferType
+        : null,
+      amountMinor: Number.isSafeInteger(payload.transferAmount) ? payload.transferAmount! : null,
+    };
+  },
+  mapStatus(transaction): ProviderPaymentStatus {
+    return transaction.direction === "in" ? "SUCCEEDED" : "MANUAL_REVIEW";
+  },
+};

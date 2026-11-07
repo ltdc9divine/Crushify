@@ -2,6 +2,7 @@ const notice = document.querySelector("#notice");
 const orderPanel = document.querySelector("#order-panel");
 const qrPanel = document.querySelector("#qr-panel");
 const mockNote = document.querySelector("#mock-note");
+const copyFeedback = document.querySelector("#copy-feedback");
 const params = new URLSearchParams(location.search);
 const designId = params.get("design_id");
 const initialOrderId = params.get("order_id");
@@ -51,7 +52,8 @@ function showOrder(order) {
   expiryLabel.title = order.expires_at ? new Date(order.expires_at).toLocaleString("vi-VN") : "";
   expiryLabel.textContent = order.expires_at ? new Date(order.expires_at).toLocaleString("vi-VN") : "—";
 
-  const qrUrl = order.payment?.qr_url;
+  const instructions = order.payment?.instructions;
+  const qrUrl = instructions?.qr_url || order.payment?.qr_url;
   let trustedQrUrl = null;
   if (typeof qrUrl === "string") {
     try {
@@ -61,13 +63,19 @@ function showOrder(order) {
       trustedQrUrl = null;
     }
   }
-  qrPanel.hidden = !trustedQrUrl;
-  if (trustedQrUrl) {
+  qrPanel.hidden = !trustedQrUrl || !instructions;
+  if (trustedQrUrl && instructions) {
     const image = document.querySelector("#payment-qr");
     image.src = trustedQrUrl;
     image.referrerPolicy = "no-referrer";
+    document.querySelector("#payment-bank").textContent = instructions.bank_code;
+    document.querySelector("#payment-account").textContent = instructions.bank_account;
+    document.querySelector("#payment-account-name").textContent = instructions.account_name || "—";
+    document.querySelector("#payment-amount").textContent = formatAmount(instructions.amount_minor, order.currency);
+    document.querySelector("#payment-reference").textContent = instructions.reference;
+    document.querySelector("#copy-amount").dataset.copyValue = String(instructions.amount_minor);
   }
-  mockNote.hidden = Boolean(trustedQrUrl);
+  mockNote.hidden = order.payment?.mock_mode !== true || order.status !== "AWAITING_PAYMENT";
 
   if (order.status === "PAID") {
     showNotice("Webhook hợp lệ đã xác nhận khoản thanh toán thử nghiệm.", "success");
@@ -83,6 +91,23 @@ function showOrder(order) {
   }
   updateCountdown();
 }
+
+document.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("button.copy-button")
+    : null;
+  if (!button) return;
+  const targetId = button.dataset.copyTarget;
+  const value = button.dataset.copyValue ||
+    (targetId ? document.getElementById(targetId)?.textContent?.trim() : null);
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    copyFeedback.textContent = "Đã sao chép.";
+  } catch {
+    copyFeedback.textContent = "Không thể sao chép tự động. Hãy chọn và sao chép nội dung.";
+  }
+});
 
 function updateCountdown() {
   if (!currentOrder?.expires_at || currentOrder.status !== "AWAITING_PAYMENT") return;

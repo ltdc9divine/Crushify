@@ -1,8 +1,8 @@
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #38252d;
-  background: #fff7f8;
+  color: #f7eaf3;
+  background: #140d1b;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -16,8 +16,9 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(ellipse at 82% 10%, rgba(251, 205, 215, 0.55), transparent 38rem),
-    #fff7f8;
+    radial-gradient(ellipse at 80% 8%, rgba(154, 52, 111, 0.24), transparent 34rem),
+    radial-gradient(ellipse at 5% 90%, rgba(88, 52, 137, 0.18), transparent 30rem),
+    #140d1b;
 }
 
 .checkout-shell {
@@ -29,7 +30,7 @@ body {
 .brand {
   display: inline-block;
   margin: 0 0 22px 4px;
-  color: #a93458;
+  color: #ff9dc9;
   font-size: 1.15rem;
   font-weight: 800;
   letter-spacing: 0.02em;
@@ -38,10 +39,10 @@ body {
 
 .checkout-card {
   padding: clamp(24px, 6vw, 48px);
-  border: 1px solid #f1d8df;
+  border: 1px solid rgba(255, 157, 201, 0.2);
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 24px 70px rgba(109, 43, 66, 0.1);
+  background: rgba(34, 22, 40, 0.94);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32);
 }
 
 .environment-badge {
@@ -51,8 +52,8 @@ body {
   margin: 0 0 18px;
   padding: 7px 12px;
   border-radius: 999px;
-  background: #fff0d6;
-  color: #805000;
+  background: rgba(255, 191, 107, 0.14);
+  color: #ffd18f;
   font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0.07em;
@@ -67,36 +68,36 @@ h1 {
 .intro {
   max-width: 52ch;
   margin: 14px 0 24px;
-  color: #705b63;
+  color: #c5acbd;
   line-height: 1.65;
 }
 
 .notice {
   padding: 14px 16px;
-  border: 1px solid #f1d8df;
+  border: 1px solid rgba(255, 157, 201, 0.2);
   border-radius: 12px;
-  background: #fff8fa;
-  color: #67434f;
+  background: rgba(18, 12, 24, 0.7);
+  color: #f1dce9;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
 
 .notice[data-state="error"] {
-  border-color: #efb4b4;
-  background: #fff4f3;
-  color: #8d2929;
+  border-color: #a94958;
+  background: rgba(102, 34, 49, 0.24);
+  color: #ffb6bc;
 }
 
 .notice[data-state="success"] {
-  border-color: #b6dfc7;
-  background: #f1fbf4;
-  color: #24633b;
+  border-color: #407f61;
+  background: rgba(43, 99, 68, 0.22);
+  color: #a9e3bc;
 }
 
 .order-panel {
   margin-top: 20px;
   padding: 18px;
-  border: 1px solid #f1d8df;
+  border: 1px solid rgba(255, 157, 201, 0.2);
   border-radius: 16px;
 }
 
@@ -113,7 +114,7 @@ h1 {
 }
 
 .order-details dt {
-  color: #705b63;
+  color: #c5acbd;
 }
 
 .order-details dd {
@@ -121,6 +122,60 @@ h1 {
   font-weight: 700;
   text-align: right;
   overflow-wrap: anywhere;
+}
+
+.transfer-details {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0 0;
+  text-align: left;
+}
+
+.transfer-details div {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 157, 201, 0.12);
+}
+
+.transfer-details dt {
+  color: #c5acbd;
+}
+
+.transfer-details dd {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  margin: 0;
+  font-weight: 700;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.copy-button {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1px solid rgba(255, 157, 201, 0.36);
+  border-radius: 8px;
+  background: rgba(255, 157, 201, 0.1);
+  color: #ffadd1;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.copy-button:hover,
+.copy-button:focus-visible {
+  background: rgba(255, 157, 201, 0.2);
+}
+
+.copy-feedback {
+  min-height: 1.4em;
+  margin: 12px 0 0;
+  color: #b9e8c8;
 }
 
 .qr-panel {
@@ -134,14 +189,14 @@ h1 {
   aspect-ratio: 1;
   margin: 0 auto;
   object-fit: contain;
-  border: 1px solid #f1d8df;
+  border: 1px solid rgba(255, 157, 201, 0.2);
   border-radius: 14px;
 }
 
 .qr-panel p,
 .mock-note,
 .footer-note {
-  color: #705b63;
+  color: #c5acbd;
   font-size: 0.9rem;
   line-height: 1.6;
 }
@@ -150,7 +205,7 @@ h1 {
   margin: 18px 0 0;
   padding: 13px 15px;
   border-radius: 12px;
-  background: #f5f2ff;
+  background: rgba(149, 115, 214, 0.14);
 }
 
 .footer-note {
@@ -175,5 +230,15 @@ h1 {
 
   .order-details div {
     align-items: flex-start;
+  }
+
+  .transfer-details div {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .transfer-details dd {
+    justify-content: flex-start;
+    text-align: left;
   }
 }

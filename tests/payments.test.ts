@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
-import { createSePayQrUrl, parseWebhookBody, verifySePaySignature } from "../src/payments/sepay.ts";
+import {
+  createOrderReference,
+  createPaymentReference,
+  createSePayQrUrl,
+  parseWebhookBody,
+  sepayPaymentProvider,
+  verifySePaySignature,
+} from "../src/payments/sepay.ts";
 import { handleApiRequest } from "../src/index.ts";
 import type { Database } from "../src/database.ts";
 
@@ -43,6 +50,51 @@ describe("SePay local-only payment safeguards", () => {
     assert.equal(url.searchParams.get("amount"), "50000");
     assert.equal(url.searchParams.get("des"), "CRF A+B");
     assert.equal(url.searchParams.get("acc"), "1234567890");
+  });
+
+  it("uses distinct random order and payment references", () => {
+    const orderReference = createOrderReference();
+    const paymentReference = createPaymentReference();
+    assert.match(orderReference, /^CRF[A-F0-9]{16}$/);
+    assert.match(paymentReference, /^CRP[A-F0-9]{16}$/);
+    assert.notEqual(orderReference, paymentReference);
+  });
+
+  it("provides bank instructions only for SePay Test mode and normalizes its webhook", () => {
+    const input = {
+      mode: "sepay-test" as const,
+      amountMinor: 50_000,
+      reference: "CRP1234567890ABCDEF",
+      bankCode: "mb",
+      bankAccount: "1234567890",
+      accountName: "Crushify Test",
+    };
+    const instructions = sepayPaymentProvider.createInstructions(input);
+    assert.ok(instructions);
+    assert.equal(instructions.bankCode, "MB");
+    assert.equal(instructions.bankAccount, input.bankAccount);
+    assert.equal(instructions.accountName, input.accountName);
+    assert.equal(instructions.amountMinor, input.amountMinor);
+    assert.equal(instructions.reference, input.reference);
+    assert.equal(new URL(instructions.qrUrl).origin, "https://vietqr.app");
+    assert.equal(sepayPaymentProvider.createInstructions({ ...input, mode: "mock" }), null);
+
+    const transaction = sepayPaymentProvider.normalizeTransaction({
+      id: 123,
+      accountNumber: "1234567890",
+      code: input.reference,
+      transferType: "in",
+      transferAmount: 50_000,
+    });
+    assert.deepEqual(transaction, {
+      transactionId: "123",
+      paymentReference: input.reference,
+      receivingAccount: "1234567890",
+      direction: "in",
+      amountMinor: 50_000,
+    });
+    assert.equal(sepayPaymentProvider.mapStatus(transaction), "SUCCEEDED");
+    assert.equal(sepayPaymentProvider.mapStatus({ ...transaction, direction: "out" }), "MANUAL_REVIEW");
   });
 
   it("disables order creation outside local test mode before touching the database", async () => {
