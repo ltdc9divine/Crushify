@@ -55,9 +55,11 @@ describe("Vercel API runtime adapter", () => {
       TURSO_DATABASE_URL: databaseUrl,
       STORAGE_PROVIDER: "mock",
       LOCAL_TEST_MODE: "true",
-      PAYMENT_MODE: "mock",
+      PAYMENT_MODE: "sepay-test",
       SEPAY_WEBHOOK_SECRET: webhookSecret,
+      SEPAY_BANK_CODE: "MB",
       SEPAY_BANK_ACCOUNT: receivingAccount,
+      SEPAY_ACCOUNT_NAME: "Crushify Test",
       APP_ORIGIN: "https://crushify.test",
       VERCEL_ENV: "development",
     }, {
@@ -71,7 +73,7 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3]);
+      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4]);
       const live = await handler(requestWithOrigin("/health/live", "https://crushify.test"));
       assert.equal(live.status, 200);
       const ready = await handler(requestWithOrigin("/health/ready", "https://crushify.test"));
@@ -195,9 +197,22 @@ describe("Vercel API runtime adapter", () => {
             });
           },
           owner: contract.owner,
+          otherOwner: contract.other,
           designId: contract.designId,
           webhookSecret,
           receivingAccount,
+          async cancelOrder(orderId: string) {
+            await migrationClient.batch([
+              {
+                sql: "UPDATE orders SET status = 'CANCELLED' WHERE id = ?",
+                args: [orderId],
+              },
+              {
+                sql: "UPDATE payments SET status = 'CANCELLED' WHERE order_id = ? AND status = 'PENDING'",
+                args: [orderId],
+              },
+            ], "write");
+          },
           async expireOrder(orderId: string) {
             await migrationClient.execute({
               sql: "UPDATE orders SET expires_at = ? WHERE id = ?",
@@ -212,6 +227,27 @@ describe("Vercel API runtime adapter", () => {
             });
             return result.rows.map((row) => String(row.outcome));
           },
+          async inspectWebhookEvent(transactionId: string) {
+            const result = await migrationClient.execute({
+              sql: `SELECT outcome, review_reason, processing_attempts, provider_transaction_id,
+                    order_reference, expected_amount_minor, actual_amount_minor
+                FROM payment_webhook_events WHERE provider = 'SEPAY' AND event_id = ?`,
+              args: [transactionId],
+            });
+            assert.equal(result.rows.length, 1);
+            return result.rows[0];
+          },
+          async failOrderPayment(orderId: string) {
+            await migrationClient.execute(
+              `CREATE TRIGGER reject_test_order_paid BEFORE UPDATE OF status ON orders
+               WHEN NEW.id = '${orderId}' AND NEW.status = 'PAID'
+               BEGIN SELECT RAISE(ABORT, 'forced payment transaction failure'); END`,
+            );
+          },
+          async restoreOrderPayment() {
+            await migrationClient.execute("DROP TRIGGER reject_test_order_paid");
+          },
+          expectedMode: "sepay-test",
           label: "Vercel adapter + Turso local file + mock storage",
         });
         const uploadDesign = await handler(requestWithOrigin("/designs", "https://crushify.test", {
@@ -342,7 +378,7 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3]);
+      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4]);
       process.env.DATABASE_PROVIDER = "turso";
       process.env.TURSO_DATABASE_URL = databaseUrl;
       process.env.TURSO_AUTH_TOKEN = "";

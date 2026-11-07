@@ -35,11 +35,19 @@ const child = spawn(
     "--persist-to",
     persistDirectory,
     "--var",
-    "PAYMENT_MODE:mock",
+    "ENVIRONMENT:local",
+    "--var",
+    "LOCAL_TEST_MODE:true",
+    "--var",
+    "PAYMENT_MODE:sepay-test",
     "--var",
     `SEPAY_WEBHOOK_SECRET:${webhookSecret}`,
     "--var",
+    "SEPAY_BANK_CODE:MB",
+    "--var",
     `SEPAY_BANK_ACCOUNT:${receivingAccount}`,
+    "--var",
+    "SEPAY_ACCOUNT_NAME:Crushify Test",
   ],
   { cwd: root, stdio: ["ignore", "pipe", "pipe"] },
 );
@@ -281,9 +289,18 @@ try {
       );
     },
     owner: first,
+    otherOwner: await signIn(`phase2-payment-other-${crypto.randomUUID()}@example.test`),
     designId,
     webhookSecret,
     receivingAccount,
+    async cancelOrder(orderId) {
+      executeLocalD1(
+        `UPDATE orders SET status = 'CANCELLED' WHERE id = '${orderId}'`,
+      );
+      executeLocalD1(
+        `UPDATE payments SET status = 'CANCELLED' WHERE order_id = '${orderId}' AND status = 'PENDING'`,
+      );
+    },
     expireOrder(orderId) {
       executeLocalD1(
         `UPDATE orders SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = '${orderId}'`,
@@ -297,6 +314,26 @@ try {
       );
       return rows.map((row) => row.outcome);
     },
+    inspectWebhookEvent(transactionId) {
+      const rows = queryLocalD1(
+        `SELECT outcome, review_reason, processing_attempts, provider_transaction_id,
+                order_reference, expected_amount_minor, actual_amount_minor
+           FROM payment_webhook_events WHERE provider = 'SEPAY' AND event_id = '${transactionId}'`,
+      );
+      assert.equal(rows.length, 1);
+      return rows[0];
+    },
+    failOrderPayment(orderId) {
+      executeLocalD1(
+        `CREATE TRIGGER d1_reject_test_order_paid BEFORE UPDATE OF status ON orders ` +
+        `WHEN NEW.id = '${orderId}' AND NEW.status = 'PAID' ` +
+        "BEGIN SELECT RAISE(ABORT, 'forced payment transaction failure'); END",
+      );
+    },
+    restoreOrderPayment() {
+      executeLocalD1("DROP TRIGGER d1_reject_test_order_paid");
+    },
+    expectedMode: "sepay-test",
     label: "Cloudflare Worker + local D1/R2",
   });
 

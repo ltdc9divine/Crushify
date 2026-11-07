@@ -49,6 +49,13 @@ interface PaymentRow {
   expires_at: string | null;
 }
 
+interface WebhookReviewDetails {
+  expectedAmountMinor?: number | null;
+  actualAmountMinor?: number | null;
+  orderReference?: string | null;
+  preserveOutcome?: boolean;
+}
+
 function isLocalPaymentEnabled(env: Env): boolean {
   return env.LOCAL_TEST_MODE === "true" &&
     env.ENVIRONMENT === "local" &&
@@ -372,6 +379,7 @@ async function markWebhookReview(
   eventId: string,
   reason: string,
   payment?: PaymentRow,
+  details: WebhookReviewDetails = {},
 ): Promise<void> {
   const now = nowIso();
   const statements = [];
@@ -390,9 +398,18 @@ async function markWebhookReview(
   statements.push(
     env.DB.prepare(
       `UPDATE payment_webhook_events
-       SET outcome = 'MANUAL_REVIEW', review_reason = ?, processed_at = ?
-       WHERE provider = ? AND event_id = ? AND outcome = 'RECEIVED'`,
-    ).bind(reason, now, PAYMENT_PROVIDER, eventId),
+       SET outcome = CASE WHEN ? = 1 THEN outcome ELSE 'MANUAL_REVIEW' END,
+           review_reason = ?, processed_at = ?,
+           order_reference = COALESCE(?, order_reference),
+           expected_amount_minor = COALESCE(?, expected_amount_minor),
+           actual_amount_minor = COALESCE(?, actual_amount_minor)
+       WHERE provider = ? AND event_id = ?
+         AND (? = 1 OR outcome = 'RECEIVED')`,
+    ).bind(details.preserveOutcome ? 1 : 0, reason, now,
+      details.orderReference ?? payment?.order_reference ?? null,
+      details.expectedAmountMinor ?? payment?.amount_minor ?? null,
+      details.actualAmountMinor ?? null,
+      PAYMENT_PROVIDER, eventId, details.preserveOutcome ? 1 : 0),
   );
   await env.DB.batch(statements);
 }
@@ -404,13 +421,24 @@ async function processWebhookEvent(
   payload: SePayWebhookPayload | null,
   reviewReason: string | null,
 ): Promise<void> {
+  const attemptAt = nowIso();
+  const attempt = await env.DB.prepare(
+    `UPDATE payment_webhook_events
+     SET processing_attempts = processing_attempts + 1, last_attempt_at = ?
+     WHERE provider = ? AND event_id = ? AND outcome = 'RECEIVED'`,
+  ).bind(attemptAt, PAYMENT_PROVIDER, eventId).run();
+  if (attempt.meta.changes !== 1) return;
   const stored = await env.DB.prepare(
     `SELECT outcome, raw_payload FROM payment_webhook_events
      WHERE provider = ? AND event_id = ?`,
   ).bind(PAYMENT_PROVIDER, eventId).first<{ outcome: string | null; raw_payload: string }>();
   if (!stored || stored.outcome !== "RECEIVED") return;
   if (!transactionId || !payload || reviewReason) {
-    await markWebhookReview(env, eventId, reviewReason ?? "Webhook payload is incomplete");
+    await markWebhookReview(env, eventId, reviewReason ?? "Webhook payload is incomplete", undefined, {
+      actualAmountMinor: payload && Number.isSafeInteger(payload.transferAmount)
+        ? payload.transferAmount
+        : null,
+    });
     return;
   }
 
@@ -427,20 +455,26 @@ async function processWebhookEvent(
     ).bind(PAYMENT_PROVIDER, transaction.paymentReference).first<PaymentRow>()
     : null;
   if (!payment) {
-    await markWebhookReview(env, eventId, "No order matches this payment reference");
+    await markWebhookReview(env, eventId, "No order matches this payment reference", undefined, {
+      actualAmountMinor: transaction.amountMinor,
+    });
     return;
   }
 
   const mismatch = webhookMismatch(transaction, payment, env);
   if (mismatch) {
-    await markWebhookReview(env, eventId, mismatch, payment);
+    await markWebhookReview(env, eventId, mismatch, payment, {
+      actualAmountMinor: transaction.amountMinor,
+    });
     return;
   }
   const now = nowIso();
   if (payment.order_status !== "AWAITING_PAYMENT" || payment.payment_status !== "PENDING" ||
       payment.review_required || payment.payment_review_required || !payment.expires_at ||
       payment.expires_at <= now || payment.provider_payment_id) {
-    await markWebhookReview(env, eventId, "Order is expired, already paid, or not awaiting payment", payment);
+    await markWebhookReview(env, eventId, "Order is expired, already paid, or not awaiting payment", payment, {
+      actualAmountMinor: transaction.amountMinor,
+    });
     return;
   }
 
@@ -476,19 +510,84 @@ async function processWebhookEvent(
              WHERE o.id = ? AND o.status = 'PAID' AND p.id = ?
                AND p.status = 'SUCCEEDED' AND p.provider_payment_id = ?
            ) THEN NULL ELSE 'Order or payment state changed while processing webhook' END,
-           processed_at = ?
+           processed_at = ?, order_reference = ?, expected_amount_minor = ?,
+           actual_amount_minor = ?
          WHERE provider = ? AND event_id = ? AND outcome = 'RECEIVED'`,
       ).bind(payment.order_id, payment.id, transactionId,
-        payment.order_id, payment.id, transactionId, now, PAYMENT_PROVIDER, eventId),
+        payment.order_id, payment.id, transactionId, now, payment.order_reference,
+        payment.amount_minor, transaction.amountMinor, PAYMENT_PROVIDER, eventId),
     ]);
   } catch (error) {
     if (!(error instanceof DatabaseError) || error.code !== "CONSTRAINT") throw error;
-    const transaction = await env.DB.prepare(
+    const existingTransaction = await env.DB.prepare(
       "SELECT id FROM payments WHERE provider = ? AND provider_payment_id = ?",
     ).bind(PAYMENT_PROVIDER, transactionId).first<{ id: string }>();
-    if (!transaction) throw error;
-    await markWebhookReview(env, eventId, "Provider transaction is already linked to another payment");
+    if (!existingTransaction) throw error;
+    await markWebhookReview(
+      env,
+      eventId,
+      "Provider transaction is already linked to another payment",
+      payment,
+      { actualAmountMinor: transaction.amountMinor },
+    );
   }
+}
+
+async function reviewWebhookCollision(
+  env: Env,
+  eventId: string,
+  parsed: SePayWebhookPayload | null,
+): Promise<void> {
+  const transaction = parsed ? sepayPaymentProvider.normalizeTransaction(parsed) : null;
+  const payment = transaction?.paymentReference
+    ? await env.DB.prepare(
+      `SELECT p.id, p.order_id, o.order_reference, o.status AS order_status,
+              o.payment_review_required, p.status AS payment_status,
+              p.review_required, p.amount_minor, p.currency, p.payment_reference,
+              p.provider_payment_id, o.expires_at
+       FROM payments p JOIN orders o ON o.id = p.order_id
+       WHERE p.provider = ? AND p.payment_reference = ?`,
+    ).bind(PAYMENT_PROVIDER, transaction.paymentReference).first<PaymentRow>()
+    : null;
+  await markWebhookReview(
+    env,
+    eventId,
+    "Duplicate provider transaction ID has a different payload",
+    payment ?? undefined,
+    {
+      actualAmountMinor: transaction?.amountMinor,
+      preserveOutcome: true,
+    },
+  );
+}
+
+export async function recoverPendingSePayWebhookEvents(
+  env: Env,
+  limit = 50,
+): Promise<{ attempted: number; pending: number }> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new RangeError("Recovery batch size must be between 1 and 100");
+  }
+  const events = await env.DB.prepare(
+    `SELECT event_id, raw_payload FROM payment_webhook_events
+     WHERE provider = ? AND outcome = 'RECEIVED'
+     ORDER BY received_at LIMIT ?`,
+  ).bind(PAYMENT_PROVIDER, limit).all<{ event_id: string; raw_payload: string }>();
+  for (const event of events.results) {
+    const parsed = await sepayPaymentProvider.parseWebhook(new TextEncoder().encode(event.raw_payload));
+    await processWebhookEvent(
+      env,
+      event.event_id,
+      parsed.transactionId,
+      parsed.payload,
+      parsed.reviewReason,
+    );
+  }
+  const pending = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM payment_webhook_events
+     WHERE provider = ? AND outcome = 'RECEIVED'`,
+  ).bind(PAYMENT_PROVIDER).first<{ count: number }>();
+  return { attempted: events.results.length, pending: Number(pending?.count ?? 0) };
 }
 
 async function handleSepayWebhook(
@@ -498,6 +597,10 @@ async function handleSepayWebhook(
 ): Promise<Response> {
   const unavailable = paymentModeError(requestId, env);
   if (unavailable) return unavailable;
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") {
+    return apiError(requestId, 415, "UNSUPPORTED_MEDIA_TYPE", "Expected application/json");
+  }
   const secret = env.SEPAY_WEBHOOK_SECRET!;
   let rawBody: Uint8Array;
   try {
@@ -516,22 +619,30 @@ async function handleSepayWebhook(
   }
 
   const parsed = await sepayPaymentProvider.parseWebhook(rawBody);
+  if (parsed.reviewReason === "Payload is not valid UTF-8") {
+    return apiError(requestId, 400, "INVALID_ENCODING", "Webhook payload must be valid UTF-8");
+  }
   const payloadHash = await sha256(rawBody);
   await env.DB.prepare(
     `INSERT INTO payment_webhook_events (
-       id, provider, event_id, payload_hash, received_at, outcome, raw_payload, review_reason
-     ) VALUES (?, ?, ?, ?, ?, 'RECEIVED', ?, NULL)
+       id, provider, event_id, payload_hash, received_at, outcome, raw_payload, review_reason,
+       provider_transaction_id, actual_amount_minor
+     ) VALUES (?, ?, ?, ?, ?, 'RECEIVED', ?, NULL, ?, ?)
      ON CONFLICT(provider, event_id) DO NOTHING`,
   ).bind(safeId(), PAYMENT_PROVIDER, parsed.eventId, payloadHash, nowIso(),
-    new TextDecoder().decode(rawBody)).run();
+    new TextDecoder().decode(rawBody), parsed.transactionId,
+    typeof parsed.payload?.transferAmount === "number" &&
+        Number.isSafeInteger(parsed.payload.transferAmount)
+      ? parsed.payload.transferAmount
+      : null).run();
 
   const prior = await env.DB.prepare(
     `SELECT payload_hash, outcome FROM payment_webhook_events
      WHERE provider = ? AND event_id = ?`,
   ).bind(PAYMENT_PROVIDER, parsed.eventId).first<{ payload_hash: string; outcome: string | null }>();
   if (!prior) throw new Error("Webhook event was not persisted");
-  if (prior.payload_hash !== payloadHash && prior.outcome === "RECEIVED") {
-    await markWebhookReview(env, parsed.eventId, "Duplicate event ID has a different payload");
+  if (prior.payload_hash !== payloadHash) {
+    await reviewWebhookCollision(env, parsed.eventId, parsed.payload);
   } else {
     await processWebhookEvent(env, parsed.eventId, parsed.transactionId, parsed.payload, parsed.reviewReason);
   }

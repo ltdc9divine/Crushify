@@ -1,9 +1,9 @@
 # Crushify Database Schema
 
-**Status:** SQLite schema contract shared by the current Cloudflare D1 backend and the staged Turso/libSQL target. Migrations `0001`–`0003` are applied to local Wrangler D1 and an ephemeral Turso/libSQL file database by tests; no persistent or remote Turso database has been migrated.
+**Status:** SQLite schema contract shared by the current Cloudflare D1 backend and the staged Turso/libSQL target. Migrations `0001`–`0004` are applied to local Wrangler D1 and an ephemeral Turso/libSQL file database by tests; no persistent or remote Turso database has been migrated.
 **Schema baseline:** `schema_migrations` starts at version `1`; each later migration is immutable and transactional where D1 supports it.
 
-**Implementation note:** `migrations/0001_initial_schema.sql` is the baseline; `0002_auth_previews_and_uploads.sql` adds local authentication, preview, upload, rate-limit, and Our Universe v1 seed; `0003_local_test_payments.sql` adds the empty price catalog and payment-review/webhook fields. Business services use a provider-neutral database interface. D1-specific calls remain within the Cloudflare Worker boundary and D1 adapter. `npm run db:migrate:turso` applies migrations with SHA-256 checksums and a foreign-key check. No remote Turso migration or D1 data transfer has occurred. Treat applied migrations as immutable.
+**Implementation note:** `migrations/0001_initial_schema.sql` is the baseline; `0002_auth_previews_and_uploads.sql` adds local authentication, preview, upload, rate-limit, and Our Universe v1 seed; `0003_local_test_payments.sql` adds the empty price catalog and payment-review/webhook fields; `0004_payment_webhook_recovery.sql` adds bounded-recovery metadata for verified webhook events. Business services use a provider-neutral database interface. D1-specific calls remain within the Cloudflare Worker boundary and D1 adapter. `npm run db:migrate:turso` applies migrations with SHA-256 checksums and a foreign-key check. No remote Turso migration or D1 data transfer has occurred. Treat applied migrations as immutable.
 
 ## 1. Conventions
 
@@ -278,10 +278,11 @@ Schema migration and data migration are separate operations. The checked-in migr
 
 ## 8. Local payment schema extension
 
-Migration `0003_local_test_payments.sql` is forward-only and adds:
+Migrations `0003_local_test_payments.sql` and `0004_payment_webhook_recovery.sql` are forward-only and add:
 
 - `template_prices`, keyed by template/schema version, with VND integer amounts and at most one active row. It is intentionally empty: no product price has been approved or activated.
 - Nullable order/payment references, the purchased design revision, an idempotency request hash, and manual-review flags. Existing `orders.status` and `payments.status` checks remain unchanged; API responses expose `MANUAL_REVIEW` when the review flag is set.
 - `payment_webhook_events.raw_payload` and `review_reason`, retaining the exact decoded webhook JSON and its SHA-256 hash for audit/reconciliation. Restrict database/log access and define retention before production.
+- Migration 0004 adds a processing-attempt count/time, provider transaction ID, linked order reference, expected and actual integer amount, plus an index for finding unresolved `RECEIVED` events. The bounded internal recovery service retries these events; no public recovery endpoint or scheduled runner is configured.
 
-The local self-service order path snapshots the active template price and draft revision into the existing order/item/payment tables. Tests insert a clearly synthetic VND 50,000 price into disposable D1/Turso databases only. Migration 0003 inserts no catalog rows, does not alter existing customer records, and has not been applied to remote D1/Turso.
+The local self-service order path snapshots the active template price and draft revision into the existing order/item/payment tables. Tests insert a clearly synthetic VND 50,000 price into disposable D1/Turso databases only. Migrations 0003–0004 insert no catalog rows, do not alter existing customer records, and have not been applied to remote D1/Turso.

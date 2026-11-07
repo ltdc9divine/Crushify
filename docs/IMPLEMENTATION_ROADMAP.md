@@ -55,8 +55,8 @@
 
 ### Sprint 5 — Checkout/payment (1–2 weeks plus provider onboarding)
 
-- **Local prototype complete:** server-priced order snapshots, idempotency, 15-minute expiry, responsive checkout status page, HMAC-SHA256 SePay webhook verification, duplicate handling, and mismatch/manual-review states. Active prices are not seeded; checkout is disabled outside local test mode.
-- **Still required:** provider-account Test mode run, production candidate adapter/hosting approval, approved real catalog/pricing and terms, rate limits, admin reconciliation/review, durable webhook retry/monitoring, refunds, entitlement and fulfillment design, and independent security review.
+- **Local prototype complete:** server-priced order snapshots, idempotency, 15-minute expiry, responsive checkout status page, HMAC-SHA256 SePay webhook verification, duplicate handling, mismatch/manual-review states, and a bounded internal recovery service for persisted webhook events. Active prices are not seeded; checkout is disabled outside local test mode.
+- **Still required:** provider-account Test mode run, production candidate adapter/hosting approval, approved real catalog/pricing and terms, rate limits, a scheduled/operator recovery runner, provider reconciliation and admin review UI, monitoring, refunds, entitlement and fulfillment design, and independent security review.
 - Do not enable a purchase CTA or live payment. A SePay Test mode integration needs a provider account and isolated bank/webhook settings; no real banking/payment credentials have been supplied.
 
 ### Sprint 6 — Custom design workflow (1–2 weeks)

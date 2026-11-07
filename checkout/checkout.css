@@ -178,6 +178,13 @@ h1 {
   color: #b9e8c8;
 }
 
+.qr-error {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(159, 57, 57, 0.18);
+  color: #ffb6bc !important;
+}
+
 .qr-panel {
   margin-top: 22px;
   text-align: center;

@@ -4,7 +4,7 @@
 
 Crushify currently implements only a local order and webhook-verification prototype. It does not support SePay Live, real-money collection, production checkout, refunds, order fulfillment, entitlements, publication, admin reconciliation, or automatic price management. The `template_prices` table is empty by default. Never put a real bank account or Live secret in local or preview configuration.
 
-The route is `POST /api/v1/payments/sepay/webhook`. It accepts JSON up to 64 KiB, verifies `X-SePay-Signature: sha256=<hex>` over `{X-SePay-Timestamp}.{raw_body}`, and rejects timestamps outside ±300 seconds. A valid event is only applied when its transaction ID is unique, its transfer is incoming, its payment reference exactly matches, the receiving account matches configured local Test mode settings, the amount is exact, and the order is still pending and unexpired. Verified unmatched or mismatched events are retained for manual review.
+The route is `POST /api/v1/payments/sepay/webhook`. It accepts `application/json` up to 64 KiB, verifies `X-SePay-Signature: sha256=<hex>` over `{X-SePay-Timestamp}.{raw_body}`, rejects timestamps outside ±300 seconds, and requires valid UTF-8. A valid event is only applied when its transaction ID is unique, its transfer is incoming, its payment reference exactly matches, the receiving account matches configured local Test mode settings, the amount is exact, and the order is still pending and unexpired. Verified unmatched or mismatched events are retained with attempt count, expected/actual amount and a reason for review.
 
 ## Local mock workflow
 
@@ -38,7 +38,7 @@ The project has not been connected to a SePay account. To run an actual provider
 5. Simulate an incoming transfer with the exact payment reference and amount; verify a single order changes to `PAID`. Then test under/overpayment, wrong receiving account, outgoing transfer, unmatched reference, replay, and webhook retry. Confirm mismatches become `MANUAL_REVIEW`.
 6. Check SePay's webhook history and confirm the endpoint returns HTTP 200 or 201 with JSON `{"success":true}` only after the event is durably recorded. Keep the test endpoint and data isolated.
 
-SePay Test mode requires account access and may have account-specific limits. Its documentation describes isolated simulated transactions; it does not mean this repository has passed a real SePay Test mode test. Do not tunnel an endpoint containing Live credentials. The app has no provider API reconciliation job or operator review screen.
+SePay Test mode requires account access and may have account-specific limits. Its documentation describes isolated simulated transactions; it does not mean this repository has passed a real SePay Test mode test. Do not tunnel an endpoint containing Live credentials. The app has an internal bounded recovery function for retained events and provider retry reprocessing, but no scheduler, provider API reconciliation job, or operator review screen.
 
 ## Environment variables
 

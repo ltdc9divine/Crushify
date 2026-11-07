@@ -197,5 +197,5 @@ export async function runDatabaseContract({ request, getMagicToken, label, befor
   const deletedAssetRead = await request(`/assets/${grant.body.asset_id}`, owner);
   assert.equal(deletedAssetRead.response.status, 404, `${label}: deleted asset is not readable`);
 
-  return { designId, revision: detached.body.revision, owner };
+  return { designId, revision: detached.body.revision, owner, other };
 }

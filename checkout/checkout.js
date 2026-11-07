@@ -1,6 +1,8 @@
 const notice = document.querySelector("#notice");
 const orderPanel = document.querySelector("#order-panel");
 const qrPanel = document.querySelector("#qr-panel");
+const qrImage = document.querySelector("#payment-qr");
+const qrError = document.querySelector("#qr-error");
 const mockNote = document.querySelector("#mock-note");
 const copyFeedback = document.querySelector("#copy-feedback");
 const params = new URLSearchParams(location.search);
@@ -65,15 +67,18 @@ function showOrder(order) {
   }
   qrPanel.hidden = !trustedQrUrl || !instructions;
   if (trustedQrUrl && instructions) {
-    const image = document.querySelector("#payment-qr");
-    image.src = trustedQrUrl;
-    image.referrerPolicy = "no-referrer";
+    qrError.hidden = true;
+    qrImage.referrerPolicy = "no-referrer";
+    qrImage.src = trustedQrUrl;
     document.querySelector("#payment-bank").textContent = instructions.bank_code;
     document.querySelector("#payment-account").textContent = instructions.bank_account;
     document.querySelector("#payment-account-name").textContent = instructions.account_name || "—";
     document.querySelector("#payment-amount").textContent = formatAmount(instructions.amount_minor, order.currency);
     document.querySelector("#payment-reference").textContent = instructions.reference;
     document.querySelector("#copy-amount").dataset.copyValue = String(instructions.amount_minor);
+  } else {
+    qrImage.removeAttribute("src");
+    qrError.hidden = true;
   }
   mockNote.hidden = order.payment?.mock_mode !== true || order.status !== "AWAITING_PAYMENT";
 
@@ -91,6 +96,14 @@ function showOrder(order) {
   }
   updateCountdown();
 }
+
+qrImage.addEventListener("error", () => {
+  qrError.hidden = false;
+});
+
+qrImage.addEventListener("load", () => {
+  qrError.hidden = true;
+});
 
 document.addEventListener("click", async (event) => {
   const button = event.target instanceof Element

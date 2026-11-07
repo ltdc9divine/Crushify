@@ -78,7 +78,7 @@ describe("shared API database contract on local Turso/libSQL", () => {
     let closeDatabase = () => undefined;
 
     try {
-      assert.deepEqual(await applyMigrations(client, await loadMigrations()), [1, 2, 3]);
+      assert.deepEqual(await applyMigrations(client, await loadMigrations()), [1, 2, 3, 4]);
       const { database, close } = await connectDatabaseFromEnvironment(
         { DATABASE_PROVIDER: "turso", TURSO_DATABASE_URL: pathToFileURL(databasePath).href },
       );

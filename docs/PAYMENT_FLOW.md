@@ -37,11 +37,11 @@ Failure, mismatch, cancellation or expiry never grants entitlement. Mismatch/lat
 
 ## 4. Webhook and idempotency
 
-- Verify `X-SePay-Signature` (`sha256=<hex>`) over the exact raw JSON body with `X-SePay-Timestamp`; reject timestamps outside ±300 seconds before parsing.
-- Insert unique `(provider,event_id)` and exact raw JSON/hash before processing. Duplicate transaction IDs are also unique on `(provider,provider_payment_id)` in `payments`.
+- Require `Content-Type: application/json`, a body no larger than 64 KiB, and valid UTF-8. Verify `X-SePay-Signature` (`sha256=<hex>`) over the exact raw body with `X-SePay-Timestamp`; reject timestamps outside ±300 seconds before JSON parsing.
+- Insert unique `(provider,event_id)` and raw JSON/hash before processing. Store processing attempts/time, provider transaction ID, order reference and expected/actual amount for review. Duplicate transaction IDs are also unique on `(provider,provider_payment_id)` in `payments`.
 - Match `code` exactly to the generated `CRP` payment reference; require `transferType=in`, configured receiving account, exact integer `transferAmount`, pending payment/order, and unexpired order.
-- Use conditional database updates/batches so simultaneous identical webhooks do not grant twice. A verified mismatch/unmatched/late event is retained as `MANUAL_REVIEW`; never mark paid from the return URL.
-- SePay must receive HTTP 200/201 with `{"success":true}` after durable processing. Storage/processing failure returns an error so configured provider retry can retry. No background queue/reconciliation job exists.
+- Use conditional database updates and atomic batches so simultaneous identical webhooks do not grant twice. A verified mismatch/unmatched/late event is retained as `MANUAL_REVIEW`; never mark paid from the return URL. A repeated provider transaction ID with a different payload is reviewed and cannot settle a second order.
+- SePay must receive HTTP 200/201 with `{"success":true}` after durable processing. Storage/processing failure returns an error so configured provider retry can retry. Persisted `RECEIVED` events are idempotently reprocessed on retry; an internal bounded recovery function exists, but no scheduler/operator runner or provider API reconciliation is configured.
 - Webhook raw payloads can contain account and transaction data; protect access and retention before any production use.
 
 ## 5. Custom project payments

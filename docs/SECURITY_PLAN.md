@@ -33,8 +33,8 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 ## 5. Payment security
 
 - No client-side `PAID` field or “success URL” can grant entitlement. Amount and currency come from catalog/accepted quote on the Worker.
-- Verify provider signatures on raw request bytes, timestamps and merchant account; compare amount/currency/reference to the expected local record.
-- Idempotency at webhook event and business-operation level; handle duplicate, delayed, replayed and out-of-order events.
+- Verify provider signatures on raw request bytes, timestamps and merchant account; compare amount/currency/reference to the expected local record. Current SePay webhook accepts JSON only, verifies HMAC-SHA256 on exact bytes before strict UTF-8/JSON parsing, checks the ±300-second timestamp, and compares the digest in constant time.
+- Idempotency at webhook event and business-operation level; handle duplicate, delayed, replayed and out-of-order events. Unique provider/event and provider/transaction constraints plus atomic D1/libSQL batches protect state changes. A retained `RECEIVED` event is reprocessed on provider retry; an internal bounded recovery function exists but has no scheduled/operator runner yet.
 - Separate sandbox/live secrets and endpoints; restrict webhook route/body size, validate provider IP only as supplementary defense, not a substitute for signature validation.
 - Prefer hosted checkout. Do not store card data. Restrict finance actions and log reconciliation reason/evidence references without secrets.
 
@@ -66,6 +66,8 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 - Document incident triage, key rotation, payment reconciliation, customer notification, publication revocation and restore procedure.
 
 ## 9. Required pre-launch tests
+
+The local Phase 5B regression now includes owner-isolated order reads and creation, independent server pricing, missing/wrong/stale/future HMAC checks, content-type and UTF-8 validation, exact payment matching, over/underpayment and cancelled/expired rejection, duplicate transaction collision, concurrency, and database failure/retry recovery on local D1 and Turso. These are isolated synthetic tests, not an external provider certification or penetration test.
 
 Local responsive browser regression on 2026-11-05 exercised the homepage and five template routes at 1366×768, 1440×900, 390×844, and 375×812 on synthetic/local data. No remote Turso or Cloudinary credentials were configured; these checks do not establish hosted-provider or production security.
 

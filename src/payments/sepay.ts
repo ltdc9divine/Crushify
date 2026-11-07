@@ -66,7 +66,17 @@ export async function verifySePaySignature(
 }
 
 export async function parseWebhookBody(rawBody: Uint8Array): Promise<ParsedWebhook> {
-  const rawText = new TextDecoder().decode(rawBody);
+  let rawText: string;
+  try {
+    rawText = new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
+  } catch {
+    return {
+      eventId: `invalid-${await sha256(rawBody)}`,
+      transactionId: null,
+      payload: null,
+      reviewReason: "Payload is not valid UTF-8",
+    };
+  }
   let value: unknown;
   try {
     value = JSON.parse(rawText) as unknown;

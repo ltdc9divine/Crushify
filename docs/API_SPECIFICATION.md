@@ -151,7 +151,9 @@ The server accepts no other body fields; it loads the active template/version an
 
 Payment integrations implement the `PaymentProvider` contract for transfer instructions, webhook signature verification, parsing, and transaction normalization. The current SePay adapter is the only implementation; introducing the interface does not enable another provider or Live mode.
 
-For `POST /api/v1/payments/sepay/webhook`, only JSON bodies up to 64 KiB are accepted. HMAC uses `X-SePay-Timestamp` and `X-SePay-Signature: sha256=<hex>` over `{timestamp}.{raw_body}`. Verified but unmatched/mismatched/late events are retained and acknowledged with HTTP 200 `{"success":true}` only after recording `MANUAL_REVIEW`; invalid/expired signatures are rejected. A payment becomes successful only for a matching reference, incoming transfer, configured receiving account, exact amount, unexpired pending order, and unique provider transaction ID. No browser endpoint can set a payment or order to paid.
+For `POST /api/v1/payments/sepay/webhook`, only `application/json` bodies up to 64 KiB are accepted. HMAC uses `X-SePay-Timestamp` and `X-SePay-Signature: sha256=<hex>` over `{timestamp}.{raw_body}`; UTF-8 is decoded strictly only after signature verification. Verified but unmatched/mismatched/late events are retained with provider transaction ID, expected/actual amount, attempt count, and review reason, then acknowledged with HTTP 200 `{"success":true}` only after recording `MANUAL_REVIEW`; invalid/expired signatures are rejected. A payment becomes successful only for a matching reference, incoming transfer, configured receiving account, exact amount, unexpired pending order, and unique provider transaction ID. No browser endpoint can set a payment or order to paid.
+
+An event left in `RECEIVED` after a processing failure is retried atomically when SePay retries the same signed webhook. `recoverPendingSePayWebhookEvents` is an internal bounded recovery service for a future operator/scheduled runner; it is not exposed as a public route and no scheduler is currently configured.
 
 ### Storage adapter contract
 

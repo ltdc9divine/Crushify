@@ -4,8 +4,9 @@ import { createHmac, randomUUID } from "node:crypto";
 const TEST_AMOUNT_VND = 50_000;
 
 function signedHeaders(secret, rawBody, timestamp = Math.floor(Date.now() / 1000)) {
+  const bodyBytes = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody);
   const signature = createHmac("sha256", secret)
-    .update(`${timestamp}.${rawBody}`)
+    .update(Buffer.concat([Buffer.from(`${timestamp}.`), bodyBytes]))
     .digest("hex");
   return {
     "Content-Type": "application/json",
@@ -21,8 +22,14 @@ export async function runPaymentContract({
   designId,
   webhookSecret,
   receivingAccount,
+  otherOwner,
   expireOrder,
+  cancelOrder,
+  failOrderPayment,
+  restoreOrderPayment,
   inspectWebhookOutcomes,
+  inspectWebhookEvent,
+  expectedMode = "sepay-test",
   label,
 }) {
   const idempotencyKey = `payment-test-${randomUUID()}`;
@@ -59,9 +66,22 @@ export async function runPaymentContract({
   assert.equal(created.body.currency, "VND");
   assert.equal(created.body.status, "AWAITING_PAYMENT");
   assert.equal(created.body.payment.status, "PENDING");
-  assert.equal(created.body.payment.qr_url, null, `${label}: mock mode never presents a bank QR`);
-  assert.equal(created.body.payment.instructions, null, `${label}: mock mode has no bank instructions`);
-  assert.equal(created.body.payment.mock_mode, true);
+  if (expectedMode === "mock") {
+    assert.equal(created.body.payment.qr_url, null, `${label}: mock mode never presents a bank QR`);
+    assert.equal(created.body.payment.instructions, null, `${label}: mock mode has no bank instructions`);
+    assert.equal(created.body.payment.mock_mode, true);
+  } else {
+    assert.equal(created.body.payment.mock_mode, false);
+    assert.ok(created.body.payment.qr_url, `${label}: Test mode instructions include a QR`);
+    assert.deepEqual(created.body.payment.instructions, {
+      bank_code: "MB",
+      bank_account: receivingAccount,
+      account_name: "Crushify Test",
+      amount_minor: TEST_AMOUNT_VND,
+      reference: created.body.payment.reference,
+      qr_url: created.body.payment.qr_url,
+    });
+  }
   assert.match(created.body.order_reference, /^CRF[A-F0-9]{16}$/);
   assert.match(created.body.payment.reference, /^CRP[A-F0-9]{16}$/);
   assert.notEqual(created.body.order_reference, created.body.payment.reference,
@@ -92,6 +112,20 @@ export async function runPaymentContract({
 
   const anonymousStatus = await request(`/orders/${created.body.order_id}/status`);
   assert.equal(anonymousStatus.response.status, 401, `${label}: order status requires authentication`);
+  if (otherOwner) {
+    const crossOwnerStatus = await request(`/orders/${created.body.order_id}/status`, otherOwner);
+    assert.equal(crossOwnerStatus.response.status, 404, `${label}: another customer cannot read order details`);
+    const crossOwnerCreate = await request("/orders", otherOwner, {
+      method: "POST",
+      mutating: true,
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `cross-owner-${randomUUID()}`,
+      },
+      body: JSON.stringify({ design_id: designId }),
+    });
+    assert.equal(crossOwnerCreate.response.status, 404, `${label}: another customer cannot order an owned draft`);
+  }
 
   const invalidBody = JSON.stringify({ id: 880001, accountNumber: receivingAccount, code: created.body.payment.reference,
     transferType: "in", transferAmount: TEST_AMOUNT_VND });
@@ -105,6 +139,32 @@ export async function runPaymentContract({
     body: invalidBody,
   });
   assert.equal(invalidSignature.response.status, 401, `${label}: reject invalid signature`);
+  const missingSignature = await request("/payments/sepay/webhook", null, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: invalidBody,
+  });
+  assert.equal(missingSignature.response.status, 401, `${label}: reject missing signature`);
+  const futureHeaders = signedHeaders(webhookSecret, invalidBody, Math.floor(Date.now() / 1000) + 301);
+  const future = await request("/payments/sepay/webhook", null, {
+    method: "POST",
+    headers: futureHeaders,
+    body: invalidBody,
+  });
+  assert.equal(future.response.status, 401, `${label}: reject future timestamp`);
+  const wrongContentType = await request("/payments/sepay/webhook", null, {
+    method: "POST",
+    headers: { ...signedHeaders(webhookSecret, invalidBody), "Content-Type": "text/plain" },
+    body: invalidBody,
+  });
+  assert.equal(wrongContentType.response.status, 415, `${label}: webhook requires JSON`);
+  const invalidUtf8Body = Buffer.from([0xc3, 0x28]);
+  const invalidUtf8 = await request("/payments/sepay/webhook", null, {
+    method: "POST",
+    headers: signedHeaders(webhookSecret, invalidUtf8Body),
+    body: invalidUtf8Body,
+  });
+  assert.equal(invalidUtf8.response.status, 400, `${label}: reject invalid UTF-8 after signature verification`);
 
   const staleHeaders = signedHeaders(webhookSecret, invalidBody, Math.floor(Date.now() / 1000) - 301);
   const stale = await request("/payments/sepay/webhook", null, {
@@ -151,8 +211,9 @@ export async function runPaymentContract({
 
   const mismatchOrder = await createRequest(`mismatch-${randomUUID()}`);
   assert.equal(mismatchOrder.response.status, 201);
+  const mismatchTransactionId = String(Number(`${Date.now()}`.slice(-8)) + 2);
   const mismatchPayload = JSON.stringify({
-    id: Number(`${Date.now()}`.slice(-8)) + 2,
+    id: mismatchTransactionId,
     accountNumber: receivingAccount,
     code: mismatchOrder.body.payment.reference,
     transferType: "in",
@@ -167,6 +228,14 @@ export async function runPaymentContract({
   const manualReview = await request(`/orders/${mismatchOrder.body.order_id}/status`, owner);
   assert.equal(manualReview.body.status, "MANUAL_REVIEW");
   assert.equal(manualReview.body.payment.status, "MANUAL_REVIEW");
+  if (inspectWebhookEvent) {
+    const mismatchEvent = await inspectWebhookEvent(mismatchTransactionId);
+    assert.equal(mismatchEvent.outcome, "MANUAL_REVIEW");
+    assert.equal(mismatchEvent.expected_amount_minor, TEST_AMOUNT_VND);
+    assert.equal(mismatchEvent.actual_amount_minor, TEST_AMOUNT_VND - 1);
+    assert.equal(mismatchEvent.provider_transaction_id, mismatchTransactionId);
+    assert.ok(mismatchEvent.processing_attempts >= 1);
+  }
 
   const wrongAccountOrder = await createRequest(`account-${randomUUID()}`);
   const wrongAccountPayload = JSON.stringify({
@@ -229,6 +298,23 @@ export async function runPaymentContract({
     assert.deepEqual(outcomes.sort(), ["MANUAL_REVIEW", "PROCESSED"],
       `${label}: only the transaction linked to the payment is processed`);
   }
+  const duplicateOrder = await createRequest(`same-transaction-${randomUUID()}`);
+  const duplicateTransactionPayload = JSON.stringify({
+    id: validPayload && JSON.parse(validPayload).id,
+    accountNumber: receivingAccount,
+    code: duplicateOrder.body.payment.reference,
+    transferType: "in",
+    transferAmount: TEST_AMOUNT_VND,
+  });
+  const collision = await request("/payments/sepay/webhook", null, {
+    method: "POST",
+    headers: signedHeaders(webhookSecret, duplicateTransactionPayload),
+    body: duplicateTransactionPayload,
+  });
+  assert.equal(collision.response.status, 200);
+  const collisionReview = await request(`/orders/${duplicateOrder.body.order_id}/status`, owner);
+  assert.equal(collisionReview.body.status, "MANUAL_REVIEW",
+    `${label}: one provider transaction cannot pay a second order`);
 
   const expiredOrder = await createRequest(`expired-${randomUUID()}`);
   assert.equal(expiredOrder.response.status, 201);
@@ -250,6 +336,65 @@ export async function runPaymentContract({
   assert.equal(late.response.status, 200);
   const lateReview = await request(`/orders/${expiredOrder.body.order_id}/status`, owner);
   assert.equal(lateReview.body.status, "MANUAL_REVIEW", `${label}: late transfer is reviewed, not paid`);
+
+  if (cancelOrder) {
+    const cancelledOrder = await createRequest(`cancelled-${randomUUID()}`);
+    await cancelOrder(cancelledOrder.body.order_id);
+    const cancelledPayload = JSON.stringify({
+      id: Number(`${Date.now()}`.slice(-8)) + 9,
+      accountNumber: receivingAccount,
+      code: cancelledOrder.body.payment.reference,
+      transferType: "in",
+      transferAmount: TEST_AMOUNT_VND,
+    });
+    const cancelledWebhook = await request("/payments/sepay/webhook", null, {
+      method: "POST",
+      headers: signedHeaders(webhookSecret, cancelledPayload),
+      body: cancelledPayload,
+    });
+    assert.equal(cancelledWebhook.response.status, 200);
+    const cancelledStatus = await request(`/orders/${cancelledOrder.body.order_id}/status`, owner);
+    assert.equal(cancelledStatus.body.status, "MANUAL_REVIEW",
+      `${label}: a late transfer cannot pay a cancelled order`);
+  }
+
+  if (failOrderPayment && restoreOrderPayment && inspectWebhookEvent) {
+    const recoveryOrder = await createRequest(`recovery-${randomUUID()}`);
+    const recoveryTransactionId = String(Number(`${Date.now()}`.slice(-8)) + 10);
+    const recoveryPayload = JSON.stringify({
+      id: recoveryTransactionId,
+      accountNumber: receivingAccount,
+      code: recoveryOrder.body.payment.reference,
+      transferType: "in",
+      transferAmount: TEST_AMOUNT_VND,
+    });
+    await failOrderPayment(recoveryOrder.body.order_id);
+    const failedProcessing = await request("/payments/sepay/webhook", null, {
+      method: "POST",
+      headers: signedHeaders(webhookSecret, recoveryPayload),
+      body: recoveryPayload,
+    });
+    assert.equal(failedProcessing.response.status, 500,
+      `${label}: database transaction failure is retriable`);
+    const stillPending = await request(`/orders/${recoveryOrder.body.order_id}/status`, owner);
+    assert.equal(stillPending.body.status, "AWAITING_PAYMENT",
+      `${label}: failed batch does not partially mark order paid`);
+    const pendingEvent = await inspectWebhookEvent(recoveryTransactionId);
+    assert.equal(pendingEvent.outcome, "RECEIVED");
+    await restoreOrderPayment(recoveryOrder.body.order_id);
+    const recovered = await request("/payments/sepay/webhook", null, {
+      method: "POST",
+      headers: signedHeaders(webhookSecret, recoveryPayload),
+      body: recoveryPayload,
+    });
+    assert.equal(recovered.response.status, 200);
+    const recoveredStatus = await request(`/orders/${recoveryOrder.body.order_id}/status`, owner);
+    assert.equal(recoveredStatus.body.status, "PAID",
+      `${label}: provider retry recovers an event persisted before a failed transaction`);
+    const recoveredEvent = await inspectWebhookEvent(recoveryTransactionId);
+    assert.equal(recoveredEvent.outcome, "PROCESSED");
+    assert.ok(recoveredEvent.processing_attempts >= 2);
+  }
 
   const outgoingOrder = await createRequest(`outgoing-${randomUUID()}`);
   const outgoingPayload = JSON.stringify({

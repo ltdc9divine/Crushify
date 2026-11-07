@@ -26,9 +26,26 @@ describe("SePay local-only payment safeguards", () => {
     });
 
     assert.equal(await verifySePaySignature(headers, body, secret), true);
+    assert.equal(await verifySePaySignature(new Headers(), body, secret), false);
+    assert.equal(await verifySePaySignature(
+      new Headers({
+        "X-SePay-Timestamp": String(timestamp),
+        "X-SePay-Signature": `sha256=${"0".repeat(64)}`,
+      }),
+      body,
+      secret,
+    ), false);
     assert.equal(await verifySePaySignature(headers, new TextEncoder().encode("{}"), secret), false);
     assert.equal(await verifySePaySignature(
       new Headers({ ...Object.fromEntries(headers), "X-SePay-Timestamp": String(timestamp - 301) }),
+      body,
+      secret,
+    ), false);
+    assert.equal(await verifySePaySignature(
+      new Headers({
+        "X-SePay-Timestamp": String(timestamp + 301),
+        "X-SePay-Signature": headers.get("X-SePay-Signature")!,
+      }),
       body,
       secret,
     ), false);
@@ -39,6 +56,9 @@ describe("SePay local-only payment safeguards", () => {
     assert.equal(parsed.transactionId, null);
     assert.match(parsed.reviewReason ?? "", /JSON/);
     assert.match(parsed.eventId, /^invalid-[a-f0-9]{64}$/);
+    const invalidUtf8 = await parseWebhookBody(new Uint8Array([0xc3, 0x28]));
+    assert.equal(invalidUtf8.transactionId, null);
+    assert.match(invalidUtf8.reviewReason ?? "", /UTF-8/);
   });
 
   it("only generates a QR when valid sandbox bank settings are present", () => {
