@@ -1,6 +1,6 @@
 # Crushify API Specification
 
-**Status:** proposed full-product contract with a local-only order/SePay webhook subset. Cloudflare D1/R2 and Vercel Turso/mock runtime paths are tested only with local synthetic data. No production API deployment or real provider credentials have been used.
+**Status:** proposed full-product contract with local-only order/SePay and publication/delivery subsets. Cloudflare D1/R2 and Vercel Turso/mock runtime paths are tested only with local synthetic data. No production API deployment or real provider credentials have been used.
 **Base path:** `/api/v1`. JSON over HTTPS. Public gift reads are separate from private customer APIs.
 
 ## 1. Common contract
@@ -22,7 +22,7 @@
 | `POST /customers/session/verify` | Public, rate-limited | Consume one-time token and create secure session cookie. |
 | `DELETE /customers/session` | Customer | Revoke current session. |
 | `GET /customers/me` | Customer | Minimal profile and entitlements. |
-| `POST /designs` | Customer | Create draft after validating an active template/version; returns opaque design ID and revision. |
+| `POST /designs` | Customer | Create a draft for a supported active template/version; returns opaque design ID and revision. |
 | `GET /designs/{designId}` | Owner | Retrieve draft and asset references for the owner only. |
 | `PUT /designs/{designId}` | Owner | Save validated JSON with `If-Match`/expected revision; returns incremented revision or `409 CONFLICT`. |
 | `POST /designs/{designId}/preview-token` | Owner | Issue short-lived, scoped, high-entropy preview capability. |
@@ -39,7 +39,7 @@
 | `GET /custom-projects/{projectId}` | Owner | View own project, current quote, permitted preview and event summary. |
 | `POST /custom-projects/{projectId}/quotes/{quoteId}/accept` | Owner | Accept an unexpired issued quote; creates deposit order idempotently. |
 | `POST /custom-projects/{projectId}/revisions` | Owner | Request a revision against preview-ready work; enforce quote's included rounds/scope. |
-| `GET /g/{slug}` | Public | Render only a published, non-revoked revision with public media. |
+| `GET /p/{slug}` | Public | Serve the publication shell; the shell loads the allowlisted renderer payload from the publication API. |
 
 ### Admin-only API (host identity gateway + application role; currently Cloudflare Access for the Worker)
 
@@ -111,9 +111,9 @@ Keep the present static pages usable while progressively calling the API. Introd
 
 The database adapter refactor does not change the existing Our Universe request/response contract. Cloudflare remains the current HTTP runtime until a separately tested Vercel development adapter is added.
 
-## 7. Current local implementation (Phase 2)
+## 7. Current local implementation
 
-The following routes are implemented for the Our Universe pilot. Local integration tests use Wrangler D1/R2 emulation. The staging D1 has both migrations applied, but no staging Worker or R2 bucket is deployed yet:
+The following routes are implemented in the local Worker. Local integration tests use Wrangler D1/R2 emulation; no staging Worker, remote migration, or R2 bucket has been deployed:
 
 | Method / path | Access | Implemented behavior |
 |---|---|---|
@@ -121,7 +121,7 @@ The following routes are implemented for the Our Universe pilot. Local integrati
 | `POST /customers/session/verify` | Public | Consume a hashed, expiring, one-time token and set session/CSRF cookies. |
 | `DELETE /customers/session` | Customer + CSRF | Revoke the current session. |
 | `GET /customers/me` | Customer | Return minimal account data and CSRF token. |
-| `POST /designs` | Customer + CSRF | Create an Our Universe schema-v1 draft. |
+| `POST /designs` | Customer + CSRF | Create a draft for a supported template/schema version; the Our Universe editor is the only server-backed creator. |
 | `GET /designs/{designId}` | Owner | Read the private draft. Non-owners receive 404. |
 | `PUT /designs/{designId}` | Owner + CSRF | Validate and save the draft using `expected_revision`; stale writes return 409. |
 | `DELETE /designs/{designId}` | Owner + CSRF | Start the design deletion workflow and remove its private media. |
@@ -136,8 +136,18 @@ The following routes are implemented for the Our Universe pilot. Local integrati
 | `GET /orders` | Customer | List up to 50 own self-service orders. |
 | `GET /orders/{orderId}` / `GET /orders/{orderId}/status` | Owner | Read own order and payment status; ownership failures return 404. |
 | `POST /payments/sepay/webhook` | SePay HMAC-SHA256 | Verify raw-body signature and ±300-second timestamp, persist event, then process idempotently or mark for manual review. |
+| `GET /publications` | Owner | List the customer's websites for the local dashboard. |
+| `POST /publications` | Owner + CSRF, local-test only | Create a paid-order-eligible publication snapshot and record explicit asset consent. |
+| `GET /publications/{publicationId}` | Owner, local-test only | Read publication status and lifecycle revision. |
+| `PATCH /publications/{publicationId}` | Owner + CSRF, local-test only | Update an unpublished snapshot to an eligible design revision. |
+| `POST /publications/{publicationId}/publish` / `/republish` | Owner + CSRF, local-test only | Recheck payment evidence and publish the snapshot. |
+| `POST /publications/{publicationId}/unpublish` / `/revoke` | Owner + CSRF, local-test only | Deny recipient reads and revoke the public URL. |
+| `POST /publications/{publicationId}/assets/{assetId}/consent` | Owner + CSRF, local-test only | Withdraw consent for a specific public media derivative. |
+| `GET /publications/{slug}` | Public bearer URL | Return safe template data only while payment, publication, renderer, and consent checks pass. |
+| `GET /publications/{slug}/assets/{assetId}` | Public bearer URL | Read a consented, publication-specific derivative. |
+| `GET /p/{slug}` | Public | Serve the recipient shell; Vercel includes a rewrite for this route. |
 
-`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Worker selects one private storage adapter; Vercel uses Cloudinary or local-test-only mock storage. Order routes are available only when `LOCAL_TEST_MODE=true`, the runtime is local, `PAYMENT_MODE=mock|sepay-test`, and a local webhook secret is configured. The new price table starts empty, so order creation returns `PRICE_UNAVAILABLE` until a test price is explicitly inserted into a disposable local database. No live checkout, production prices, fulfillment, entitlement, publication, refund, custom-project payment, or admin reconciliation exists. See [SEPAY_SETUP.md](SEPAY_SETUP.md) and [SECURITY_PLAN.md](SECURITY_PLAN.md).
+`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Worker selects one private storage adapter; Vercel uses Cloudinary or local-test-only mock storage. Order routes are available only when `LOCAL_TEST_MODE=true`, the runtime is local, `PAYMENT_MODE=mock|sepay-test`, and a local webhook secret is configured. Publication mutations independently require `LOCAL_TEST_MODE=true` and an unset or `local` `ENVIRONMENT`; otherwise they fail closed with `PUBLICATION_DISABLED`. The price table starts empty, so order creation returns `PRICE_UNAVAILABLE` until a test price is explicitly inserted into a disposable local database. No live checkout, production prices, fulfillment, production entitlement, refund, custom-project payment, or admin reconciliation exists. See [SEPAY_SETUP.md](SEPAY_SETUP.md), [PUBLICATION_AND_DELIVERY.md](PUBLICATION_AND_DELIVERY.md), and [SECURITY_PLAN.md](SECURITY_PLAN.md).
 
 ### Implemented local order contract
 
@@ -168,3 +178,7 @@ Cloudinary is selected only when `STORAGE_PROVIDER=cloudinary` and all three ser
 ### Database adapter compatibility
 
 The routes above call the shared `Database` interface and retain their existing request/response behavior. The same API contract runner exercises auth/session, design/revision conflict, preview, and asset ownership flows on local Wrangler D1 and local Turso/libSQL. Both the Cloudflare Worker (D1/R2) and Vercel (Turso/Cloudinary) adapters exist; local integration exercises Cloudflare with D1/R2 and Vercel with Turso/mock storage. See [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md) for the value, batch, and error-mapping contract.
+
+## 8. Publication and delivery implementation limits
+
+The local publication handlers and `/p/{slug}` shell are described in [PUBLICATION_AND_DELIVERY.md](PUBLICATION_AND_DELIVERY.md). They have only been exercised with local D1/R2 and synthetic paid-order fixtures. No staging API, remote media bucket, production checkout, real payment, or commercial customer delivery is enabled. The four non-Universe editors do not yet save drafts/uploads through these APIs.

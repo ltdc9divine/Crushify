@@ -17,6 +17,9 @@ export interface Storage {
   get(objectKey: string): Promise<StorageObject | null>;
   delete(objectKey: string): Promise<void>;
   privateAssetUrl(objectKey: string, expiresAt: number): Promise<string | null>;
+  createPublishedDerivative(sourceKey: string, derivativeKey: string): Promise<void>;
+  getPublishedDerivative(derivativeKey: string): Promise<StorageObject | null>;
+  deletePublishedDerivative(derivativeKey: string): Promise<void>;
 }
 
 export class StorageError extends Error {

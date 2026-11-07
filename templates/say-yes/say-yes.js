@@ -3,6 +3,7 @@ const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)],cla
 const mk=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const hx=n=>'#'+n.toString(16).padStart(6,'0');
+const ASSET_ID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const mobile=matchMedia('(max-width:800px)').matches||/Mobi|Android/i.test(navigator.userAgent),reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
 const TH={
 'rose-proposal':{n:'Lời tỏ tình sắc hồng',A:0xff2f7d,B:0xff9ac8,C:0xb06bff,box:0x7a0f2e,plat:0x6b1a45,neon:0xff4fa0,gem:0xffd0e8,pal:[0xff5fa2,0xff9ac8,0xffd0e8,0xb06bff],petal:0xff4d88,bg:['#3a0a24','#10020a'],ac:'#ff5fa2'},
@@ -74,7 +75,7 @@ const pg=new R.CircleGeometry(.13,8);pg.scale(1,1.5,1);G.NP=mobile?70:160;G.peta
 G.pd=Array.from({length:G.NP},()=>({x:rnd(-9,9),y:rnd(-1,9),z:rnd(-8,6),s:rnd(.4,1),p:rnd(0,6),r:rnd(0,6)}));scene.add(G.petals);G.dm=new R.Object3D();setEnv()}
 /* ---------- theme / texts ---------- */
 const col=n=>new R.Color(n);
-function apply(){const T=th(),a=an(),b=document.body;b.style.setProperty('--b1',T.bg[0]);b.style.setProperty('--b2',T.bg[1]);b.style.setProperty('--ac',T.ac);
+function apply(){window.dispatchEvent(new Event('crushify:changed'));const T=th(),a=an(),b=document.body;b.style.setProperty('--b1',T.bg[0]);b.style.setProperty('--b2',T.bg[1]);b.style.setProperty('--ac',T.ac);
 $('#qSub').textContent=(D.receiver?D.receiver+', ':'')+D.subtitle;$('#qMain').textContent=D.question;$('#yesB').textContent=D.yesLabel;$('#noB').textContent=D.noLabel;
 $('#yesH').textContent=D.yesHeadline;$('#yesM').textContent=D.yesMessage;$('#yesL').textContent=D.letter;$('#yesS').textContent=D.signature;$('#yesN').textContent=`${D.sender} ♥ ${D.receiver}`+(D.specialDate?' · '+fmt(D.specialDate):'');
 $('#yesPh').innerHTML=D.photos.slice(0,6).map(p=>`<figure><img src="${esc(p.url)}" alt=""><figcaption>${esc(p.caption)}</figcaption></figure>`).join('');
@@ -152,4 +153,10 @@ function start(){try{R=window.THREE;ray=new R.Raycaster();renderer=new R.WebGLRe
 function fallback(){gl=false;$('#c').hidden=true;document.body.classList.add('twod','ask');ui();apply();$('#note').hidden=false}
 function load(u,ok,no){const s=u.shift();if(!s)return no();const e=document.createElement('script');e.src=s;e.onload=ok;e.onerror=()=>load(u,ok,no);document.head.appendChild(e)}
 if(window.THREE)start();else load(['https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js','https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js','vendor/three.min.js'],start,fallback);
+window.registerCrushifyCustomerEditor({
+templateId:'say-yes',schemaVersion:1,
+async serialize(upload){const photos=[];for(const photo of D.photos){const asset_id=photo.asset_id||(ASSET_ID.test(photo.url)?photo.url:await upload(photo.url));photo.asset_id=asset_id;photos.push({asset_id,caption:photo.caption||''})}
+return{templateId:'say-yes',sender:D.sender,receiver:D.receiver,nickname:D.nickname,question:D.question,subtitle:D.subtitle,yesLabel:D.yesLabel,noLabel:D.noLabel,yesHeadline:D.yesHeadline,yesMessage:D.yesMessage,letter:D.letter,signature:D.signature,specialDate:D.specialDate||'',noMessage:D.noMessage,noBackLabel:D.noBackLabel,showNoMessage:D.showNoMessage,theme:D.theme,animation:D.animation,particles:D.particles,autoRotate:D.autoRotate,music:D.music||'',photos}},
+async hydrate(data,assetUrl){D=structuredClone(data);for(const photo of D.photos)photo.url=await assetUrl(photo.asset_id);editor();apply()}
+});
 })();

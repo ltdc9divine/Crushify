@@ -2,6 +2,8 @@ import { handleSessionRoutes } from "./auth.ts";
 import { handleAssetRoutes } from "./assets.ts";
 import { handleDesignRoutes, handlePreviewRoutes } from "./designs.ts";
 import { handlePaymentRoutes } from "./payments.ts";
+import { handlePublicationRoutes } from "./publications.ts";
+import { recoverPendingFulfillments, runPublicationLifecycle } from "./publications.ts";
 import { D1DatabaseAdapter } from "./database/d1.ts";
 import { createStorageFromEnvironment } from "./storage/provider.ts";
 import { apiError, jsonResponse } from "./http.ts";
@@ -63,6 +65,8 @@ export async function handleApiRequest(
     if (previewResponse) return previewResponse;
     const paymentResponse = await handlePaymentRoutes(request, env, url.pathname, requestId);
     if (paymentResponse) return paymentResponse;
+    const publicationResponse = await handlePublicationRoutes(request, env, url.pathname, requestId);
+    if (publicationResponse) return publicationResponse;
     return apiError(requestId, 404, "NOT_FOUND", "Route not found");
   } catch (error) {
     console.error("API request failed", { request_id: requestId, path: url.pathname, error });
@@ -71,6 +75,35 @@ export async function handleApiRequest(
 }
 
 export default {
+  async scheduled(_controller: ScheduledController, env: CloudflareEnv, ctx: ExecutionContext): Promise<void> {
+    if (env.DATABASE_PROVIDER !== "d1") {
+      throw new Error("Scheduled maintenance requires the D1 database provider");
+    }
+    let storage;
+    try {
+      storage = createStorageFromEnvironment(env, env.MEDIA);
+    } catch (error) {
+      console.error("Scheduled storage configuration failed", {
+        error: error instanceof Error ? error.message : "Unknown storage configuration error",
+      });
+      throw error;
+    }
+    const runtimeEnv = {
+      ...env,
+      DB: new D1DatabaseAdapter(env.DB),
+      STORAGE: storage,
+    };
+    ctx.waitUntil((async () => {
+      const fulfillment = await recoverPendingFulfillments(runtimeEnv, 50);
+      const lifecycle = await runPublicationLifecycle(runtimeEnv, { limit: 50 });
+      console.info("Scheduled publication maintenance completed", { fulfillment, lifecycle });
+    })().catch((error) => {
+      console.error("Scheduled publication maintenance failed", {
+        error: error instanceof Error ? error.message : "Unknown maintenance error",
+      });
+      throw error;
+    }));
+  },
   async fetch(request: Request, env: CloudflareEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
@@ -91,6 +124,19 @@ export default {
         DB: new D1DatabaseAdapter(env.DB),
         STORAGE: storage,
       });
+    }
+    if (url.pathname === "/p" || /^\/p\/[^/.]+\/?$/.test(url.pathname)) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return apiError(crypto.randomUUID(), 405, "METHOD_NOT_ALLOWED", "Method not allowed");
+      }
+      const pageUrl = new URL("/p/index.html", request.url);
+      const page = await env.ASSETS.fetch(new Request(pageUrl, { method: request.method }));
+      const headers = new Headers(page.headers);
+      headers.set("Cache-Control", "no-store");
+      headers.set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self'; script-src 'self'; style-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'");
+      headers.set("X-Content-Type-Options", "nosniff");
+      headers.set("Referrer-Policy", "no-referrer");
+      return new Response(page.body, { status: page.status, headers });
     }
     return env.ASSETS.fetch(request);
   },

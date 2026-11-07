@@ -1,6 +1,6 @@
 # Payment and Entitlement Flow
 
-**Status:** local-only order and SePay webhook verification prototype. Synthetic local tests run against D1 and Turso/libSQL; no provider account has been connected, no real transaction was made, and no live checkout or publication is enabled.
+**Status:** local-only order, SePay webhook verification, and paid-order-gated publication prototypes. Synthetic local tests run against D1 and Turso/libSQL; no provider account has been connected, no real transaction was made, and no live checkout or publication is enabled.
 **Provider:** SePay Test mode is the only future provider path considered here. Production/live mode is deliberately disabled in both runtimes.
 
 ## 1. Authority model
@@ -23,7 +23,13 @@ Design DRAFT ── valid save ──> DRAFT revision N
                     signed paid webhook ──> Payment SUCCEEDED + Order PAID
 ```
 
-Failure, mismatch, cancellation or expiry never grants entitlement. Mismatch/late/unmatched signed events are stored for manual review. The persisted base schema has review flags rather than new `MANUAL_REVIEW` enum values; the API exposes an effective `MANUAL_REVIEW` status. No fulfillment, entitlement, refund or publication transition is implemented.
+Failure, mismatch, cancellation or expiry never grants entitlement. Mismatch/late/unmatched signed events are stored for manual review. The persisted base schema has review flags rather than new `MANUAL_REVIEW` enum values; the API exposes an effective `MANUAL_REVIEW` status. Publication creation and lifecycle are implemented only behind a local-test guard; they are not production fulfillment or entitlement.
+
+### Local publication gate
+
+The publication API rechecks order/design/customer consistency, `SELF_SERVICE` and `PAID` order state, successful payment state, processed matching webhook evidence, amount/currency equality, the purchased template/schema version, and active renderer before publishing and on recipient reads. Publication mutations require `LOCAL_TEST_MODE=true` and `ENVIRONMENT` unset or `local`; a disabled runtime returns `PUBLICATION_DISABLED`.
+
+Integration tests seed artificial paid order/payment/webhook rows directly in disposable local D1. No test uses a real transfer or provider. The existing order-creation/checkout prototype is still limited to Our Universe; the price catalog is empty, the four other template editors are not server-backed, and no customer can purchase or publish on a deployed service.
 
 ## 3. Local order creation
 
@@ -35,13 +41,17 @@ Failure, mismatch, cancellation or expiry never grants entitlement. Mismatch/lat
 
 `GET /checkout/?design_id=...` is a local-only experimental view. It requires an existing login and an explicitly activated local test price. It polls only the owner-scoped order status. It does not publish or create an entitlement.
 
+### Storage renewal
+
+Renewal orders snapshot the selected server-priced storage plan and do not require an active template price; their payment currency comes from the VND storage catalog. A renewal before expiry extends from the current expiry using calendar-month arithmetic. A renewal after expiry but before the retention deadline starts at the confirmed payment time, then republishes the same publication with its original slug. Lifetime entitlements have no expiry and cannot be renewed. Renewal fulfillment uses lifecycle compare-and-swap and order idempotency so a stale concurrent attempt is retryable without losing an extension or duplicating entitlement history.
+
 ## 4. Webhook and idempotency
 
 - Require `Content-Type: application/json`, a body no larger than 64 KiB, and valid UTF-8. Verify `X-SePay-Signature` (`sha256=<hex>`) over the exact raw body with `X-SePay-Timestamp`; reject timestamps outside ±300 seconds before JSON parsing.
 - Insert unique `(provider,event_id)` and raw JSON/hash before processing. Store processing attempts/time, provider transaction ID, order reference and expected/actual amount for review. Duplicate transaction IDs are also unique on `(provider,provider_payment_id)` in `payments`.
 - Match `code` exactly to the generated `CRP` payment reference; require `transferType=in`, configured receiving account, exact integer `transferAmount`, pending payment/order, and unexpired order.
 - Use conditional database updates and atomic batches so simultaneous identical webhooks do not grant twice. A verified mismatch/unmatched/late event is retained as `MANUAL_REVIEW`; never mark paid from the return URL. A repeated provider transaction ID with a different payload is reviewed and cannot settle a second order.
-- SePay must receive HTTP 200/201 with `{"success":true}` after durable processing. Storage/processing failure returns an error so configured provider retry can retry. Persisted `RECEIVED` events are idempotently reprocessed on retry; an internal bounded recovery function exists, but no scheduler/operator runner or provider API reconciliation is configured.
+- SePay must receive HTTP 200/201 with `{"success":true}` after durable processing. Storage/processing failure returns an error so configured provider retry can retry. Persisted `RECEIVED` events are idempotently reprocessed on retry; bounded fulfillment recovery and publication lifecycle runners are wired to the Worker scheduled handler, and the local Wrangler config declares a 15-minute cron. No remote scheduler deployment or execution, or provider API reconciliation, was verified.
 - Webhook raw payloads can contain account and transaction data; protect access and retention before any production use.
 
 ## 5. Custom project payments
@@ -68,4 +78,4 @@ The workflow and guards are detailed in [CUSTOM_DESIGN_WORKFLOW.md](CUSTOM_DESIG
 - Configure separate test/live keys and webhook secrets per environment; keep them only in the selected host's server-side secret store.
 - Verify provider business onboarding, VND settlement support, fees, payout delays, dispute/refund flow, invoice/tax rules and terms.
 - Build support runbook for “charged, not published”, “pending”, refund and custom deposit/balance cases.
-- Do not enable homepage prices or checkout CTAs as purchasable until catalog, terms, support and reconciliation are approved.
+- Do not enable homepage prices or checkout CTAs as purchasable until catalog, terms, support, reconciliation, all-template draft persistence, and remote publication security are approved.

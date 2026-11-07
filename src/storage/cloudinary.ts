@@ -1,6 +1,6 @@
 import { MAX_IMAGE_BYTES } from "../http.ts";
 import { StorageError, type Storage, type StorageObject, type StorageUploadOptions } from "../storage.ts";
-import { validateStorageKey, validateUpload } from "./r2.ts";
+import { validatePublishedStorageKey, validateStorageKey, validateUpload } from "./r2.ts";
 
 const PRIVATE_URL_TTL_SECONDS = 60;
 
@@ -142,6 +142,107 @@ export class CloudinaryStorageAdapter implements Storage {
     const result = await readCloudinaryJson<{ result?: unknown }>(response);
     if (result.result !== "ok" && result.result !== "not found") {
       throw new StorageError("Cloudinary did not confirm asset deletion");
+    }
+  }
+
+  async createPublishedDerivative(sourceKey: string, derivativeKey: string): Promise<void> {
+    validateStorageKey(sourceKey);
+    validatePublishedStorageKey(derivativeKey);
+    const source = await this.get(sourceKey);
+    if (!source || (source.contentType !== "image/png" && source.contentType !== "image/jpeg")) {
+      throw new StorageError("Private source asset is unavailable or invalid");
+    }
+    const bytes = new Uint8Array(await source.arrayBuffer());
+    if (bytes.byteLength !== source.size || bytes.byteLength < 1 || bytes.byteLength > MAX_IMAGE_BYTES) {
+      throw new StorageError("Private source asset has an invalid size");
+    }
+    const timestamp = Math.floor(this.now() / 1000);
+    const parameters = {
+      overwrite: "true",
+      public_id: derivativeKey,
+      timestamp: String(timestamp),
+      type: "upload",
+      unique_filename: "false",
+    };
+    const form = new FormData();
+    const uploadBytes = new Uint8Array(bytes.byteLength);
+    uploadBytes.set(bytes);
+    form.set("file", new Blob([uploadBytes.buffer], { type: source.contentType }), "published-derivative");
+    for (const [key, value] of Object.entries(parameters)) form.set(key, value);
+    form.set("api_key", this.apiKey);
+    form.set("signature", await cloudinarySignature(parameters, this.apiSecret));
+    let response: Response;
+    try {
+      response = await this.fetcher(
+        `https://api.cloudinary.com/v1_1/${this.cloudName}/image/upload`,
+        { method: "POST", body: form },
+      );
+    } catch {
+      throw new StorageError("Cloudinary published derivative upload failed");
+    }
+    if (!response.ok) throw new StorageError(`Cloudinary derivative upload failed with status ${response.status}`);
+    const result = await readCloudinaryJson<CloudinaryUploadResponse>(response);
+    const expectedFormat = source.contentType === "image/png" ? "png" : "jpg";
+    if (result.public_id !== derivativeKey || result.bytes !== bytes.byteLength ||
+        result.resource_type !== "image" || result.type !== "upload" || result.format !== expectedFormat) {
+      try {
+        await this.deletePublishedDerivative(derivativeKey);
+      } catch {
+        throw new StorageError("Cloudinary returned inconsistent derivative metadata and cleanup failed");
+      }
+      throw new StorageError("Cloudinary returned inconsistent published derivative metadata");
+    }
+  }
+
+  async getPublishedDerivative(derivativeKey: string): Promise<StorageObject | null> {
+    validatePublishedStorageKey(derivativeKey);
+    const url = `https://res.cloudinary.com/${this.cloudName}/image/upload/${derivativeKey}`;
+    let response: Response;
+    try {
+      response = await this.fetcher(url, { method: "GET", redirect: "error" });
+    } catch {
+      throw new StorageError("Cloudinary published derivative read failed");
+    }
+    if (response.status === 404) return null;
+    if (!response.ok || !response.body) {
+      throw new StorageError(`Cloudinary derivative read failed with status ${response.status}`);
+    }
+    const size = Number(response.headers.get("content-length"));
+    const contentType = response.headers.get("content-type")?.split(";")[0].trim() ?? "";
+    if (!Number.isSafeInteger(size) || size < 1 || size > MAX_IMAGE_BYTES ||
+        (contentType !== "image/png" && contentType !== "image/jpeg")) {
+      await response.body.cancel();
+      throw new StorageError("Cloudinary returned invalid published derivative metadata");
+    }
+    return { size, contentType, body: response.body, arrayBuffer: () => response.arrayBuffer() };
+  }
+
+  async deletePublishedDerivative(derivativeKey: string): Promise<void> {
+    validatePublishedStorageKey(derivativeKey);
+    const parameters = {
+      public_id: derivativeKey,
+      timestamp: String(Math.floor(this.now() / 1000)),
+      type: "upload",
+    };
+    const form = new FormData();
+    for (const [key, value] of Object.entries(parameters)) form.set(key, value);
+    form.set("api_key", this.apiKey);
+    form.set("signature", await cloudinarySignature(parameters, this.apiSecret));
+    let response: Response;
+    try {
+      response = await this.fetcher(
+        `https://api.cloudinary.com/v1_1/${this.cloudName}/image/destroy`,
+        { method: "POST", body: form },
+      );
+    } catch {
+      throw new StorageError("Cloudinary published derivative deletion failed");
+    }
+    if (!response.ok) {
+      throw new StorageError(`Cloudinary derivative deletion failed with status ${response.status}`);
+    }
+    const result = await readCloudinaryJson<{ result?: unknown }>(response);
+    if (result.result !== "ok" && result.result !== "not found") {
+      throw new StorageError("Cloudinary did not confirm published derivative deletion");
     }
   }
 

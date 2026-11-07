@@ -1,6 +1,6 @@
 # Crushify Security Plan
 
-**Status:** target controls plus a local-only order/webhook prototype. Local synthetic tests cover raw-body HMAC, timestamp expiry, duplicate and concurrent deliveries, amount/account mismatch and owner-scoped order status on D1 and Turso. No provider account, live transaction, production secrets, or production deployment has been used. This is not a security certification. Review with a qualified security/privacy professional before launch.
+**Status:** target controls plus local-only order/webhook and publication/delivery prototypes. Local synthetic tests cover payment verification and publication access/lifecycle on D1; no provider account, live transaction, production secrets, or production deployment has been used. This is not a security certification. Review with a qualified security/privacy professional before launch.
 
 ## 1. Threat model and assets
 
@@ -107,4 +107,14 @@ IDOR across every entity; preview expiry/revocation; public slug collision; XSS 
 - A payment can become successful only for an incoming transfer with exact payment reference, configured receiving account, exact amount, unique transaction ID, and an unexpired pending order. Unmatched, malformed, mismatched and late events enter manual review; browser redirects cannot change state.
 - Raw webhook JSON includes financial account/transaction information. Current prototype has no production retention/access policy, alerting, dead-letter queue, scheduled reconciliation or admin review UI. Do not expose it to customer endpoints or logs.
 - Local unit and integration tests use generated per-run HMAC secrets, a synthetic `0000000000` receiving-account fixture, and an artificial VND 50,000 price in isolated databases. No bank transfer or SePay endpoint is contacted by tests.
-- No live checkout, published pricing, entitlement, fulfillment, refund handling, admin reconciliation or automatic publication exists. A valid local test payment only changes local order/payment status.
+- No live checkout, published pricing, production entitlement/fulfillment, refund handling, admin reconciliation, or production publication exists. A valid local test payment only changes local order/payment status.
+
+## 14. Phase 6 publication controls and limits
+
+- Publication mutations fail closed unless `LOCAL_TEST_MODE=true` and `ENVIRONMENT` is unset or `local`. This guard is not a substitute for production authorization, operations, or a staged rollout.
+- Before publish and on each public content/media read, the service rechecks the owner/design/order chain, paid self-service order, successful payment, matching processed webhook event, amount/currency, active template/schema, and renderer version. The browser cannot supply payment state.
+- Public slugs are random bearer capabilities. The implementation stores the slug in D1 so the authenticated owner dashboard can reconstruct its link, and stores a hash for public-route lookup; protect D1 access/backups as sensitive bearer secrets. The public renderer receives allowlisted template data, not customer/design/order identifiers or creator controls. Responses are `no-store` and `noindex`.
+- Original uploaded images remain private. A distinct derivative is created only for an explicitly consented asset and served only while the matching publication and consent remain active. Withdrawal, unpublish, revoke, expiry, or design deletion denies access; binary cleanup failures are recorded as pending.
+- Lifecycle mutations use expected lifecycle revisions to reject stale/concurrent changes. Design deletion revokes publications and removes derivatives before final archive; source-media cleanup failures leave deletion pending rather than returning success.
+- Expiration is checked on public reads; no scheduled expiry/cleanup worker or operator retry interface is configured. Retention, media moderation/scanning, rate limits, alerting, production logging policy, and public-link privacy/support policy remain launch gates.
+- Local integration tests use synthetic D1 rows for paid-order evidence. They prove code paths, not real provider settlement, external-device delivery, remote storage behavior, or a production security boundary.

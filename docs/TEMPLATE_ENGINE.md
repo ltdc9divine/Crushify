@@ -1,6 +1,6 @@
 # Shared Template Engine
 
-**Status:** shared integration design; Phase 2 backend adapter is connected only to Our Universe in the local Worker. Preserve all template-specific implementations.
+**Status:** all five schema-v1 publication validators and recipient payload adapters exist, and their shared publication bootstrap is wired. Only the Our Universe creator/editor is server-backed in local Worker mode; the other four editors still use their existing browser-side flows. Publication mutations remain local-test only. Preserve all template-specific implementations.
 **Goal:** share services/data lifecycle while keeping five distinct visual experiences.
 
 ## 1. Current state and gaps
@@ -9,13 +9,13 @@ The gallery links to five independent HTML applications; some CSS/JS are inline 
 
 | Template ID (canonical proposal) | Existing app and current behavior | Commerce adapter work |
 |---|---|---|
-| `our-universe` | Editor fields update hero/story and theme/motion; 3D scene, exploration/story and mobile layout load. The local Worker supports email-link authentication, D1 draft restore/save, revision checks, private R2-compatible image upload/read/delete, and bearer-token preview including photos. | Only local D1 and local R2 emulation are verified; no real email provider or production bucket. No payment or published recipient slug. Three.js r128 is loaded from cdnjs; no scene fallback on CDN/WebGL failure. |
-| `love-letter` | Browser-tested: editor updates letter; 3D opening reaches reading state and close returns sealed; Recipient preview, text-data link and local photo selection. | Shared link excludes uploaded photos; no server persistence, order or publication. Three.js r128 is loaded from cdnjs; no scene fallback on CDN/WebGL failure. |
-| `our-memories` | Browser-tested: title/story editor updates album, opens/steps through chapters, local image upload and recipient preview; exports JSON. Has a 2D fallback path if 3D startup fails. | JSON import/share/persistent customer draft not implemented; data injection (`MEMORIES_DATA`) is a developer integration seam, not a customer publishing service. CDN dependency (Three.js); fallback vendor path is absent, though CDN paths are tried. |
-| `say-yes` | Browser-tested: live question editor; yes celebration and no/back branches; local image upload, manual localStorage draft save/restore, JSON export; 2D fallback path. | No customer-data link/JSON import/backend persistence/publish or checkout. Recipient injection (`SAYYES_DATA`) is a developer seam. Three.js CDN fallback includes a vendor path not present in the repository. |
-| `distance-means-nothing` | Browser-tested: live text editor, timezone clocks/countdown/distance logic, preview and copied hash-based data link; localStorage draft; 3D scene with a 2D fallback. | No image upload, server persistence, payment or published slug. The full data payload is in the URL hash (size/privacy limitations). Three.js 0.160.0, addon modules and fonts depend on external CDN/import-map hosts. |
+| `our-universe` | Editor fields update hero/story and theme/motion; 3D scene, exploration/story and mobile layout load. The local Worker supports email-link authentication, D1 draft restore/save, revision checks, private R2-compatible image upload/read/delete, and bearer-token preview including photos. | Schema-v1 validation, safe publication data, media consent and recipient hydration are implemented. Creator/auth/API remain local-only; email and production buckets are not configured. Three.js r128 is loaded from cdnjs with a jsDelivr fallback. |
+| `love-letter` | Browser-tested: editor updates letter; 3D opening reaches reading state and close returns sealed; Recipient preview, text-data link and local photo selection. | Schema-v1 validation and recipient hydration are implemented; editor changes are not saved to the server. Shared browser data links still exclude uploaded photos. Three.js r128 is loaded from cdnjs; no scene fallback on CDN/WebGL failure. |
+| `our-memories` | Browser-tested: title/story editor updates album, opens/steps through chapters, local image upload and recipient preview; exports JSON. Has a 2D fallback path if 3D startup fails. | Schema-v1 validation and recipient hydration are implemented; editor changes and photos are not server-persisted. JSON import/share is not implemented. `MEMORIES_DATA` remains a developer integration seam. CDN dependency (Three.js); fallback vendor path is absent, though CDN paths are tried. |
+| `say-yes` | Browser-tested: live question editor; yes celebration and no/back branches; local image upload, manual localStorage draft save/restore, JSON export; 2D fallback path. | Schema-v1 validation and recipient hydration are implemented; editor changes and photos are not server-persisted. `SAYYES_DATA` remains a developer seam. Three.js CDN fallback includes a vendor path not present in the repository. |
+| `distance-means-nothing` | Browser-tested: live text editor, timezone clocks/countdown/distance logic, preview and copied hash-based data link; localStorage draft; 3D scene with a 2D fallback. | Schema-v1 validation and recipient hydration are implemented; editor changes are not server-persisted. No image upload. Existing hash-based links retain their size/privacy limitations. Three.js 0.160.0, addon modules and fonts depend on external CDN/import-map hosts. |
 
-Homepage is static. It has no real pricing catalog/checkout. Four templates retain their previous browser-side persistence/upload behavior; only Our Universe has server-side validation and persistence in the local prototype. Preview and upload semantics are not yet standardized across products. Browser checks establish tested local interactions, not production-scale reliability, physical-device behavior, CDN failure resilience, or payment/publishing readiness. No template uses webcam/camera capture.
+The registry validates and converts recipient data for all five templates, and each template's own page loads the published payload through the shared bootstrap without merging its CSS, JavaScript, or 3D scene. This does not make all five editors server-backed: only Our Universe has local server-side draft/auth/upload/preview integration. The other four cannot currently create/reload a durable customer draft through the backend. The homepage remains a static catalog with no real pricing catalog/checkout. Browser checks establish local behavior, not production-scale reliability, physical-device behavior, CDN-failure resilience, or commercial readiness. No template uses webcam/camera capture.
 
 ## 2. Per-template manifest contract
 
@@ -69,7 +69,7 @@ interface PublishingService {
 }
 ```
 
-API contracts in [API_SPECIFICATION.md](API_SPECIFICATION.md) are authoritative; interfaces above illustrate boundaries, not a promise that endpoints exist.
+API contracts in [API_SPECIFICATION.md](API_SPECIFICATION.md) are authoritative. Draft/asset/preview interfaces are not fully adopted by the four non-Universe editors; publication APIs and recipient adapters are present but fail closed outside local test mode.
 
 ## 4. Schema validation and compatibility
 
@@ -93,16 +93,17 @@ Templates store only references such as `{ asset_id, caption, position }`. Durin
 
 ## 7. Incremental adoption
 
-1. Inventory/default-data and fixture-test each template; assign canonical IDs and schema v1.
-2. Build adapter shims around existing state objects; preserve UI/animation. Do not unify CSS or scene loops.
-3. Add autosave/restore first for a single pilot, with local-only fallback clearly marked.
-4. Add R2 asset IDs and upload service to templates that have photo fields.
-5. Integrate preview and then publish resolution. Run snapshot/manual regression tests for desktop/mobile and reduced-motion behavior.
-6. Migrate remaining templates one by one; use version compatibility tests before purchase activation.
+1. **Done locally:** inventory/default data, canonical IDs, schema-v1 validators and fixtures for all five templates.
+2. **Done for recipient path:** safe payload conversion, consented media URLs, and template-specific hydration through the shared publication bootstrap.
+3. **Partial:** Our Universe has local Worker autosave/restore/upload/preview; remaining four editor adapters are not connected to backend drafts or uploads.
+4. **Local test only:** paid-order-gated publication lifecycle and customer websites dashboard; no production payment, price catalog, or remote publishing service.
+5. **Still required:** cross-template editor save/reload/upload, deployed staging flow, and browser/accessibility/device QA before purchase activation.
 
 ## 8. Acceptance criteria
 
 - Each manifest has validated defaults, schema/version fixtures, recipient renderer and testable preview entry.
-- Creator can reload a draft on another authenticated device and photos resolve through asset references.
+- Creator can reload a draft on another authenticated device and photos resolve through asset references for every template.
 - Recipient sees only the purchased/published revision; unlisted draft IDs/tokens do not reveal content.
 - A template-specific visual or animation change cannot silently alter another template; shared service tests run across all five.
+
+Current status: schema validation, recipient payload handling and local publication lifecycle tests cover all five templates. The all-template creator reload criterion is not met; only Our Universe currently uses the server draft/upload APIs, and no remote deployment has been tested.

@@ -25,6 +25,7 @@ export interface Env {
   SEPAY_BANK_ACCOUNT?: string;
   SEPAY_ACCOUNT_NAME?: string;
   UPLOAD_MAX_BYTES?: number;
+  DATA_RETENTION_DAYS?: string;
 }
 
 export interface Session {

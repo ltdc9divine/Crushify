@@ -3,7 +3,7 @@ import { apiError, MAX_IMAGE_BYTES, nowIso, randomToken, readBoundedBody, readJs
 import { serveAsset } from "./designs.ts";
 import { StorageError } from "./storage.ts";
 import type { Env } from "./types.ts";
-import type { UniverseDesign } from "./universe.ts";
+import { assetReferences, type TemplateData } from "./template-registry.ts";
 
 interface ImageInfo {
   contentType: "image/png" | "image/jpeg";
@@ -314,7 +314,7 @@ async function deleteAsset(
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
   const asset = await env.DB.prepare(
-    `SELECT a.object_key, a.design_id, a.status, d.data_json
+    `SELECT a.object_key, a.design_id, a.status, d.data_json, d.template_id
      FROM assets a JOIN designs d ON d.id = a.design_id
      WHERE a.id = ? AND a.customer_id = ?`,
   ).bind(assetId, required.session!.customerId).first<{
@@ -322,14 +322,24 @@ async function deleteAsset(
     design_id: string;
     status: string;
     data_json: string;
+    template_id: string;
   }>();
   if (!asset) return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
   if (asset.status === "DELETED") return jsonResponse({ deleted: true }, 200, requestId);
   if (asset.status === "READY") {
-    const design = JSON.parse(asset.data_json) as UniverseDesign;
-    if (design.photos.some((photo) => photo.asset_id === assetId)) {
+    const design = JSON.parse(asset.data_json) as TemplateData;
+    if (assetReferences(asset.template_id, design).includes(assetId)) {
       return apiError(requestId, 409, "ASSET_IN_USE", "Remove this photo from the design before deleting it");
     }
+  }
+  const activeConsent = await env.DB.prepare(
+    `SELECT pa.id FROM publication_assets pa
+     JOIN publications p ON p.id = pa.publication_id
+     WHERE pa.asset_id = ? AND pa.customer_id = ? AND pa.revoked_at IS NULL
+       AND p.status IN ('PUBLISHED','UNPUBLISHED') LIMIT 1`,
+  ).bind(assetId, required.session!.customerId).first<{ id: string }>();
+  if (activeConsent) {
+    return apiError(requestId, 409, "ASSET_IN_USE", "Revoke publication consent before deleting this photo");
   }
   await env.DB.prepare(
     "UPDATE assets SET status = 'DELETION_PENDING', updated_at = ? WHERE id = ? AND customer_id = ?",

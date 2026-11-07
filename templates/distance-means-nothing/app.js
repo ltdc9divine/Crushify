@@ -4,8 +4,9 @@ const KEY='crushify.distance.v1';let S=blank(),scene=null,glOK=false;
 const b64e=o=>btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_'),b64d=s=>JSON.parse(decodeURIComponent(escape(atob(s.replace(/-/g,'+').replace(/_/g,'/')))));
 const get=(o,p)=>p.split('.').reduce((a,k)=>a?.[k],o),set=(o,p,v)=>{const k=p.split('.'),l=k.pop();k.reduce((a,x)=>a[x],o)[l]=v};
 const merge=d=>{const b=blank();for(const k in b){if(d?.[k]===undefined)continue;b[k]=b[k]&&typeof b[k]==='object'&&!Array.isArray(b[k])?{...b[k],...d[k]}:d[k]}return b};
-const recipient=location.hash.startsWith('#v=');
-try{S=merge(recipient?b64d(location.hash.slice(3)):JSON.parse(localStorage.getItem(KEY)||'null'))}catch{}
+const publicationData=window.CRUSHIFY_PUBLICATION_DATA;
+const recipient=Boolean(publicationData)||location.hash.startsWith('#v=');
+try{S=merge(publicationData||(recipient?b64d(location.hash.slice(3)):JSON.parse(localStorage.getItem(KEY)||'null')))}catch{}
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(S))}catch{}};
 const th=()=>THEMES[S.theme]||THEMES['midnight-distance'];
 // ---------- editor ----------
@@ -23,7 +24,7 @@ function listMsgs(){const L=$('#msgList');L.innerHTML='';S.messages.forEach((m,i
  $('.e',d).oninput=e=>{m.emoji=e.target.value;changed(2)};$('.t',d).oninput=e=>{m.title=e.target.value;changed(2)};$('.c',d).oninput=e=>{m.body=e.target.value;changed(2)};
  $('button',d).onclick=()=>{S.messages.splice(i,1);listMsgs();changed(2)};L.append(d)})}
 $('#addMsg').onclick=()=>{S.messages.push({emoji:'💌',title:'',body:''});listMsgs();changed(2)};
-let tm;function changed(rebuild){save();render();clearTimeout(tm);if(rebuild)tm=setTimeout(()=>scene?.apply(S,th()),rebuild===2?400:0)}
+let tm;function changed(rebuild){window.dispatchEvent(new Event('crushify:changed'));save();render();clearTimeout(tm);if(rebuild)tm=setTimeout(()=>scene?.apply(S,th()),rebuild===2?400:0)}
 // ---------- HUD ----------
 const lab=p=>p.name||'';
 function render(){const t=th(),r=document.documentElement.style;r.setProperty('--ui',t.c1);
@@ -70,6 +71,11 @@ if(recipient||location.hash==='#preview')document.body.classList.add('view');
 if(mobileTabs.matches&&!document.body.classList.contains('view'))selectMobileTab(true);
 mobileTabs.addEventListener('change',event=>{if(event.matches&&!mobileTabChosen&&!document.body.classList.contains('view'))selectMobileTab(true)});
 addEventListener('resize',()=>{if(mobileTabs.matches&&!mobileTabChosen&&!document.body.classList.contains('view'))selectMobileTab(true)});
+window.registerCrushifyCustomerEditor({
+templateId:'distance-means-nothing',schemaVersion:1,
+async serialize(){return structuredClone(S)},
+async hydrate(data){S=merge(data);bind();render();scene?.apply(S,th())}
+});
 // ---------- boot ----------
 bind();render();
 (async()=>{try{const {DistanceScene}=await import('./DistanceScene.js');scene=new DistanceScene($('#gl'),{onPick,onPhase});glOK=true;scene.apply(S,th());scene.start()}

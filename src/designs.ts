@@ -1,6 +1,14 @@
 import { requireCsrf, requireSession } from "./auth.ts";
 import { apiError, jsonResponse, nowIso, randomToken, readJson, safeId, sha256 } from "./http.ts";
-import { isJsonWithinLimit, validateUniverseDesign, type UniverseDesign } from "./universe.ts";
+import { isJsonWithinLimit } from "./universe.ts";
+import {
+  assetReferences,
+  publicTemplateData,
+  supportsTemplateVersion,
+  TEMPLATE_RENDERERS,
+  validateTemplateData,
+  type TemplateData,
+} from "./template-registry.ts";
 import type { Env } from "./types.ts";
 
 const TOKEN_SECONDS = 15 * 60;
@@ -13,9 +21,10 @@ async function validateAssetReferences(
   env: Env,
   ownerId: string,
   designId: string,
-  data: UniverseDesign,
+  templateId: string,
+  data: TemplateData,
 ): Promise<boolean> {
-  const ids = data.photos.map((photo) => photo.asset_id);
+  const ids = assetReferences(templateId, data);
   if (new Set(ids).size !== ids.length) return false;
   if (!ids.length) return true;
   const placeholders = ids.map(() => "?").join(",");
@@ -23,7 +32,7 @@ async function validateAssetReferences(
     `SELECT id FROM assets
      WHERE customer_id = ? AND design_id = ? AND status = 'READY'
        AND id IN (${placeholders})`,
-  ).bind(ownerId, designId, ...ids).all<{ id: string }>();
+  ).bind(ownerId, designId || null, ...ids).all<{ id: string }>();
   return result.results.length === ids.length;
 }
 
@@ -35,8 +44,11 @@ function validateCreatePayload(value: unknown): CreatePayload {
   if (!isRecord(value)) return { error: "Request body must be an object" };
   const allowed = new Set(["template_id", "schema_version", "data"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return { error: "Unsupported request field" };
-  if (value.template_id !== "our-universe") return { error: "Unsupported template" };
-  if (value.schema_version !== 1) return { error: "Unsupported schema version" };
+  if (typeof value.template_id !== "string" ||
+      !Object.hasOwn(TEMPLATE_RENDERERS, value.template_id)) return { error: "Unsupported template" };
+  const renderer = TEMPLATE_RENDERERS[value.template_id as keyof typeof TEMPLATE_RENDERERS];
+  if (typeof value.schema_version !== "number" ||
+      value.schema_version !== renderer.schemaVersion) return { error: "Unsupported schema version" };
   return {
     templateId: value.template_id,
     schemaVersion: value.schema_version,
@@ -44,8 +56,8 @@ function validateCreatePayload(value: unknown): CreatePayload {
   };
 }
 
-function parseDesignData(value: unknown) {
-  const validated = validateUniverseDesign(value);
+function parseDesignData(templateId: string, schemaVersion: number, value: unknown) {
+  const validated = validateTemplateData(templateId, schemaVersion, value);
   if (!validated.value) return { fields: validated.fields };
   if (!isJsonWithinLimit(validated.value, 48 * 1024)) return { fields: { data: "Design data is too large" } };
   return { value: validated.value };
@@ -65,18 +77,29 @@ async function updateDesign(
   if (parsed.response) return parsed.response;
   if (!isRecord(parsed.value) || Object.keys(parsed.value).length !== 3 ||
       typeof parsed.value.expected_revision !== "number" ||
-      parsed.value.schema_version !== 1 || !Object.hasOwn(parsed.value, "data")) {
+      typeof parsed.value.schema_version !== "number" || !Object.hasOwn(parsed.value, "data")) {
     return apiError(requestId, 400, "VALIDATION_ERROR", "Expected schema_version, expected_revision and data");
   }
   const expectedRevision = parsed.value.expected_revision;
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
     return apiError(requestId, 400, "VALIDATION_ERROR", "Invalid expected revision");
   }
-  const validated = parseDesignData(parsed.value.data);
+  const design = await env.DB.prepare(
+    `SELECT template_id, schema_version FROM designs
+     WHERE id = ? AND customer_id = ? AND status = 'DRAFT'`,
+  ).bind(designId, required.session!.customerId).first<{
+    template_id: string;
+    schema_version: number;
+  }>();
+  if (!design) return apiError(requestId, 404, "NOT_FOUND", "Design not found");
+  if (design.schema_version !== parsed.value.schema_version) {
+    return apiError(requestId, 422, "VALIDATION_ERROR", "Unsupported schema version");
+  }
+  const validated = parseDesignData(design.template_id, design.schema_version, parsed.value.data);
   if (!validated.value) {
     return apiError(requestId, 422, "VALIDATION_ERROR", "Design data is invalid", validated.fields);
   }
-  if (!await validateAssetReferences(env, required.session!.customerId, designId, validated.value)) {
+  if (!await validateAssetReferences(env, required.session!.customerId, designId, design.template_id, validated.value)) {
     return apiError(requestId, 422, "VALIDATION_ERROR", "One or more photo references are not available");
   }
 
@@ -87,8 +110,9 @@ async function updateDesign(
       `UPDATE designs
        SET data_json = ?, revision = revision + 1, updated_at = ?
        WHERE id = ? AND customer_id = ? AND status = 'DRAFT' AND revision = ?
-         AND schema_version = 1`,
-    ).bind(JSON.stringify(validated.value), now, designId, required.session!.customerId, expectedRevision),
+         AND schema_version = ?`,
+    ).bind(JSON.stringify(validated.value), now, designId, required.session!.customerId, expectedRevision,
+      design.schema_version),
     env.DB.prepare(
       `INSERT INTO design_revisions (design_id, revision, data_json, created_at)
        SELECT ?, ?, ?, ?
@@ -151,6 +175,45 @@ async function deleteDesign(
     "UPDATE designs SET status = 'DELETION_PENDING', updated_at = ? WHERE id = ? AND customer_id = ?",
   ).bind(now, designId, ownerId).run();
 
+  const derivatives = await env.DB.prepare(
+    `SELECT pa.id, pa.derivative_key
+     FROM publication_assets pa
+     JOIN publications p ON p.id = pa.publication_id
+     WHERE p.design_id = ? AND p.status IN ('PUBLISHED','UNPUBLISHED','REVOKED')
+       AND pa.derivative_key IS NOT NULL
+       AND pa.derivative_status IN ('READY','CLEANUP_PENDING')`,
+  ).bind(designId).all<{ id: string; derivative_key: string }>();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE publications SET status = 'REVOKED', revoked_at = ?, unpublished_at = ?,
+         lifecycle_revision = lifecycle_revision + 1, updated_at = ?
+       WHERE design_id = ? AND status IN ('PUBLISHED','UNPUBLISHED')`,
+    ).bind(now, now, now, designId),
+    env.DB.prepare(
+      `UPDATE publication_assets SET revoked_at = COALESCE(revoked_at, ?),
+         derivative_status = CASE WHEN derivative_key IS NULL THEN 'DELETED' ELSE 'CLEANUP_PENDING' END,
+         updated_at = ?
+       WHERE publication_id IN (SELECT id FROM publications WHERE design_id = ? AND status = 'REVOKED')`,
+    ).bind(now, now, designId),
+  ]);
+  for (const derivative of derivatives.results) {
+    try {
+      await env.STORAGE.deletePublishedDerivative(derivative.derivative_key);
+      await env.DB.prepare(
+        `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'DELETED',
+           updated_at = ? WHERE id = ? AND derivative_key = ?`,
+      ).bind(nowIso(), derivative.id, derivative.derivative_key).run();
+    } catch (error) {
+      console.error("Published media deletion failed", {
+        request_id: requestId,
+        design_id: designId,
+        publication_asset_id: derivative.id,
+        error,
+      });
+      return apiError(requestId, 503, "DELETION_PENDING", "Published media deletion will be retried");
+    }
+  }
+
   const assets = await env.DB.prepare(
     "SELECT id, object_key FROM assets WHERE design_id = ? AND customer_id = ? AND status != 'DELETED'",
   ).bind(designId, ownerId).all<{ id: string; object_key: string }>();
@@ -199,9 +262,16 @@ async function createDesign(
   ).bind(payload.templateId, payload.schemaVersion, payload.schemaVersion)
     .first<{ default_data_json: string }>();
   if (!template) return apiError(requestId, 422, "VALIDATION_ERROR", "Template or schema version is unavailable");
-  const validated = parseDesignData(payload.data ?? JSON.parse(template.default_data_json) as unknown);
+  const validated = parseDesignData(
+    payload.templateId,
+    payload.schemaVersion,
+    payload.data ?? JSON.parse(template.default_data_json) as unknown,
+  );
   if (!validated.value) {
     return apiError(requestId, 422, "VALIDATION_ERROR", "Design data is invalid", validated.fields);
+  }
+  if (assetReferences(payload.templateId, validated.value).length > 0) {
+    return apiError(requestId, 422, "VALIDATION_ERROR", "New designs cannot reference unowned assets");
   }
 
   const id = safeId();
@@ -211,16 +281,16 @@ async function createDesign(
     env.DB.prepare(
       `INSERT INTO designs
        (id, customer_id, template_id, schema_version, data_json, revision, status, created_at, updated_at)
-       VALUES (?, ?, 'our-universe', 1, ?, 1, 'DRAFT', ?, ?)`,
-    ).bind(id, required.session!.customerId, data, now, now),
+       VALUES (?, ?, ?, ?, ?, 1, 'DRAFT', ?, ?)`,
+    ).bind(id, required.session!.customerId, payload.templateId, payload.schemaVersion, data, now, now),
     env.DB.prepare(
       "INSERT INTO design_revisions (design_id, revision, data_json, created_at) VALUES (?, 1, ?, ?)",
     ).bind(id, data, now),
   ]);
   return jsonResponse({
     design_id: id,
-    template_id: "our-universe",
-    schema_version: 1,
+    template_id: payload.templateId,
+    schema_version: payload.schemaVersion,
     revision: 1,
     data: validated.value,
   }, 201, requestId);
@@ -268,9 +338,10 @@ async function createPreview(
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
   const row = await env.DB.prepare(
-    `SELECT revision FROM designs
+    `SELECT template_id, schema_version, revision FROM designs
      WHERE id = ? AND customer_id = ? AND status = 'DRAFT'`,
-  ).bind(designId, required.session!.customerId).first<{ revision: number }>();
+  ).bind(designId, required.session!.customerId)
+    .first<{ template_id: string; schema_version: number; revision: number }>();
   if (!row) return apiError(requestId, 404, "NOT_FOUND", "Design not found");
 
   const token = randomToken();
@@ -290,9 +361,10 @@ async function createPreview(
   ).run();
   return jsonResponse({
     token,
-    url: `/templates/our-universe/?preview#${encodeURIComponent(token)}`,
+    url: `/templates/${encodeURIComponent(row.template_id)}/?preview#${encodeURIComponent(token)}`,
     expires_at: expiresAt,
     revision: row.revision,
+    schema_version: row.schema_version,
   }, 201, requestId);
 }
 
@@ -336,7 +408,7 @@ export async function handlePreviewRoutes(
   const tokenHash = await sha256(token);
   const now = nowIso();
   const preview = await env.DB.prepare(
-    `SELECT p.design_id, p.customer_id, p.design_revision, r.data_json
+    `SELECT p.design_id, p.customer_id, p.design_revision, r.data_json, d.template_id, d.schema_version
      FROM preview_tokens p
      JOIN designs d ON d.id = p.design_id
      JOIN design_revisions r ON r.design_id = p.design_id AND r.revision = p.design_revision
@@ -347,28 +419,27 @@ export async function handlePreviewRoutes(
     customer_id: string;
     design_revision: number;
     data_json: string;
+    template_id: string;
+    schema_version: number;
   }>();
   if (!preview) return apiError(requestId, 404, "NOT_FOUND", "Preview is unavailable");
   if (assetId) {
-    const data = JSON.parse(preview.data_json) as UniverseDesign;
-    if (!data.photos.some((photo) => photo.asset_id === assetId)) {
+    const data = JSON.parse(preview.data_json) as TemplateData;
+    if (!assetReferences(preview.template_id, data).includes(assetId)) {
       return apiError(requestId, 404, "NOT_FOUND", "Preview asset not found");
     }
     return serveAsset(request, env, requestId, assetId, preview.customer_id, preview.design_id);
   }
 
-  const data = JSON.parse(preview.data_json) as UniverseDesign;
+  const data = JSON.parse(preview.data_json) as TemplateData;
+  const validated = validateTemplateData(preview.template_id, preview.schema_version, data);
+  if (!validated.value) return apiError(requestId, 404, "NOT_FOUND", "Preview is unavailable");
   return jsonResponse({
-    template_id: "our-universe",
-    schema_version: 1,
+    template_id: preview.template_id,
+    schema_version: preview.schema_version,
     revision: preview.design_revision,
-    data: {
-      ...data,
-      photos: data.photos.map((photo) => ({
-        ...photo,
-        url: `/api/v1/previews/assets/${encodeURIComponent(photo.asset_id)}`,
-      })),
-    },
+    data: publicTemplateData(preview.template_id, validated.value, (id) =>
+      `/api/v1/previews/assets/${encodeURIComponent(id)}`),
   }, 200, requestId, { "X-Robots-Tag": "noindex, nofollow" });
 }
 

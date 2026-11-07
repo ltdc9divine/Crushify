@@ -1,5 +1,7 @@
 (()=>{'use strict';
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)],clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+const ASSET_ID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ASSET_ID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const mk=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
 const SF='"Playfair Display",Georgia,serif',SC='"Dancing Script","Segoe Script",cursive';
 const mobile=matchMedia('(max-width:800px)').matches||/Mobi|Android/i.test(navigator.userAgent);
@@ -21,7 +23,7 @@ let D=window.MEMORIES_DATA||defaults();const viewOnly=!!window.MEMORIES_DATA||/m
 const th=()=>TH[D.theme]||TH['rose-memories'],an=()=>AN[D.animation]||AN.cinematic;
 const flat=()=>D.chapters.flatMap((c,ci)=>c.photos.map(p=>(p.ch=ci,p)));
 const setFlat=a=>D.chapters.forEach((c,ci)=>c.photos=a.filter(p=>p.ch===ci));
-const IM={};let tm;const soon=()=>{clearTimeout(tm);tm=setTimeout(apply,220)};
+const IM={};let tm;const soon=()=>{window.dispatchEvent(new Event('crushify:changed'));clearTimeout(tm);tm=setTimeout(apply,220)};
 function img(u){if(!u)return null;let i=IM[u];if(!i){i=IM[u]=new Image();i.onload=()=>{i.ok=1;soon()};i.src=u}return i.ok?i:null}
 function fit(x,i,dx,dy,w,h){if(!i){x.fillStyle='rgba(0,0,0,.15)';x.fillRect(dx,dy,w,h);return}const r=Math.max(w/i.width,h/i.height),sw=w/r,sh=h/r;x.drawImage(i,(i.width-sw)/2,(i.height-sh)/2,sw,sh,dx,dy,w,h)}
 function wrap(x,t,px,py,mw,lh){let l='',n=0;for(const k of String(t||'').split(/\s+/)){const s=l?l+' '+k:k;if(x.measureText(s).width>mw&&l){x.fillText(l,px,py+n++*lh);l=k}else l=s}x.fillText(l,px,py+n*lh)}
@@ -83,7 +85,7 @@ const ge=new R.BufferGeometry(),n=30,col=new Float32Array(n*3);for(let i=0;i<n;i
 /* ---------- theme / apply ---------- */
 function apply(){const T=th(),a=an();document.body.style.setProperty('--b1',T.bg[0]);document.body.style.setProperty('--b2',T.bg[1]);document.body.style.setProperty('--ac',T.acc);
 $('#hTitle').textContent=D.albumTitle;$('#hSub').textContent=D.subtitle;$('#hDays').textContent=Math.max(0,Math.floor((Date.now()-new Date(D.anniversary))/864e5)).toLocaleString('vi-VN')+' ngày';$('#hNames').textContent=`${D.sender} & ${D.receiver}`;
-$('#tl').innerHTML=D.chapters.map((c,i)=>`<button data-c="${i}"><b>${i+1}</b><span>${c.title}</span></button>`).join('');$$('#tl button').forEach(b=>b.onclick=()=>goCh(+b.dataset.c));
+const timeline=$('#tl');timeline.replaceChildren();D.chapters.forEach((chapter,i)=>{const button=document.createElement('button'),number=document.createElement('b'),title=document.createElement('span');button.dataset.c=i;number.textContent=i+1;title.textContent=chapter.title;button.append(number,title);button.onclick=()=>goCh(i);timeline.append(button)});
 if(gl){scene.fog.color.set(T.bg[1]);G.plm.color.set(T.plat);G.neon.color.set(T.acc);G.neon.opacity=.9*a.ring;G.glow.material.color.set(T.light);G.pl.color.set(T.light);G.part.children.forEach(p=>p.material.color.set(T.pt));G.dust.material.opacity=Math.min(1,a.pm);G.hearts.material.opacity=Math.min(1,a.pm);buildBook();buildPol()}else fbShow(fbi);syncUI()}
 function syncUI(){const r=2*S.spread-1;let ci=-1;chStart.forEach((s,i)=>{if(s<=r)ci=i});$$('#tl button').forEach((b,i)=>b.classList.toggle('on',gl?i===ci:i===fbi));$('#replay').hidden=!(gl&&S.open&&S.spread>=NL)}
 /* ---------- flow ---------- */
@@ -117,14 +119,14 @@ pol.children.forEach(m=>{const u=m.userData;m.position.set(u.base.x,u.base.y+Mat
 renderer.render(scene,camera)}
 function resize(){const s=$('#stage'),w=s.clientWidth,h=s.clientHeight;if(!gl||!w)return;renderer.setPixelRatio(Math.min(devicePixelRatio,mobile?1.5:2));renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();reset()}
 /* ---------- 2D fallback ---------- */
-function fbShow(i){fbi=i;if(gl)return;const c=D.chapters[i],o=$('#fb');o.hidden=false;o.innerHTML=`<p class="note">Chế độ 2D: Không thể sử dụng WebGL hoặc Three.js nên album 3D đã tắt.</p><h2>${c.title}</h2><small>${c.date?fmt(c.date):''}</small><p>${c.description}</p><div class="grid">${c.photos.map(p=>`<figure><img src="${p.url}" alt=""><figcaption>${p.caption||''}</figcaption></figure>`).join('')}</div>${i===D.chapters.length-1?`<p class="end">${D.closingMessage}<br><em>${D.signature}</em></p>`:''}`;syncUI()}
+function fbShow(i){fbi=i;if(gl)return;const c=D.chapters[i],o=$('#fb'),note=document.createElement('p'),heading=document.createElement('h2'),date=document.createElement('small'),description=document.createElement('p'),grid=document.createElement('div');o.replaceChildren();o.hidden=false;note.className='note';note.textContent='Chế độ 2D: Không thể sử dụng WebGL hoặc Three.js nên album 3D đã tắt.';heading.textContent=c.title;date.textContent=c.date?fmt(c.date):'';description.textContent=c.description;grid.className='grid';for(const photo of c.photos){const figure=document.createElement('figure'),image=document.createElement('img'),caption=document.createElement('figcaption');image.src=photo.url;image.alt='';caption.textContent=photo.caption||'';figure.append(image,caption);grid.append(figure)}o.append(note,heading,date,description,grid);if(i===D.chapters.length-1){const end=document.createElement('p'),signature=document.createElement('em');end.className='end';end.append(document.createTextNode(D.closingMessage+' '),signature);signature.textContent=D.signature;o.append(end)}syncUI()}
 /* ---------- editor ---------- */
 function editor(){const E=$('#editor');
 $$('[data-k]').forEach(i=>{i.value=D[i.dataset.k]||'';i.oninput=()=>{D[i.dataset.k]=i.value;soon()}});
 const chs=()=>{$('#chs').innerHTML=D.chapters.map((c,i)=>`<fieldset><input data-i="${i}" data-f="title" value="${c.title}"><input type="date" data-i="${i}" data-f="date" value="${c.date||''}"><textarea data-i="${i}" data-f="description" rows="2">${c.description}</textarea></fieldset>`).join('');$$('#chs [data-f]').forEach(e=>e.oninput=()=>{D.chapters[e.dataset.i][e.dataset.f]=e.value;soon()})};
 const phs=()=>{const a=flat();$('#cnt').textContent=a.length+'/12';$('#phs').innerHTML=a.map((p,i)=>`<div class="ph" draggable="true" data-i="${i}"><img src="${p.url}" alt=""><input value="${(p.caption||'').replace(/"/g,'&quot;')}" data-a="cap"><select data-a="ch">${D.chapters.map((c,k)=>`<option value="${k}"${k===p.ch?' selected':''}>${k+1}</option>`).join('')}</select><button data-a="cov" title="Ảnh bìa"${D.coverImage===p.url?' class="on"':''}>★</button><button data-a="del" title="Xóa">×</button></div>`).join('');
 $$('#phs .ph').forEach(r=>{const i=+r.dataset.i;r.ondragstart=e=>e.dataTransfer.setData('t',i);r.ondragover=e=>e.preventDefault();r.ondrop=e=>{e.preventDefault();const f=+e.dataTransfer.getData('t'),b=flat(),[m]=b.splice(f,1);b.splice(i,0,m);setFlat(b);phs();soon()};
-r.querySelector('[data-a=cap]').oninput=e=>{a[i].caption=e.target.value;soon()};r.querySelector('[data-a=ch]').onchange=e=>{a[i].ch=+e.target.value;setFlat(a);phs();soon()};r.querySelector('[data-a=cov]').onclick=()=>{D.coverImage=a[i].url;phs();soon()};r.querySelector('[data-a=del]').onclick=()=>{a.splice(i,1);setFlat(a);phs();soon()}})};
+r.querySelector('[data-a=cap]').oninput=e=>{a[i].caption=e.target.value;soon()};r.querySelector('[data-a=ch]').onchange=e=>{a[i].ch=+e.target.value;setFlat(a);phs();soon()};r.querySelector('[data-a=cov]').onclick=()=>{D.coverImage=a[i].url;D.coverImageAssetId=a[i].asset_id||'';phs();soon()};r.querySelector('[data-a=del]').onclick=()=>{a.splice(i,1);setFlat(a);phs();soon()}})};
 $('#up').onchange=e=>{[...e.target.files].slice(0,12-flat().length).forEach(f=>{const u=URL.createObjectURL(f),im=new Image();im.onload=()=>{const s=Math.min(1,900/Math.max(im.width,im.height)),c=mk(im.width*s,im.height*s);c.getContext('2d').drawImage(im,0,0,c.width,c.height);URL.revokeObjectURL(u);D.chapters[1].photos.push({url:c.toDataURL('image/jpeg',.82),caption:''});phs();soon()};im.src=u});e.target.value=''};
 $('#themes').innerHTML=Object.entries(TH).map(([k,v])=>`<button data-t="${k}" style="--c:${v.cover}">${v.n}</button>`).join('');$$('#themes button').forEach(b=>b.onclick=()=>{D.theme=b.dataset.t;apply()});
 $('#anim').value=D.animation;$('#anim').onchange=e=>{D.animation=e.target.value;apply()};
@@ -143,4 +145,13 @@ function start(){try{R=window.THREE;ray=new R.Raycaster();renderer=new R.WebGLRe
 function fallback(){$('#c').hidden=true;document.body.classList.add('twod')}
 function load(u,ok,no){const s=u.shift();if(!s)return no();const e=document.createElement('script');e.src=s;e.onload=ok;e.onerror=()=>load(u,ok,no);document.head.appendChild(e)}
 if(window.THREE)start();else load(['https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js','https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js','vendor/three.min.js'],start,()=>{fallback();ui();apply()});
+window.registerCrushifyCustomerEditor({
+templateId:'our-memories',schemaVersion:1,
+async serialize(upload){const cover=D.coverImageAssetId||(ASSET_ID.test(D.coverImage)?D.coverImage:D.coverImage?await upload(D.coverImage):'');if(cover)D.coverImageAssetId=cover;
+const chapters=[];for(const chapter of D.chapters){const photos=[];for(const photo of chapter.photos){const asset_id=photo.asset_id||(ASSET_ID.test(photo.url)?photo.url:await upload(photo.url));photo.asset_id=asset_id;photos.push({asset_id,caption:photo.caption||''})}chapters.push({id:chapter.id,title:chapter.title,date:chapter.date||'',description:chapter.description||'',photos})}
+return{templateId:'our-memories',sender:D.sender,receiver:D.receiver,nickname:D.nickname,albumTitle:D.albumTitle,subtitle:D.subtitle,anniversary:D.anniversary||'',theme:D.theme,animation:D.animation,coverImage:cover,introduction:D.introduction,story:D.story,chapters,closingMessage:D.closingMessage,signature:D.signature,music:D.music||''}},
+async hydrate(data,assetUrl){D=structuredClone(data);const coverId=D.coverImage;D.coverImageAssetId=coverId||'';D.coverImage=coverId?await assetUrl(coverId):'';
+for(const chapter of D.chapters)for(const photo of chapter.photos){photo.url=await assetUrl(photo.asset_id);photo.asset_id=photo.asset_id}
+editor();apply()
+}});
 })();

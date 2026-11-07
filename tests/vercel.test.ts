@@ -73,7 +73,7 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4]);
+      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4, 5, 6, 7]);
       const live = await handler(requestWithOrigin("/health/live", "https://crushify.test"));
       assert.equal(live.status, 200);
       const ready = await handler(requestWithOrigin("/health/ready", "https://crushify.test"));
@@ -195,6 +195,20 @@ describe("Vercel API runtime adapter", () => {
               ) VALUES (?, 'our-universe', 1, 'VND', ?, 1, ?, ?)`,
               args: [`test-price-${crypto.randomUUID()}`, amount, new Date().toISOString(), new Date().toISOString()],
             });
+            for (const [planId, priceId] of [
+              ["1-month", "test-storage-price-1"],
+              ["3-months", "test-storage-price-3"],
+              ["6-months", "test-storage-price-6"],
+              ["12-months", "test-storage-price-12"],
+              ["lifetime", "test-storage-price-life"],
+            ]) {
+              await migrationClient.execute({
+                sql: `INSERT INTO storage_plan_prices (
+                  id, storage_plan_id, currency, amount_minor, is_active, created_at, updated_at
+                ) VALUES (?, ?, 'VND', 1000, 1, ?, ?)`,
+                args: [priceId, planId, new Date().toISOString(), new Date().toISOString()],
+              });
+            }
           },
           owner: contract.owner,
           otherOwner: contract.other,
@@ -233,6 +247,33 @@ describe("Vercel API runtime adapter", () => {
                     order_reference, expected_amount_minor, actual_amount_minor
                 FROM payment_webhook_events WHERE provider = 'SEPAY' AND event_id = ?`,
               args: [transactionId],
+            });
+            assert.equal(result.rows.length, 1);
+            return result.rows[0];
+          },
+          async setPublicationExpiry(publicationId: string, expiresAt: string) {
+            await migrationClient.batch([
+              {
+                sql: "UPDATE publications SET expires_at = ? WHERE id = ?",
+                args: [expiresAt, publicationId],
+              },
+              {
+                sql: `UPDATE storage_entitlements SET expires_at = ?, status = 'ACTIVE'
+                      WHERE publication_id = ? AND status IN ('ACTIVE','EXPIRED')`,
+                args: [expiresAt, publicationId],
+              },
+            ], "write");
+          },
+          async deactivateTemplatePrice() {
+            await migrationClient.execute(
+              "UPDATE template_prices SET is_active = 0 WHERE template_id = 'our-universe' AND schema_version = 1",
+            );
+          },
+          async inspectEntitlement(orderId: string) {
+            const result = await migrationClient.execute({
+              sql: `SELECT activated_at, starts_at, previous_expires_at, expires_at, status
+                    FROM storage_entitlements WHERE order_id = ?`,
+              args: [orderId],
             });
             assert.equal(result.rows.length, 1);
             return result.rows[0];
@@ -378,7 +419,7 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4]);
+      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4, 5, 6, 7]);
       process.env.DATABASE_PROVIDER = "turso";
       process.env.TURSO_DATABASE_URL = databaseUrl;
       process.env.TURSO_AUTH_TOKEN = "";

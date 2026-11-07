@@ -10,6 +10,8 @@ import {
   type SePayWebhookPayload,
 } from "./payments/sepay.ts";
 import type { NormalizedPaymentTransaction } from "./payments/provider.ts";
+import { assetReferences, type TemplateData } from "./template-registry.ts";
+import { handleFulfillmentForOrder } from "./publications.ts";
 import type { Env } from "./types.ts";
 
 const ORDER_LIFETIME_MINUTES = 15;
@@ -32,6 +34,11 @@ interface OrderRow {
   template_id: string;
   schema_version: number;
   revision: number | null;
+  storage_plan_id: string;
+  storage_plan_title: string;
+  storage_duration_months: number | null;
+  storage_lifetime: number;
+  fulfillment_status: string | null;
 }
 
 interface PaymentRow {
@@ -111,6 +118,13 @@ function responseOrder(row: OrderRow, env: Env) {
     template_id: row.template_id,
     schema_version: row.schema_version,
     design_revision: row.revision,
+    storage_plan: {
+      id: row.storage_plan_id,
+      title: row.storage_plan_title,
+      duration_months: row.storage_duration_months,
+      lifetime: Boolean(row.storage_lifetime),
+    },
+    fulfillment_status: row.fulfillment_status,
     payment: {
       provider: PAYMENT_PROVIDER,
       status: paymentStatus,
@@ -142,10 +156,19 @@ async function loadOrder(
             i.reference_id AS template_id, CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) AS schema_version,
             o.design_revision AS revision,
             p.id AS payment_id, p.payment_reference, p.status AS payment_status,
-            p.review_required AS payment_review_required_item
+            p.review_required AS payment_review_required_item,
+            storage_item.reference_id AS storage_plan_id,
+            json_extract(storage_item.metadata_json, '$.title') AS storage_plan_title,
+            json_extract(storage_item.metadata_json, '$.duration_months') AS storage_duration_months,
+            json_extract(storage_item.metadata_json, '$.lifetime') AS storage_lifetime,
+            fj.status AS fulfillment_status
      FROM orders o
      JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
      JOIN payments p ON p.order_id = o.id AND p.provider = ?
+     JOIN order_items storage_item ON storage_item.order_id = o.id
+       AND storage_item.item_type = 'ADD_ON'
+       AND json_extract(storage_item.metadata_json, '$.kind') = 'STORAGE_PLAN'
+     LEFT JOIN fulfillment_jobs fj ON fj.order_id = o.id
      WHERE o.id = ? AND o.customer_id = ?`,
   ).bind(PAYMENT_PROVIDER, orderId, customerId).first<OrderRow>();
 }
@@ -205,12 +228,76 @@ async function createOrder(
     return apiError(requestId, 400, "VALIDATION_ERROR", "Request body must be an object");
   }
   const body = parsed.value as Record<string, unknown>;
-  if (Object.keys(body).length !== 1 || typeof body.design_id !== "string" ||
-      !/^[0-9a-f-]{36}$/i.test(body.design_id)) {
-    return apiError(requestId, 400, "VALIDATION_ERROR", "Expected design_id");
+  if (Object.keys(body).some((key) =>
+    !["design_id", "storage_plan_id", "asset_consents", "renewal_publication_id"].includes(key)) ||
+      typeof body.design_id !== "string" || !/^[0-9a-f-]{36}$/i.test(body.design_id) ||
+      typeof body.storage_plan_id !== "string" ||
+      !["1-month", "3-months", "6-months", "12-months", "lifetime"].includes(body.storage_plan_id) ||
+      (body.asset_consents !== undefined && !Array.isArray(body.asset_consents)) ||
+      (body.renewal_publication_id !== undefined &&
+        (typeof body.renewal_publication_id !== "string" ||
+          !/^[0-9a-f-]{36}$/i.test(body.renewal_publication_id)))) {
+    return apiError(requestId, 400, "VALIDATION_ERROR", "Expected design_id, storage_plan_id and optional asset_consents");
+  }
+  const consentList = (body.asset_consents ?? []) as unknown[];
+  if (consentList.some((item) => !item || typeof item !== "object" || Array.isArray(item) ||
+      Object.keys(item).length !== 2 ||
+      typeof (item as { asset_id?: unknown }).asset_id !== "string" ||
+      !/^[0-9a-f-]{36}$/i.test((item as { asset_id: string }).asset_id) ||
+      (item as { consent_version?: unknown }).consent_version !== "public-image-v1")) {
+    return apiError(requestId, 400, "VALIDATION_ERROR", "Invalid public image consent list");
+  }
+  const assetConsents = consentList as Array<{ asset_id: string; consent_version: string }>;
+  const consentIds = assetConsents.map((item) => item.asset_id);
+  if (new Set(consentIds).size !== consentIds.length) {
+    return apiError(requestId, 400, "VALIDATION_ERROR", "Image consent must not contain duplicates");
   }
   const ownerId = required.session!.customerId;
-  const fingerprint = await sha256(`${body.design_id}`);
+  const renewalRequestedAt = nowIso();
+  const renewal = body.renewal_publication_id
+    ? await env.DB.prepare(
+      `SELECT p.id, p.design_id, p.status,
+         (SELECT e.status FROM storage_entitlements e
+          WHERE e.publication_id = p.id ORDER BY e.created_at DESC LIMIT 1) AS entitlement_status
+       FROM publications p
+       JOIN designs d ON d.id = p.design_id AND d.customer_id = ?
+       WHERE p.id = ? AND p.status IN ('PUBLISHED','UNPUBLISHED','EXPIRED')
+         AND p.renderer_version <> 'unsupported'
+         AND (p.retention_delete_after_at IS NULL OR p.retention_delete_after_at > ?)`,
+    ).bind(ownerId, body.renewal_publication_id, renewalRequestedAt).first<{
+      id: string;
+      design_id: string;
+      status: string;
+      entitlement_status: string | null;
+    }>()
+    : await env.DB.prepare(
+      `SELECT p.id, p.design_id, p.status,
+         (SELECT e.status FROM storage_entitlements e
+          WHERE e.publication_id = p.id ORDER BY e.created_at DESC LIMIT 1) AS entitlement_status
+       FROM publications p
+       JOIN designs d ON d.id = p.design_id AND d.customer_id = ?
+       WHERE d.id = ? AND p.status IN ('PUBLISHED','UNPUBLISHED','EXPIRED')
+         AND p.renderer_version <> 'unsupported'
+         AND (p.retention_delete_after_at IS NULL OR p.retention_delete_after_at > ?)`,
+    ).bind(ownerId, body.design_id, renewalRequestedAt).first<{
+      id: string;
+      design_id: string;
+      status: string;
+      entitlement_status: string | null;
+    }>();
+  const renewalPublicationId = renewal?.id ?? null;
+  if (body.renewal_publication_id && (!renewal || renewal.design_id !== body.design_id)) {
+    return apiError(requestId, 404, "NOT_FOUND", "Renewable website not found");
+  }
+  if (renewal?.entitlement_status === "LIFETIME") {
+    return apiError(requestId, 409, "LIFETIME_ACTIVE", "Lifetime storage does not require renewal");
+  }
+  const fingerprint = await sha256(JSON.stringify({
+    design_id: body.design_id,
+    storage_plan_id: body.storage_plan_id,
+    renewal_publication_id: renewalPublicationId,
+    asset_consents: [...consentIds].sort(),
+  }));
   const prior = await env.DB.prepare(
     `SELECT id, request_hash FROM orders
      WHERE customer_id = ? AND idempotency_key = ?`,
@@ -225,26 +312,37 @@ async function createOrder(
   }
 
   const design = await env.DB.prepare(
-    `SELECT d.id, d.template_id, d.schema_version, d.revision,
+    `SELECT d.id, d.template_id, d.schema_version, d.revision, d.data_json,
             t.title, t.status AS template_status, v.status AS version_status,
-            pr.amount_minor, pr.currency
+            pr.amount_minor, pr.currency, sp.id AS storage_plan_id, sp.title AS storage_plan_title,
+            sp.duration_months, sp.is_lifetime, spp.amount_minor AS storage_amount_minor,
+            spp.currency AS storage_currency
      FROM designs d
      JOIN templates t ON t.id = d.template_id
      JOIN template_versions v ON v.template_id = d.template_id AND v.schema_version = d.schema_version
-     JOIN template_prices pr ON pr.template_id = d.template_id
+     LEFT JOIN template_prices pr ON pr.template_id = d.template_id
        AND pr.schema_version = d.schema_version AND pr.is_active = 1
+     JOIN storage_plans sp ON sp.id = ? AND sp.status = 'ACTIVE'
+     JOIN storage_plan_prices spp ON spp.storage_plan_id = sp.id AND spp.is_active = 1
      WHERE d.id = ? AND d.customer_id = ? AND d.status = 'DRAFT'
        AND t.status = 'ACTIVE' AND v.status = 'ACTIVE'`,
-  ).bind(body.design_id, ownerId).first<{
+  ).bind(body.storage_plan_id, body.design_id, ownerId).first<{
     id: string;
     template_id: string;
     schema_version: number;
     revision: number;
+    data_json: string;
     title: string;
     template_status: string;
     version_status: string;
-    amount_minor: number;
-    currency: string;
+    amount_minor: number | null;
+    currency: string | null;
+    storage_plan_id: string;
+    storage_plan_title: string;
+    duration_months: number | null;
+    is_lifetime: number;
+    storage_amount_minor: number;
+    storage_currency: string;
   }>();
   if (!design) {
     const ownedDesign = await env.DB.prepare(
@@ -254,9 +352,22 @@ async function createOrder(
       ? apiError(requestId, 422, "PRICE_UNAVAILABLE", "This template has no active server-side price")
       : apiError(requestId, 404, "NOT_FOUND", "Design not found");
   }
-  if (!Number.isSafeInteger(design.amount_minor) || design.amount_minor <= 0 ||
-      design.currency !== "VND") {
-    return apiError(requestId, 503, "CATALOG_CONFIGURATION_ERROR", "Template price configuration is invalid");
+  if ((!renewalPublicationId &&
+      (!Number.isSafeInteger(design.amount_minor) || (design.amount_minor ?? 0) <= 0 ||
+        design.currency !== "VND")) ||
+      !Number.isSafeInteger(design.storage_amount_minor) ||
+      design.storage_amount_minor <= 0 || design.storage_currency !== "VND") {
+    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Template or storage plan has no active server-side price");
+  }
+  const templateAmount = renewalPublicationId ? 0 : design.amount_minor;
+  if (!Number.isSafeInteger(templateAmount) || (templateAmount as number) < 0 ||
+      (!renewalPublicationId && ((templateAmount as number) <= 0 || design.currency !== "VND"))) {
+    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "This template has no active server-side price");
+  }
+  const data = JSON.parse(design.data_json) as TemplateData;
+  const availableAssetIds = new Set(assetReferences(design.template_id, data));
+  if (consentIds.some((id) => !availableAssetIds.has(id))) {
+    return apiError(requestId, 422, "VALIDATION_ERROR", "Consent may only reference an image in this design");
   }
 
   const orderId = createOrderId();
@@ -265,31 +376,46 @@ async function createOrder(
   const paymentReference = createPaymentReference();
   const now = nowIso();
   const expiresAt = new Date(Date.now() + ORDER_LIFETIME_MINUTES * 60_000).toISOString();
-  const amount = design.amount_minor;
+  const amount = (templateAmount as number) + design.storage_amount_minor;
+  if (!Number.isSafeInteger(amount)) {
+    return apiError(requestId, 503, "CATALOG_CONFIGURATION_ERROR", "Order total is invalid");
+  }
   const statements = [
     env.DB.prepare(
       `INSERT INTO orders (
          id, customer_id, order_type, status, currency, subtotal_minor, discount_minor,
-         total_minor, design_id, idempotency_key, created_at, updated_at, expires_at,
+         total_minor, design_id, renewal_publication_id, idempotency_key, created_at, updated_at, expires_at,
          order_reference, design_revision, request_hash, payment_review_required
        )
-       SELECT ?, ?, 'SELF_SERVICE', 'AWAITING_PAYMENT', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0
+       SELECT ?, ?, 'SELF_SERVICE', 'AWAITING_PAYMENT', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0
        WHERE EXISTS (
          SELECT 1
          FROM designs d
          JOIN templates t ON t.id = d.template_id AND t.status = 'ACTIVE'
          JOIN template_versions v ON v.template_id = d.template_id
            AND v.schema_version = d.schema_version AND v.status = 'ACTIVE'
-         JOIN template_prices pr ON pr.template_id = d.template_id
+         LEFT JOIN template_prices pr ON pr.template_id = d.template_id
            AND pr.schema_version = d.schema_version AND pr.is_active = 1
+         JOIN storage_plans sp ON sp.id = ? AND sp.status = 'ACTIVE'
+         JOIN storage_plan_prices spp ON spp.storage_plan_id = sp.id AND spp.is_active = 1
          WHERE d.id = ? AND d.customer_id = ? AND d.status = 'DRAFT'
            AND d.revision = ? AND d.template_id = ? AND d.schema_version = ?
-           AND pr.amount_minor = ? AND pr.currency = ?
+           AND ((? = 1 AND ? IS NOT NULL) OR (? = 0 AND pr.amount_minor = ? AND pr.currency = ?))
+           AND spp.amount_minor = ?
+           AND spp.currency = ?
+           AND (? IS NULL OR EXISTS (
+             SELECT 1 FROM publications renewal
+             WHERE renewal.id = ? AND renewal.design_id = d.id
+               AND renewal.status IN ('PUBLISHED','UNPUBLISHED','EXPIRED')
+               AND (renewal.retention_delete_after_at IS NULL OR renewal.retention_delete_after_at > ?)
+           ))
        )`,
-    ).bind(orderId, ownerId, design.currency, amount, amount, design.id, idempotencyKey,
-      now, now, expiresAt, orderReference, design.revision, fingerprint,
-      design.id, ownerId, design.revision, design.template_id, design.schema_version,
-      amount, design.currency),
+    ).bind(orderId, ownerId, "VND", amount, amount, design.id, renewalPublicationId,
+      idempotencyKey, now, now, expiresAt, orderReference, design.revision, fingerprint,
+      design.storage_plan_id, design.id, ownerId, design.revision, design.template_id,
+      design.schema_version, renewalPublicationId ? 1 : 0, renewalPublicationId,
+      renewalPublicationId ? 1 : 0, templateAmount, renewalPublicationId ? "VND" : design.currency,
+      design.storage_amount_minor, design.storage_currency, renewalPublicationId, renewalPublicationId, now),
     env.DB.prepare(
       `INSERT INTO order_items (
          id, order_id, item_type, reference_id, description_snapshot, quantity,
@@ -297,8 +423,27 @@ async function createOrder(
        )
        SELECT ?, ?, 'TEMPLATE_LICENSE', ?, ?, 1, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM orders WHERE id = ?)`,
-    ).bind(safeId(), orderId, design.template_id, design.title, amount, amount,
+    ).bind(safeId(), orderId, design.template_id, design.title, templateAmount, templateAmount,
       JSON.stringify({ schema_version: design.schema_version }), now, orderId),
+    env.DB.prepare(
+      `INSERT INTO order_items (
+         id, order_id, item_type, reference_id, description_snapshot, quantity,
+         unit_amount_minor, line_total_minor, metadata_json, created_at
+       )
+       SELECT ?, ?, 'ADD_ON', ?, ?, 1, ?, ?, ?, ?
+       WHERE EXISTS (SELECT 1 FROM orders WHERE id = ?)`,
+    ).bind(safeId(), orderId, design.storage_plan_id, design.storage_plan_title,
+      design.storage_amount_minor, design.storage_amount_minor,
+      JSON.stringify({
+        kind: "STORAGE_PLAN",
+        storage_plan_id: design.storage_plan_id,
+        title: design.storage_plan_title,
+        duration_months: design.duration_months,
+        lifetime: Boolean(design.is_lifetime),
+        amount_minor: design.storage_amount_minor,
+        currency: design.storage_currency,
+        asset_consents: assetConsents,
+      }), now, orderId),
     env.DB.prepare(
       `INSERT INTO payments (
          id, order_id, provider, status, amount_minor, currency, idempotency_key,
@@ -306,7 +451,7 @@ async function createOrder(
        )
        SELECT ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, 0
        WHERE EXISTS (SELECT 1 FROM orders WHERE id = ?)`,
-    ).bind(paymentId, orderId, PAYMENT_PROVIDER, amount, design.currency, `order:${orderId}`,
+    ).bind(paymentId, orderId, PAYMENT_PROVIDER, amount, "VND", `order:${orderId}`,
       now, now, paymentReference, orderId),
   ];
   try {
@@ -352,6 +497,37 @@ async function listOrders(
     if (order) orders.push(responseOrder(await expireOrderIfNeeded(env, required.session!.customerId, order), env));
   }
   return jsonResponse({ orders }, 200, requestId);
+}
+
+async function listStoragePlans(env: Env, requestId: string): Promise<Response> {
+  const rows = await env.DB.prepare(
+    `SELECT p.id, p.title, p.duration_months, p.is_lifetime,
+            price.amount_minor, price.currency
+     FROM storage_plans p
+     LEFT JOIN storage_plan_prices price
+       ON price.storage_plan_id = p.id AND price.is_active = 1
+     WHERE p.status = 'ACTIVE'
+     ORDER BY CASE p.id WHEN '1-month' THEN 1 WHEN '3-months' THEN 2
+       WHEN '6-months' THEN 3 WHEN '12-months' THEN 4 ELSE 5 END`,
+  ).all<{
+    id: string;
+    title: string;
+    duration_months: number | null;
+    is_lifetime: number;
+    amount_minor: number | null;
+    currency: string | null;
+  }>();
+  return jsonResponse({
+    plans: rows.results.map((plan) => ({
+      id: plan.id,
+      title: plan.title,
+      duration_months: plan.duration_months,
+      lifetime: Boolean(plan.is_lifetime),
+      amount_minor: plan.amount_minor,
+      currency: plan.currency,
+      available: plan.amount_minor !== null && plan.currency === "VND",
+    })),
+  }, 200, requestId, { "Cache-Control": "no-store" });
 }
 
 function webhookMismatch(
@@ -516,6 +692,20 @@ async function processWebhookEvent(
       ).bind(payment.order_id, payment.id, transactionId,
         payment.order_id, payment.id, transactionId, now, payment.order_reference,
         payment.amount_minor, transaction.amountMinor, PAYMENT_PROVIDER, eventId),
+      env.DB.prepare(
+        `INSERT INTO fulfillment_jobs (id, order_id, status, created_at, updated_at)
+         SELECT ?, ?, 'PENDING', ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM orders o
+           JOIN payments p ON p.order_id = o.id
+           JOIN payment_webhook_events e ON e.provider = p.provider
+             AND e.event_id = p.provider_payment_id AND e.outcome = 'PROCESSED'
+           WHERE o.id = ? AND o.status = 'PAID' AND p.id = ?
+             AND p.status = 'SUCCEEDED' AND p.provider_payment_id = ?
+             AND p.amount_minor = o.total_minor AND p.currency = o.currency
+         )
+         ON CONFLICT(order_id) DO NOTHING`,
+      ).bind(safeId(), payment.order_id, now, now, payment.order_id, payment.id, transactionId),
     ]);
   } catch (error) {
     if (!(error instanceof DatabaseError) || error.code !== "CONSTRAINT") throw error;
@@ -530,6 +720,12 @@ async function processWebhookEvent(
       payment,
       { actualAmountMinor: transaction.amountMinor },
     );
+  }
+  const processed = await env.DB.prepare(
+    `SELECT outcome FROM payment_webhook_events WHERE provider = ? AND event_id = ?`,
+  ).bind(PAYMENT_PROVIDER, eventId).first<{ outcome: string }>();
+  if (processed?.outcome === "PROCESSED") {
+    await handleFulfillmentForOrder(env, payment.order_id);
   }
 }
 
@@ -655,6 +851,10 @@ export async function handlePaymentRoutes(
   path: string,
   requestId: string,
 ): Promise<Response | null> {
+  if (path === "/api/v1/storage-plans") {
+    if (request.method !== "GET") return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");
+    return listStoragePlans(env, requestId);
+  }
   if (path === "/api/v1/orders") {
     if (request.method === "POST") return createOrder(request, env, requestId);
     if (request.method === "GET") return listOrders(request, env, requestId);

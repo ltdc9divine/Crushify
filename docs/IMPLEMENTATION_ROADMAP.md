@@ -1,6 +1,6 @@
 # Crushify Implementation Roadmap
 
-**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 Our Universe foundation remains available and is integration-tested locally. The shared router has a Vercel Node Functions adapter tested against isolated local Turso and mock storage. A local-only order/SePay webhook prototype is covered by synthetic D1/Turso tests; no SePay account, live transaction, production price, Vercel deployment, remote Turso migration, Cloudinary account test, or data transfer has occurred. Production capability is not configured.
+**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 foundation and Vercel/local adapters are tested locally. Local-only order/SePay and paid-order-gated publication prototypes are covered by synthetic tests; no SePay account, live transaction, production price, publication deployment, Vercel deployment, remote database migration, Cloudinary account test, or data transfer has occurred. Production capability is not configured.
 
 ## 1. Priority before launch
 
@@ -48,15 +48,15 @@
 
 ### Sprint 4 — Publication and template rollout (1–2 weeks)
 
-- Implement publish/revoke by immutable design revision and random slug, public media renditions and cache policy.
-- Integrate shared adapter into remaining four templates without unifying their UI/CSS/3D scenes.
-- Compatibility fixtures for old schema/renderer; privacy and slug enumeration tests.
-- Deliver: end-to-end draft → preview → publish on staging, still no real checkout.
+- **Implemented locally:** migration 0005, five schema-v1 validators/renderers, immutable publication snapshots, random hashed slugs, consent-based media derivatives, publish/unpublish/republish/revoke, public recipient hydration, design-deletion cleanup, and a customer websites dashboard.
+- **Verified locally:** paid-order eligibility is rechecked against order/payment/webhook evidence; integration tests cover cross-owner rejection, lifecycle revisions, consent withdrawal, public-media access and revoke. No remote database or publication deployment was used.
+- **Still required:** connect the other four editors to durable server drafts/uploads, run real staging delivery with isolated infrastructure, add expiry/cleanup operations and support procedures, and complete device/browser/reduced-motion QA.
+- **Delivery:** local/test publication flow only; no real checkout, production fulfillment, or staging acceptance.
 
 ### Sprint 5 — Checkout/payment (1–2 weeks plus provider onboarding)
 
 - **Local prototype complete:** server-priced order snapshots, idempotency, 15-minute expiry, responsive checkout status page, HMAC-SHA256 SePay webhook verification, duplicate handling, mismatch/manual-review states, and a bounded internal recovery service for persisted webhook events. Active prices are not seeded; checkout is disabled outside local test mode.
-- **Still required:** provider-account Test mode run, production candidate adapter/hosting approval, approved real catalog/pricing and terms, rate limits, a scheduled/operator recovery runner, provider reconciliation and admin review UI, monitoring, refunds, entitlement and fulfillment design, and independent security review.
+- **Still required:** provider-account Test mode run, production candidate adapter/hosting approval, approved real catalog/pricing and terms, rate limits, a scheduled/operator recovery runner, provider reconciliation and admin review UI, monitoring, refunds, production entitlement/fulfillment integration, and independent security review.
 - Do not enable a purchase CTA or live payment. A SePay Test mode integration needs a provider account and isolated bank/webhook settings; no real banking/payment credentials have been supplied.
 
 ### Sprint 6 — Custom design workflow (1–2 weeks)
@@ -93,7 +93,7 @@ Foundational code through a staging self-service flow is roughly 6–10 engineer
 
 ## 6. Current commercial readiness verdict
 
-Current project is a **static catalog plus a local-only backend prototype**. Our Universe has locally tested authentication, durable D1 drafts, private media and preview. Local order/webhook code does not provide production checkout: the price catalog is empty, payment modes fail closed outside local development, and no entitlement, fulfillment, refund, publication, admin review or production deployment exists. Do not accept real orders until the relevant roadmap gates pass.
+Current project is a **static catalog plus local-only backend prototypes**. Our Universe has locally tested authentication, durable D1 drafts, private media and preview. Five-template schema/recipient publication support and a paid-order-gated publication lifecycle are tested only in local D1/R2 with synthetic payment rows. The price catalog is empty, payment and publication mutations fail closed outside local development, four editors are not server-backed, and there is no production entitlement/fulfillment, refund, admin review, or deployment. Do not accept real orders until the relevant roadmap gates pass.
 
 ## 7. Cost and quota monitoring
 

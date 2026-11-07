@@ -216,11 +216,19 @@ export async function handleSessionRoutes(
     const parsed = await readJson(request, requestId);
     if (parsed.response) return parsed.response;
     if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value) ||
-        Object.keys(parsed.value).length !== 1 || typeof (parsed.value as { email?: unknown }).email !== "string") {
+        Object.keys(parsed.value).some((key) => key !== "email" && key !== "return_to") ||
+        typeof (parsed.value as { email?: unknown }).email !== "string" ||
+        (Object.hasOwn(parsed.value, "return_to") &&
+          typeof (parsed.value as { return_to?: unknown }).return_to !== "string")) {
       return apiError(requestId, 400, "VALIDATION_ERROR", "A valid email is required");
     }
 
-    const email = (parsed.value as { email: string }).email.trim();
+    const body = parsed.value as { email: string; return_to?: string };
+    const returnTo = body.return_to ?? "/templates/our-universe/";
+    if (!/^\/templates\/(our-universe|love-letter|our-memories|say-yes|distance-means-nothing)\/(?:\?design=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})?$/i.test(returnTo)) {
+      return apiError(requestId, 400, "VALIDATION_ERROR", "A valid template return path is required");
+    }
+    const email = body.email.trim();
     const emailNormalized = email.toLocaleLowerCase("en-US");
     if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return apiError(requestId, 400, "VALIDATION_ERROR", "A valid email is required");
@@ -261,7 +269,7 @@ export async function handleSessionRoutes(
       `INSERT INTO login_tokens (id, customer_id, token_hash, expires_at, created_at)
        VALUES (?, ?, ?, ?, ?)`,
     ).bind(safeId(), customer.id, tokenHash, expiresAt, nowText).run();
-    const link = new URL("/templates/our-universe/", origin);
+    const link = new URL(returnTo, origin);
     link.hash = new URLSearchParams({ magic_token: token }).toString();
     try {
       await mailer.send({

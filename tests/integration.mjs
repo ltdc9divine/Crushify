@@ -185,6 +185,71 @@ async function signIn(email) {
   return session;
 }
 
+function sqlText(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function seedPaidOrder(email, designId, revision) {
+  const customer = queryLocalD1(
+    `SELECT id FROM customers WHERE email_normalized = ${sqlText(email)}`,
+  )[0];
+  assert.ok(customer?.id);
+  const now = new Date().toISOString();
+  const orderId = crypto.randomUUID();
+  const orderItemId = crypto.randomUUID();
+  const storageItemId = crypto.randomUUID();
+  const paymentId = crypto.randomUUID();
+  const webhookId = crypto.randomUUID();
+  const transactionId = `phase6-${randomBytes(12).toString("hex")}`;
+  const orderReference = `CRF${randomBytes(8).toString("hex").toUpperCase()}`;
+  const paymentReference = `CRP${randomBytes(8).toString("hex").toUpperCase()}`;
+  const statements = [
+    `INSERT INTO orders (
+       id, customer_id, order_type, status, currency, subtotal_minor, discount_minor, total_minor,
+       design_id, idempotency_key, created_at, updated_at, paid_at, expires_at, order_reference,
+       design_revision, request_hash, payment_review_required
+     ) VALUES (
+       ${sqlText(orderId)}, ${sqlText(customer.id)}, 'SELF_SERVICE', 'PAID', 'VND', 50000, 0, 50000,
+       ${sqlText(designId)}, ${sqlText(`phase6-${orderId}`)}, ${sqlText(now)}, ${sqlText(now)},
+       ${sqlText(now)}, NULL, ${sqlText(orderReference)}, ${revision}, ${sqlText("a".repeat(64))}, 0
+     )`,
+    `INSERT INTO order_items (
+       id, order_id, item_type, reference_id, description_snapshot, quantity, unit_amount_minor,
+       line_total_minor, metadata_json, created_at
+     ) VALUES (
+       ${sqlText(orderItemId)}, ${sqlText(orderId)}, 'TEMPLATE_LICENSE', 'our-universe',
+       'Our Universe', 1, 50000, 50000, '{"schema_version":1}', ${sqlText(now)}
+     )`,
+    `INSERT INTO order_items (
+       id, order_id, item_type, reference_id, description_snapshot, quantity, unit_amount_minor,
+       line_total_minor, metadata_json, created_at
+     ) VALUES (
+       ${sqlText(storageItemId)}, ${sqlText(orderId)}, 'ADD_ON', '1-month',
+       '1 tháng', 1, 0, 0,
+       '{"kind":"STORAGE_PLAN","storage_plan_id":"1-month","title":"1 tháng","duration_months":1,"lifetime":false,"asset_consents":[]}',
+       ${sqlText(now)}
+     )`,
+    `INSERT INTO payments (
+       id, order_id, provider, provider_payment_id, status, amount_minor, currency, idempotency_key,
+       created_at, updated_at, succeeded_at, payment_reference, review_required
+     ) VALUES (
+       ${sqlText(paymentId)}, ${sqlText(orderId)}, 'SEPAY', ${sqlText(transactionId)}, 'SUCCEEDED',
+       50000, 'VND', ${sqlText(`phase6-payment-${paymentId}`)}, ${sqlText(now)}, ${sqlText(now)},
+       ${sqlText(now)}, ${sqlText(paymentReference)}, 0
+     )`,
+    `INSERT INTO payment_webhook_events (
+       id, provider, event_id, payload_hash, received_at, processed_at, outcome,
+       raw_payload, provider_transaction_id, order_reference, expected_amount_minor, actual_amount_minor
+     ) VALUES (
+       ${sqlText(webhookId)}, 'SEPAY', ${sqlText(transactionId)}, ${sqlText("b".repeat(64))},
+       ${sqlText(now)}, ${sqlText(now)}, 'PROCESSED', '{}', ${sqlText(transactionId)},
+       ${sqlText(orderReference)}, 50000, 50000
+     )`,
+  ];
+  for (const statement of statements) executeLocalD1(statement);
+  return orderId;
+}
+
 function makePng() {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -251,7 +316,8 @@ try {
   const live = await json("/health/live", null);
   assert.equal(live.response.status, 200);
 
-  const first = await signIn(`phase2-${crypto.randomUUID()}@example.test`);
+  const ownerEmail = `phase2-${crypto.randomUUID()}@example.test`;
+  const first = await signIn(ownerEmail);
   const unauthenticated = await json("/designs", null, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -263,7 +329,7 @@ try {
     method: "POST",
     mutating: true,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ template_id: "say-yes", schema_version: 1 }),
+    body: JSON.stringify({ template_id: "not-a-template", schema_version: 1 }),
   });
   assert.equal(unsupported.response.status, 422);
 
@@ -276,6 +342,13 @@ try {
   assert.equal(created.response.status, 201);
   const designId = created.body.design_id;
   assert.equal(created.body.data.sender, "Minh");
+  const paymentDesign = await json("/designs", first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ template_id: "our-universe", schema_version: 1 }),
+  });
+  assert.equal(paymentDesign.response.status, 201);
   await runPaymentContract({
     request: json,
     async seedPrice(amount) {
@@ -287,10 +360,26 @@ try {
           '${new Date().toISOString()}', '${new Date().toISOString()}'
         )`,
       );
+      for (const [planId, priceId] of [
+        ["1-month", "payment-test-storage-1"],
+        ["3-months", "payment-test-storage-3"],
+        ["6-months", "payment-test-storage-6"],
+        ["12-months", "payment-test-storage-12"],
+        ["lifetime", "payment-test-storage-life"],
+      ]) {
+        executeLocalD1(
+          `INSERT INTO storage_plan_prices (
+            id, storage_plan_id, currency, amount_minor, is_active, created_at, updated_at
+          ) VALUES (
+            '${priceId}', '${planId}', 'VND', 1000, 1,
+            '${new Date().toISOString()}', '${new Date().toISOString()}'
+          )`,
+        );
+      }
     },
     owner: first,
     otherOwner: await signIn(`phase2-payment-other-${crypto.randomUUID()}@example.test`),
-    designId,
+    designId: paymentDesign.body.design_id,
     webhookSecret,
     receivingAccount,
     async cancelOrder(orderId) {
@@ -319,6 +408,28 @@ try {
         `SELECT outcome, review_reason, processing_attempts, provider_transaction_id,
                 order_reference, expected_amount_minor, actual_amount_minor
            FROM payment_webhook_events WHERE provider = 'SEPAY' AND event_id = '${transactionId}'`,
+      );
+      assert.equal(rows.length, 1);
+      return rows[0];
+    },
+    setPublicationExpiry(publicationId, expiresAt) {
+      executeLocalD1(
+        `UPDATE publications SET expires_at = '${expiresAt}' WHERE id = '${publicationId}'`,
+      );
+      executeLocalD1(
+        `UPDATE storage_entitlements SET expires_at = '${expiresAt}', status = 'ACTIVE'
+          WHERE publication_id = '${publicationId}' AND status IN ('ACTIVE','EXPIRED')`,
+      );
+    },
+    deactivateTemplatePrice() {
+      executeLocalD1(
+        "UPDATE template_prices SET is_active = 0 WHERE template_id = 'our-universe' AND schema_version = 1",
+      );
+    },
+    inspectEntitlement(orderId) {
+      const rows = queryLocalD1(
+        `SELECT activated_at, starts_at, previous_expires_at, expires_at, status
+          FROM storage_entitlements WHERE order_id = '${orderId}'`,
       );
       assert.equal(rows.length, 1);
       return rows[0];
@@ -470,17 +581,186 @@ try {
   });
   assert.equal(previewImage.status, 200);
 
+  const paidOrderId = seedPaidOrder(ownerEmail, designId, 3);
+  const consent = {
+    asset_id: goodImage.grant.asset_id,
+    consent_version: "public-image-v1",
+  };
+  const unauthorizedPublication = await json("/publications", second, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ order_id: paidOrderId, expected_revision: 3, asset_consents: [consent] }),
+  });
+  assert.equal(unauthorizedPublication.response.status, 422);
+
+  const createdPublication = await json("/publications", first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ order_id: paidOrderId, expected_revision: 3, asset_consents: [consent] }),
+  });
+  assert.equal(createdPublication.response.status, 201, JSON.stringify(createdPublication.body));
+  const publicationId = createdPublication.body.publication_id;
+  const publicationSlug = new URL(createdPublication.body.url).pathname.split("/").at(-1);
+  assert.match(publicationSlug, /^g[A-Za-z0-9_-]{20,40}$/);
+  const unpublishedPublicRead = await json(`/publications/${publicationSlug}`, null);
+  assert.equal(unpublishedPublicRead.response.status, 410);
+  const publicationShell = await fetch(origin + `/p/${publicationSlug}`);
+  assert.equal(publicationShell.status, 200);
+  assert.match(publicationShell.headers.get("content-type") || "", /text\/html/);
+  const publicationCss = await fetch(origin + "/p/publication.css");
+  assert.match(publicationCss.headers.get("content-type") || "", /text\/css/);
+  assert.equal((await fetch(origin + "/shared/publication-bootstrap.js")).status, 200);
+
+  const crossOwnerPublication = await json(`/publications/${publicationId}`, second);
+  assert.equal(crossOwnerPublication.response.status, 404);
+  const firstPublish = await json(`/publications/${publicationId}/publish`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 1 }),
+  });
+  assert.equal(firstPublish.response.status, 200, JSON.stringify(firstPublish.body));
+  const publicRead = await json(`/publications/${publicationSlug}`, null);
+  assert.equal(publicRead.response.status, 200, JSON.stringify(publicRead.body));
+  assert.equal(publicRead.body.template_id, "our-universe");
+  assert.equal(publicRead.body.data.photos[0].caption, "Kỷ niệm");
+  assert.equal(publicRead.body.data.photos[0].asset_id, undefined);
+  const publishedImagePath = publicRead.body.data.photos[0].url;
+  const publishedImage = await fetch(origin + publishedImagePath);
+  assert.equal(publishedImage.status, 200);
+  assert.equal(publishedImage.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(Buffer.from(await publishedImage.arrayBuffer()), png);
+
+  const firstUnpublish = await json(`/publications/${publicationId}/unpublish`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 2 }),
+  });
+  assert.equal(firstUnpublish.response.status, 200);
+  assert.equal((await json(`/publications/${publicationSlug}`, null)).response.status, 410);
+  const republished = await json(`/publications/${publicationId}/republish`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 3 }),
+  });
+  assert.equal(republished.response.status, 200, JSON.stringify(republished.body));
+
+  const changedPublicationData = { ...withPhoto, headline: "Bầu trời của chúng mình" };
+  const changedForPublication = await json(`/designs/${designId}`, first, {
+    method: "PUT",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schema_version: 1, expected_revision: 3, data: changedPublicationData }),
+  });
+  assert.equal(changedForPublication.response.status, 200);
+  const unpublishBeforeUpdate = await json(`/publications/${publicationId}/unpublish`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 4 }),
+  });
+  assert.equal(unpublishBeforeUpdate.response.status, 200);
+  const updateBody = JSON.stringify({
+      expected_revision: 4,
+      expected_lifecycle_revision: 5,
+      asset_consents: [],
+    });
+  const concurrentUpdates = await Promise.all([
+    json(`/publications/${publicationId}`, first, {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: updateBody,
+    }),
+    json(`/publications/${publicationId}`, first, {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: updateBody,
+    }),
+  ]);
+  assert.deepEqual(
+    concurrentUpdates.map((item) => item.response.status).sort(),
+    [200, 409],
+    "one publication update succeeds and the stale concurrent update conflicts",
+  );
+  const updateSnapshot = concurrentUpdates.find((item) => item.response.status === 200);
+  assert.ok(updateSnapshot);
+  assert.equal(updateSnapshot.body.lifecycle_revision, 6);
+  const publishUpdated = await json(`/publications/${publicationId}/publish`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 6 }),
+  });
+  assert.equal(publishUpdated.response.status, 200, JSON.stringify(publishUpdated.body));
+  const updatedPublicRead = await json(`/publications/${publicationSlug}`, null);
+  assert.equal(updatedPublicRead.response.status, 200);
+  assert.equal(updatedPublicRead.body.data.headline, "Bầu trời của chúng mình");
+  assert.deepEqual(updatedPublicRead.body.data.photos, []);
+
+  const unpublishBeforeConsent = await json(`/publications/${publicationId}/unpublish`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 7 }),
+  });
+  assert.equal(unpublishBeforeConsent.response.status, 200);
+  const regrantConsent = await json(`/publications/${publicationId}`, first, {
+    method: "PATCH",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expected_revision: 4,
+      expected_lifecycle_revision: 8,
+      asset_consents: [consent],
+    }),
+  });
+  assert.equal(regrantConsent.response.status, 200);
+  const publishWithConsent = await json(`/publications/${publicationId}/publish`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 9 }),
+  });
+  assert.equal(publishWithConsent.response.status, 200);
+  const withdrawConsent = await json(
+    `/publications/${publicationId}/assets/${goodImage.grant.asset_id}/consent`,
+    first,
+    { method: "POST", mutating: true, headers: { "Content-Type": "application/json" }, body: "{}" },
+  );
+  assert.equal(withdrawConsent.response.status, 200, JSON.stringify(withdrawConsent.body));
+  const consentWithdrawnRead = await json(`/publications/${publicationSlug}`, null);
+  assert.deepEqual(consentWithdrawnRead.body.data.photos, []);
+  assert.equal((await fetch(origin + publishedImagePath)).status, 404);
+  const revokePublication = await json(`/publications/${publicationId}/revoke`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 11 }),
+  });
+  assert.equal(revokePublication.response.status, 200);
+  assert.equal((await json(`/publications/${publicationSlug}`, null)).response.status, 410);
+
+  const websites = await json("/publications", first);
+  assert.equal(websites.response.status, 200);
+  assert.ok(websites.body.websites.some((website) => website.publication_id === publicationId));
+
   const referencedDelete = await json(`/assets/${goodImage.grant.asset_id}`, first, {
     method: "DELETE",
     mutating: true,
   });
   assert.equal(referencedDelete.response.status, 409, JSON.stringify(referencedDelete.body));
-  const withoutPhoto = { ...withPhoto, photos: [] };
+  const withoutPhoto = { ...changedPublicationData, photos: [] };
   const unlinked = await json(`/designs/${designId}`, first, {
     method: "PUT",
     mutating: true,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ schema_version: 1, expected_revision: 3, data: withoutPhoto }),
+    body: JSON.stringify({ schema_version: 1, expected_revision: 4, data: withoutPhoto }),
   });
   assert.equal(unlinked.response.status, 200);
   const removed = await json(`/assets/${goodImage.grant.asset_id}`, first, {
@@ -515,6 +795,86 @@ try {
   assert.equal(deletedDesign.response.status, 200);
   const goneDesign = await json(`/designs/${designId}`, first);
   assert.equal(goneDesign.response.status, 404);
+
+  const designForDeletion = await json("/designs", first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ template_id: "our-universe", schema_version: 1 }),
+  });
+  assert.equal(designForDeletion.response.status, 201);
+  const deletionDesignId = designForDeletion.body.design_id;
+  const deletionImage = await uploadImage(first, deletionDesignId, png);
+  assert.equal(deletionImage.uploaded.status, 204);
+  const deletionImageComplete = await json(`/assets/${deletionImage.grant.asset_id}/complete`, first, {
+    method: "POST",
+    mutating: true,
+  });
+  assert.equal(deletionImageComplete.response.status, 200);
+  const deletionDesignWithPhoto = await json(`/designs/${deletionDesignId}`, first, {
+    method: "PUT",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      schema_version: 1,
+      expected_revision: 1,
+      data: {
+        ...designForDeletion.body.data,
+        photos: [{ asset_id: deletionImage.grant.asset_id, caption: "Deletion cleanup" }],
+      },
+    }),
+  });
+  assert.equal(deletionDesignWithPhoto.response.status, 200);
+  const deletionOrderId = seedPaidOrder(ownerEmail, deletionDesignId, 2);
+  const deletionPublication = await json("/publications", first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      order_id: deletionOrderId,
+      expected_revision: 2,
+      asset_consents: [{
+        asset_id: deletionImage.grant.asset_id,
+        consent_version: "public-image-v1",
+      }],
+    }),
+  });
+  assert.equal(deletionPublication.response.status, 201);
+  const deletionPublicationId = deletionPublication.body.publication_id;
+  const deletionPublicationSlug = new URL(deletionPublication.body.url).pathname.split("/").at(-1);
+  const publishForDeletion = await json(`/publications/${deletionPublicationId}/publish`, first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_lifecycle_revision: 1 }),
+  });
+  assert.equal(publishForDeletion.response.status, 200);
+  const liveDeletionPublication = await json(`/publications/${deletionPublicationSlug}`, null);
+  assert.equal(liveDeletionPublication.response.status, 200);
+  const deletionPublicImagePath = liveDeletionPublication.body.data.photos[0].url;
+  assert.equal((await fetch(origin + deletionPublicImagePath)).status, 200);
+  const removedPublishedDesign = await json(`/designs/${deletionDesignId}`, first, {
+    method: "DELETE",
+    mutating: true,
+  });
+  assert.equal(removedPublishedDesign.response.status, 200);
+  assert.equal((await json(`/publications/${deletionPublicationSlug}`, null)).response.status, 404);
+  assert.equal((await fetch(origin + deletionPublicImagePath)).status, 404);
+  const deletionState = queryLocalD1(
+    `SELECT d.status AS design_status, p.status AS publication_status,
+            pa.derivative_status, pa.derivative_key, a.status AS asset_status
+       FROM designs d
+       JOIN publications p ON p.design_id = d.id
+       JOIN publication_assets pa ON pa.publication_id = p.id
+       JOIN assets a ON a.id = pa.asset_id
+      WHERE d.id = '${deletionDesignId}'`,
+  );
+  assert.equal(deletionState.length, 1);
+  assert.equal(deletionState[0].design_status, "ARCHIVED");
+  assert.equal(deletionState[0].publication_status, "REVOKED");
+  assert.equal(deletionState[0].derivative_status, "DELETED");
+  assert.equal(deletionState[0].derivative_key, null);
+  assert.equal(deletionState[0].asset_status, "DELETED");
 
   const revoked = await json("/customers/session", first, {
     method: "DELETE",

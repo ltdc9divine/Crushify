@@ -1,0 +1,17 @@
+.crushify-publication-error {
+  box-sizing: border-box;
+  min-height: 100vh;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 28px;
+  background: #100b18;
+  color: #fff0f6;
+  font: 16px/1.6 system-ui, sans-serif;
+  text-align: center;
+}
+
+.crushify-publication-error a { color: #ff9dc9; font-weight: 800; }
+.crushify-publication-error h1 { margin: 20px 0 0; font: 500 2rem Georgia, serif; }
+.crushify-publication-error p { max-width: 48ch; color: #d3c3d0; }

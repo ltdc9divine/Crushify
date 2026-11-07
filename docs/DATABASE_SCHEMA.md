@@ -1,6 +1,6 @@
 # Crushify Database Schema
 
-**Status:** SQLite schema contract shared by the current Cloudflare D1 backend and the staged Turso/libSQL target. Migrations `0001`–`0004` are applied to local Wrangler D1 and an ephemeral Turso/libSQL file database by tests; no persistent or remote Turso database has been migrated.
+**Status:** SQLite schema contract shared by the current Cloudflare D1 backend and the staged Turso/libSQL target. Migrations `0001`–`0007` are applied to local Wrangler D1 by integration tests and an ephemeral Turso/libSQL file database by tests; no persistent or remote database has been migrated.
 **Schema baseline:** `schema_migrations` starts at version `1`; each later migration is immutable and transactional where D1 supports it.
 
 **Implementation note:** `migrations/0001_initial_schema.sql` is the baseline; `0002_auth_previews_and_uploads.sql` adds local authentication, preview, upload, rate-limit, and Our Universe v1 seed; `0003_local_test_payments.sql` adds the empty price catalog and payment-review/webhook fields; `0004_payment_webhook_recovery.sql` adds bounded-recovery metadata for verified webhook events. Business services use a provider-neutral database interface. D1-specific calls remain within the Cloudflare Worker boundary and D1 adapter. `npm run db:migrate:turso` applies migrations with SHA-256 checksums and a foreign-key check. No remote Turso migration or D1 data transfer has occurred. Treat applied migrations as immutable.
@@ -286,3 +286,13 @@ Migrations `0003_local_test_payments.sql` and `0004_payment_webhook_recovery.sql
 - Migration 0004 adds a processing-attempt count/time, provider transaction ID, linked order reference, expected and actual integer amount, plus an index for finding unresolved `RECEIVED` events. The bounded internal recovery service retries these events; no public recovery endpoint or scheduled runner is configured.
 
 The local self-service order path snapshots the active template price and draft revision into the existing order/item/payment tables. Tests insert a clearly synthetic VND 50,000 price into disposable D1/Turso databases only. Migrations 0003–0004 insert no catalog rows, do not alter existing customer records, and have not been applied to remote D1/Turso.
+
+## 9. Local-only publication and delivery schema
+
+Migration `0005_publication_delivery.sql` adds the local Phase 6 publication model. It rebuilds the earlier `publications` table to add the owning design/order, pinned template/schema/renderer versions, immutable snapshot JSON, status, lifecycle revision, optional expiry, and publication timestamps. Legacy rows are preserved as `UNPUBLISHED` with no public slug, empty snapshots, and renderer version `unsupported`; they cannot be served by the new renderer.
+
+`publications.slug_hash` stores the hash used for public-route lookup; the separate random `slug` value is also retained in D1 so the owner dashboard can reconstruct the recipient URL. Treat the D1 field and backups as bearer-link secrets and restrict access accordingly. A partial unique index allows one reissuable publication per design, and indexes cover design/status and expiry lookups. Publication creation links to the paid order; the runtime additionally rechecks the order item, payment, processed webhook event, amount/currency, owner, design revision, and active template/version before publish and public reads.
+
+`publication_assets` records per-publication, per-asset consent and derivative lifecycle (`PENDING`, `READY`, `CLEANUP_PENDING`, `DELETED`). The source `assets` object remains private. Consent withdrawal, unpublish/revoke, expiry, and design deletion deny access immediately; derivative cleanup failures remain marked for a later retry. Image bytes are never stored in D1.
+
+The migration seeds schema-v1 template/version metadata and defaults for Love Letter, Our Memories, Say Yes!, and Distance Means Nothing; Our Universe already has its registry entry. All five server validators and renderer mappings are code-owned. This migration and the publication mutation API have only been run in local test databases; do not infer staging or production readiness from local migration history.

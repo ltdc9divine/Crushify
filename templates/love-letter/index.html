@@ -2,6 +2,7 @@
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Crushify · Lá thư tình 3D</title>
+<link rel="stylesheet" href="/shared/publication-bootstrap.css">
 <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Playfair+Display:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box}
@@ -70,8 +71,11 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 </main></div>
 <div id="lb" hidden><img alt="Ảnh kỷ niệm"></div>
 
+<script src="/shared/publication-bootstrap.js"></script>
+<script src="/shared/customer-editor.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
+;(async()=>{const publicationData=await window.loadCrushifyPublication('love-letter');if(publicationData===false)return;
 const $=s=>document.querySelector(s),clamp=(v,a,b)=>Math.min(b,Math.max(a,v)),lerp=(a,b,t)=>a+(b-a)*t,rnd=(a,b)=>a+Math.random()*(b-a),ease=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
 const RM=matchMedia('(prefers-reduced-motion:reduce)').matches,Q=new URLSearchParams(location.search),mob=innerWidth<820||matchMedia('(pointer:coarse)').matches;
 const TH={
@@ -79,9 +83,10 @@ rose:{n:'Nhung hồng',bg:0x14030c,fog:0x1c0613,a:0xff4fa3,b:0xff9ccb,c:0x7b2cff
 mid:{n:'Tình yêu đêm',bg:0x040001,fog:0x090103,a:0xff2a45,b:0xff6a7d,c:0x6a0f2a,plat:0x1a0508,paper:'#2a0d14',ink:'#ffd9d9',seal:0xc40a2a,petal:[0xb3122a,0x7a0a1c,0xff2a45],star:[0xffffff,0xff9aa8,0xd1122e],frame:0xe8d6d2,ui:'#ff2a45',ui2:'#ff8095',pn:'rgba(22,3,8,.86)'},
 lav:{n:'Giấc mơ oải hương',bg:0x0c0620,fog:0x130b2e,a:0xb892ff,b:0x7fb2ff,c:0xff9fd8,plat:0x2a1c52,paper:'#f1ecff',ink:'#4a2f8a',seal:0x6a3fc4,petal:[0xc9a8ff,0xff9fd8,0x9fc4ff],star:[0xffffff,0xd9c8ff,0xa6d0ff],frame:0xf6f1ff,ui:'#b892ff',ui2:'#9fc4ff',pn:'rgba(22,12,52,.82)'},
 ivory:{n:'Ngà ấm áp',bg:0x150e07,fog:0x1d140a,a:0xe6c27a,b:0xffe3a8,c:0xffb36b,plat:0x4a3820,paper:'#fbf3e0',ink:'#6b4a1c',seal:0x9a6a1e,petal:[0xf5e1b0,0xe6c27a,0xffd9b0],star:[0xffffff,0xffe3a8,0xffcf8a],frame:0xfff8e8,ui:'#e6c27a',ui2:'#ffe3a8',pn:'rgba(36,26,12,.84)'}};
-const D={from:'Anh',to:'Em',title:'Gửi người mình thương nhất…',msg:'Cảm ơn em vì đã ở đây, vì đã làm những ngày của anh rực rỡ hơn, và vì đã yêu anh theo cách của em. Dù thế giới có rộng lớn đến đâu, anh vẫn luôn chọn em.',secret:'Em là vũ trụ của anh ♥',theme:'rose',spd:'1'};
+const D={from:'Anh',to:'Em',title:'Gửi người mình thương nhất…',msg:'Cảm ơn em vì đã ở đây, vì đã làm những ngày của anh rực rỡ hơn, và vì đã yêu anh theo cách của em. Dù thế giới có rộng lớn đến đâu, anh vẫn luôn chọn em.',secret:'Em là vũ trụ của anh ♥',theme:'rose',spd:'1',photos:[]};
 try{const d=Q.get('d');if(d)Object.assign(D,JSON.parse(decodeURIComponent(escape(atob(d)))))}catch(e){}
-let rc=Q.get('mode')==='recipient';const app=$('#app');
+if(publicationData)Object.assign(D,publicationData);
+let rc=Q.get('mode')==='recipient'||Q.has('preview');const app=$('#app');
 function setRc(v){rc=v;app.classList.toggle('rc',v);$('#exit').hidden=!(v&&Q.get('mode')!=='recipient')}
 function fb(m){$('#cv').hidden=true;const f=$('#fb');f.hidden=false;f.innerHTML='';const h=document.createElement('h2'),p=document.createElement('p'),s=document.createElement('p'),n=document.createElement('small');h.textContent=D.title||('Gửi '+D.to);p.textContent=D.msg;s.textContent=(D.from||'')+' ♥';n.textContent=m;f.append(h,p,s,n)}
 let toastT;function toast(m,ms=4500){const t=$('#toast');t.textContent=m;t.classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('on'),ms)}
@@ -194,7 +199,8 @@ const defs=[['#ff9a6b','#3b1a5a','🌅'],['#ffb3d1','#8a2a62','💞'],['#f7a1c4'
 const defPhoto=i=>{const c=document.createElement('canvas');c.width=c.height=384;const g=c.getContext('2d'),gr=g.createLinearGradient(0,0,0,384);gr.addColorStop(0,defs[i][0]);gr.addColorStop(1,defs[i][1]);g.fillStyle=gr;g.fillRect(0,0,384,384);g.font='150px serif';g.textAlign='center';g.fillText(defs[i][2],192,240);return c};
 const pols=[[-4.2,3.9,.4,-.2],[4.3,3.4,.2,.2],[-3.7,1.2,2,.15],[3.9,1.6,1.9,-.15]].map(([x,y,z,rz],i)=>{const g=new THREE.Group(),fmm=new THREE.MeshStandardMaterial({roughness:.7}),pmm=new THREE.MeshBasicMaterial(),f=new THREE.Mesh(new THREE.BoxGeometry(1.05,1.28,.03),fmm),p=new THREE.Mesh(new THREE.PlaneGeometry(.87,.87),pmm);p.position.set(0,.1,.02);f.userData=p.userData={kind:'photo',i};f.castShadow=true;g.add(f,p);g.visible=false;scene.add(g);hits.push(f,p);return{g,fmm,pmm,x,y,z,rz,s:0,ph:rnd(0,6)}});
 function syncPh(){for(let i=0;i<4;i++){PH[i]=up[i]||(DP[i]=DP[i]||defPhoto(i));const o=pols[i];if(o.pmm.map)o.pmm.map.dispose();o.pmm.map=new THREE.CanvasTexture(PH[i]);o.pmm.needsUpdate=true}
-const t=$('#thumbs');t.innerHTML='';up.forEach((c,i)=>{const im=new Image();im.src=c.toDataURL('image/jpeg',.5);im.title='Bấm để xoá ảnh này';im.onclick=()=>{up.splice(i,1);PH.length=0;syncPh()};t.appendChild(im)})}
+window.dispatchEvent(new Event('crushify:changed'));
+const t=$('#thumbs');t.innerHTML='';up.forEach((c,i)=>{const im=new Image();im.src=c.toDataURL('image/jpeg',.5);im.title='Bấm để xoá ảnh này';im.onclick=()=>{up.splice(i,1);D.photos?.splice(i,1);PH.length=0;syncPh()};t.appendChild(im)})}
 
 /* ---------- Layer 6: Crystal Heart trong glass dome ---------- */
 const cg=new THREE.Group();cg.position.set(2.5,.26,1.7);scene.add(cg);
@@ -206,7 +212,7 @@ const hr=new THREE.Mesh(new THREE.TorusGeometry(.5,.01,6,64),new THREE.MeshBasic
 cg.add(cbase,dome,heart,hg,hr);hits.push(dome,heart);
 
 /* ---------- Theme: đổi cả cảnh 3D lẫn UI ---------- */
-function applyTheme(k){const t=TH[k]||TH.rose;D.theme=k;cur=t;scene.background=C(t.bg);scene.fog.color=C(t.fog);
+function applyTheme(k){window.dispatchEvent(new Event('crushify:changed'));const t=TH[k]||TH.rose;D.theme=k;cur=t;scene.background=C(t.bg);scene.fog.color=C(t.fog);
 const st=document.documentElement.style;st.setProperty('--a',t.ui);st.setProperty('--b',t.ui2);st.setProperty('--pn',t.pn);
 l1.color.set(t.a);l2.color.set(t.c);l3.color.set(t.b);inL.color.set(t.a);pmat.color.set(t.plat);
 neonM.forEach((m,i)=>m.color.set(i%2?t.b:t.a));floor.material.color.set(t.a);
@@ -288,10 +294,10 @@ R.render(scene,camera)}
 /* ---------- UI & editor ---------- */
 const F={from:$('#f-from'),to:$('#f-to'),title:$('#f-title'),msg:$('#f-msg'),secret:$('#f-sec'),spd:$('#f-spd')};
 Object.keys(F).forEach(k=>{F[k].value=D[k]||''});
-const inp=()=>{Object.keys(F).forEach(k=>D[k]=F[k].value);$('#cnt').textContent=D.msg.length+' / 500';lay();draw(lp);drawTag()};
+const inp=()=>{Object.keys(F).forEach(k=>D[k]=F[k].value);$('#cnt').textContent=D.msg.length+' / 500';lay();draw(lp);drawTag();window.dispatchEvent(new Event('crushify:changed'))};
 Object.values(F).forEach(e=>e.addEventListener('input',inp));
 Object.entries(TH).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.style.borderColor=t.ui;b.onclick=()=>applyTheme(k);$('#themes').appendChild(b)});
-$('#up').onchange=e=>{[...e.target.files].slice(0,4).forEach(f=>{const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=c.height=512;const s=Math.min(im.width,im.height);c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,512,512);up.push(c);if(up.length>4)up.shift();PH.length=0;syncPh();URL.revokeObjectURL(im.src)};im.src=URL.createObjectURL(f)});e.target.value=''};
+$('#up').onchange=e=>{[...e.target.files].slice(0,4).forEach(f=>{const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=c.height=512;const s=Math.min(im.width,im.height);c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,512,512);up.push(c);D.photos=[];if(up.length>4)up.shift();PH.length=0;syncPh();URL.revokeObjectURL(im.src)};im.src=URL.createObjectURL(f)});e.target.value=''};
 $('#open').onclick=()=>S==='sealed'?openL():closeL();
 $('#b-reset').onclick=()=>setCam(S==='read'||S==='open'?readCam():CAMS.home);
 $('#b-zin').onclick=()=>{gl.r*=.8;lim()};$('#b-zout').onclick=()=>{gl.r*=1.25;lim()};
@@ -302,7 +308,20 @@ $('#b-copy').onclick=async()=>{const d=btoa(unescape(encodeURIComponent(JSON.str
 $('#lb').onclick=()=>$('#lb').hidden=true;addEventListener('keydown',e=>{if(e.key==='Escape')$('#lb').hidden=true});
 document.fonts&&document.fonts.load('600 40px "Dancing Script"').then(()=>document.fonts.load('italic 40px "Playfair Display"')).then(()=>{lay();draw(lp);drawTag()}).catch(()=>{});
 syncPh();applyTheme(D.theme);inp();ui();rs();raf=requestAnimationFrame(loop);
+const hydratePhotos=async()=>{if(!Array.isArray(D.photos)||!D.photos.length)return;const loaded=await Promise.all(D.photos.slice(0,4).map(photo=>new Promise(resolve=>{const image=new Image();image.onload=()=>{const canvas=document.createElement('canvas');canvas.width=canvas.height=512;const size=Math.min(image.naturalWidth,image.naturalHeight);canvas.getContext('2d').drawImage(image,(image.naturalWidth-size)/2,(image.naturalHeight-size)/2,size,size,0,0,512,512);resolve(canvas)};image.onerror=()=>resolve(null);image.src=photo.url||''})));up.splice(0,up.length,...loaded.filter(Boolean));syncPh()};
+void hydratePhotos();
+let customerSchemaVersion=2;
+window.registerCrushifyCustomerEditor({
+templateId:'love-letter',schemaVersion:2,supportedSchemaVersions:[1,2],
+setSchemaVersion(version){customerSchemaVersion=version;$('#up').disabled=version!==2},
+async serialize(upload){const data={from:D.from,to:D.to,title:D.title,msg:D.msg,secret:D.secret,theme:D.theme,spd:D.spd};
+if(customerSchemaVersion===2){const photos=[];for(let i=0;i<up.length;i++){const photo=D.photos?.[i],asset_id=photo?.asset_id||(photo?.url&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(photo.url)?photo.url:await upload(up[i].toDataURL('image/jpeg',.82)));photos.push({asset_id,caption:photo?.caption||''})}D.photos=photos;data.photos=photos}
+return data},
+async hydrate(data,assetUrl){Object.assign(D,data);for(const key of Object.keys(F))F[key].value=D[key]??'';$('#up').disabled=customerSchemaVersion!==2;$('#cnt').textContent=D.msg.length+' / 500';lay();draw(lp);drawTag();applyTheme(D.theme);
+const photos=Array.isArray(data.photos)?data.photos:[];const urls=await Promise.all(photos.map(photo=>assetUrl(photo.asset_id||photo.url)));D.photos=photos.map((photo,index)=>({...photo,url:urls[index]}));await hydratePhotos();syncPh()}
+});
 window.__love={get S(){return S},openL,closeL,crystal,pick:click};
 addEventListener('pagehide',()=>{cancelAnimationFrame(raf);ro.disconnect();scene.traverse(o=>{o.geometry&&o.geometry.dispose();[].concat(o.material||[]).forEach(m=>{m.map&&m.map.dispose();m.dispose()})});envRT&&envRT.dispose();R.dispose()});
 }
+})();
 </script></body></html>

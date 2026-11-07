@@ -25,6 +25,7 @@ export class R2StorageAdapter implements Storage {
   }
 
   async get(objectKey: string): Promise<StorageObject | null> {
+    validateStorageKey(objectKey);
     const object = await this.bucket.get(objectKey);
     if (!object) return null;
     return {
@@ -36,17 +37,60 @@ export class R2StorageAdapter implements Storage {
   }
 
   async delete(objectKey: string): Promise<void> {
+    validateStorageKey(objectKey);
     await this.bucket.delete(objectKey);
   }
 
   async privateAssetUrl(): Promise<null> {
     return null;
   }
+
+  async createPublishedDerivative(sourceKey: string, derivativeKey: string): Promise<void> {
+    validateStorageKey(sourceKey);
+    validatePublishedStorageKey(derivativeKey);
+    const source = await this.bucket.get(sourceKey);
+    if (!source) throw new Error("Private source asset is unavailable");
+    const contentType = source.httpMetadata?.contentType;
+    if (contentType !== "image/png" && contentType !== "image/jpeg") {
+      throw new Error("Private source asset has an unsupported media type");
+    }
+    const bytes = await source.arrayBuffer();
+    if (bytes.byteLength !== source.size || bytes.byteLength < 1 || bytes.byteLength > MAX_IMAGE_BYTES) {
+      throw new Error("Private source asset has an invalid size");
+    }
+    await this.bucket.put(derivativeKey, bytes, {
+      httpMetadata: { contentType, cacheControl: "private, no-store" },
+      customMetadata: { publishedDerivative: "true" },
+    });
+  }
+
+  async getPublishedDerivative(derivativeKey: string): Promise<StorageObject | null> {
+    validatePublishedStorageKey(derivativeKey);
+    const object = await this.bucket.get(derivativeKey);
+    if (!object) return null;
+    return {
+      size: object.size,
+      contentType: object.httpMetadata?.contentType ?? "",
+      body: object.body,
+      arrayBuffer: () => object.arrayBuffer(),
+    };
+  }
+
+  async deletePublishedDerivative(derivativeKey: string): Promise<void> {
+    validatePublishedStorageKey(derivativeKey);
+    await this.bucket.delete(derivativeKey);
+  }
 }
 
 export function validateStorageKey(objectKey: string): void {
   if (!/^private\/[A-Za-z0-9_-]{32,64}(?:-(?:png|jpg)|\.(?:png|jpg))$/.test(objectKey)) {
     throw new TypeError("Storage object key is not a server-generated private key");
+  }
+}
+
+export function validatePublishedStorageKey(objectKey: string): void {
+  if (!/^published\/[A-Za-z0-9_-]{32,64}-(?:png|jpg)$/.test(objectKey)) {
+    throw new TypeError("Storage object key is not a server-generated published derivative key");
   }
 }
 

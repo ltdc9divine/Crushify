@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 
 const TEST_AMOUNT_VND = 50_000;
+const TEST_STORAGE_AMOUNT_VND = 1_000;
+const TEST_TOTAL_VND = TEST_AMOUNT_VND + TEST_STORAGE_AMOUNT_VND;
 
 function signedHeaders(secret, rawBody, timestamp = Math.floor(Date.now() / 1000)) {
   const bodyBytes = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody);
@@ -29,6 +31,9 @@ export async function runPaymentContract({
   restoreOrderPayment,
   inspectWebhookOutcomes,
   inspectWebhookEvent,
+  setPublicationExpiry,
+  deactivateTemplatePrice,
+  inspectEntitlement,
   expectedMode = "sepay-test",
   label,
 }) {
@@ -43,7 +48,12 @@ export async function runPaymentContract({
         "Content-Type": "application/json",
         "Idempotency-Key": key,
       },
-      body: JSON.stringify({ design_id: id, ...extra }),
+      body: JSON.stringify({
+        design_id: id,
+        storage_plan_id: "1-month",
+        asset_consents: [],
+        ...extra,
+      }),
     },
   );
   const unpriced = await createRequest(`unpriced-${randomUUID()}`);
@@ -53,7 +63,7 @@ export async function runPaymentContract({
 
   const unauthorized = await request("/orders", null, {
     method: "POST",
-    json: { design_id: designId },
+    json: { design_id: designId, storage_plan_id: "1-month", asset_consents: [] },
   });
   assert.equal(unauthorized.response.status, 401, `${label}: order requires authentication`);
 
@@ -62,10 +72,16 @@ export async function runPaymentContract({
 
   const created = await createRequest();
   assert.equal(created.response.status, 201, `${label}: create test order`);
-  assert.equal(created.body.total_minor, TEST_AMOUNT_VND, `${label}: server-side price snapshot`);
+  assert.equal(created.body.total_minor, TEST_TOTAL_VND, `${label}: server-side price snapshot`);
   assert.equal(created.body.currency, "VND");
   assert.equal(created.body.status, "AWAITING_PAYMENT");
   assert.equal(created.body.payment.status, "PENDING");
+  assert.deepEqual(created.body.storage_plan, {
+    id: "1-month",
+    title: "1 tháng",
+    duration_months: 1,
+    lifetime: false,
+  });
   if (expectedMode === "mock") {
     assert.equal(created.body.payment.qr_url, null, `${label}: mock mode never presents a bank QR`);
     assert.equal(created.body.payment.instructions, null, `${label}: mock mode has no bank instructions`);
@@ -77,7 +93,7 @@ export async function runPaymentContract({
       bank_code: "MB",
       bank_account: receivingAccount,
       account_name: "Crushify Test",
-      amount_minor: TEST_AMOUNT_VND,
+      amount_minor: TEST_TOTAL_VND,
       reference: created.body.payment.reference,
       qr_url: created.body.payment.qr_url,
     });
@@ -122,13 +138,17 @@ export async function runPaymentContract({
         "Content-Type": "application/json",
         "Idempotency-Key": `cross-owner-${randomUUID()}`,
       },
-      body: JSON.stringify({ design_id: designId }),
+      body: JSON.stringify({
+        design_id: designId,
+        storage_plan_id: "1-month",
+        asset_consents: [],
+      }),
     });
     assert.equal(crossOwnerCreate.response.status, 404, `${label}: another customer cannot order an owned draft`);
   }
 
   const invalidBody = JSON.stringify({ id: 880001, accountNumber: receivingAccount, code: created.body.payment.reference,
-    transferType: "in", transferAmount: TEST_AMOUNT_VND });
+    transferType: "in", transferAmount: created.body.total_minor });
   const invalidSignature = await request("/payments/sepay/webhook", null, {
     method: "POST",
     headers: {
@@ -145,7 +165,7 @@ export async function runPaymentContract({
     body: invalidBody,
   });
   assert.equal(missingSignature.response.status, 401, `${label}: reject missing signature`);
-  const futureHeaders = signedHeaders(webhookSecret, invalidBody, Math.floor(Date.now() / 1000) + 301);
+  const futureHeaders = signedHeaders(webhookSecret, invalidBody, Math.floor(Date.now() / 1000) + 302);
   const future = await request("/payments/sepay/webhook", null, {
     method: "POST",
     headers: futureHeaders,
@@ -179,7 +199,7 @@ export async function runPaymentContract({
     accountNumber: receivingAccount,
     code: created.body.payment.reference,
     transferType: "in",
-    transferAmount: TEST_AMOUNT_VND,
+    transferAmount: created.body.total_minor,
   });
   const validHeaders = signedHeaders(webhookSecret, validPayload);
   const concurrentDeliveries = await Promise.all([
@@ -198,7 +218,8 @@ export async function runPaymentContract({
     `${label}: concurrent duplicate webhook is acknowledged idempotently`);
   const paid = await request(`/orders/${created.body.order_id}/status`, owner);
   assert.equal(paid.response.status, 200);
-  assert.equal(paid.body.status, "PAID", `${label}: signed exact transfer marks order paid`);
+  assert.equal(paid.body.status, "FULFILLED", `${label}: verified payment and publication complete fulfillment`);
+  assert.equal(paid.body.fulfillment_status, "COMPLETED");
   assert.equal(paid.body.payment.status, "SUCCEEDED");
   const replay = await request("/payments/sepay/webhook", null, {
     method: "POST",
@@ -207,7 +228,7 @@ export async function runPaymentContract({
   });
   assert.equal(replay.response.status, 200, `${label}: provider retry is acknowledged`);
   const stillPaid = await request(`/orders/${created.body.order_id}/status`, owner);
-  assert.equal(stillPaid.body.status, "PAID", `${label}: replay does not apply the payment twice`);
+  assert.equal(stillPaid.body.status, "FULFILLED", `${label}: replay does not apply the payment twice`);
 
   const mismatchOrder = await createRequest(`mismatch-${randomUUID()}`);
   assert.equal(mismatchOrder.response.status, 201);
@@ -217,7 +238,7 @@ export async function runPaymentContract({
     accountNumber: receivingAccount,
     code: mismatchOrder.body.payment.reference,
     transferType: "in",
-    transferAmount: TEST_AMOUNT_VND - 1,
+    transferAmount: mismatchOrder.body.total_minor - 1,
   });
   const mismatch = await request("/payments/sepay/webhook", null, {
     method: "POST",
@@ -231,8 +252,8 @@ export async function runPaymentContract({
   if (inspectWebhookEvent) {
     const mismatchEvent = await inspectWebhookEvent(mismatchTransactionId);
     assert.equal(mismatchEvent.outcome, "MANUAL_REVIEW");
-    assert.equal(mismatchEvent.expected_amount_minor, TEST_AMOUNT_VND);
-    assert.equal(mismatchEvent.actual_amount_minor, TEST_AMOUNT_VND - 1);
+    assert.equal(mismatchEvent.expected_amount_minor, mismatchOrder.body.total_minor);
+    assert.equal(mismatchEvent.actual_amount_minor, mismatchOrder.body.total_minor - 1);
     assert.equal(mismatchEvent.provider_transaction_id, mismatchTransactionId);
     assert.ok(mismatchEvent.processing_attempts >= 1);
   }
@@ -243,7 +264,7 @@ export async function runPaymentContract({
     accountNumber: "0000000001",
     code: wrongAccountOrder.body.payment.reference,
     transferType: "in",
-    transferAmount: TEST_AMOUNT_VND,
+    transferAmount: wrongAccountOrder.body.total_minor,
   });
   const wrongAccount = await request("/payments/sepay/webhook", null, {
     method: "POST",
@@ -260,7 +281,7 @@ export async function runPaymentContract({
     accountNumber: receivingAccount,
     code: overpaymentOrder.body.payment.reference,
     transferType: "in",
-    transferAmount: TEST_AMOUNT_VND + 1,
+    transferAmount: overpaymentOrder.body.total_minor + 1,
   });
   const overpayment = await request("/payments/sepay/webhook", null, {
     method: "POST",
@@ -281,7 +302,7 @@ export async function runPaymentContract({
       accountNumber: receivingAccount,
       code: competingOrder.body.payment.reference,
       transferType: "in",
-      transferAmount: TEST_AMOUNT_VND,
+      transferAmount: competingOrder.body.total_minor,
     });
     return request("/payments/sepay/webhook", null, {
       method: "POST",
@@ -291,8 +312,8 @@ export async function runPaymentContract({
   }));
   assert.deepEqual(competingDeliveries.map((item) => item.response.status), [200, 200]);
   const competingStatus = await request(`/orders/${competingOrder.body.order_id}/status`, owner);
-  assert.equal(competingStatus.body.status, "PAID",
-    `${label}: concurrent different transactions cannot prevent the first payment`);
+  assert.equal(competingStatus.body.status, "FULFILLED",
+    `${label}: concurrent different transactions cannot prevent verified fulfillment`);
   if (inspectWebhookOutcomes) {
     const outcomes = await inspectWebhookOutcomes(transactionIds.map(String));
     assert.deepEqual(outcomes.sort(), ["MANUAL_REVIEW", "PROCESSED"],
@@ -304,7 +325,7 @@ export async function runPaymentContract({
     accountNumber: receivingAccount,
     code: duplicateOrder.body.payment.reference,
     transferType: "in",
-    transferAmount: TEST_AMOUNT_VND,
+    transferAmount: duplicateOrder.body.total_minor,
   });
   const collision = await request("/payments/sepay/webhook", null, {
     method: "POST",
@@ -326,7 +347,7 @@ export async function runPaymentContract({
     accountNumber: receivingAccount,
     code: expiredOrder.body.payment.reference,
     transferType: "in",
-    transferAmount: TEST_AMOUNT_VND,
+    transferAmount: expiredOrder.body.total_minor,
   });
   const late = await request("/payments/sepay/webhook", null, {
     method: "POST",
@@ -345,7 +366,7 @@ export async function runPaymentContract({
       accountNumber: receivingAccount,
       code: cancelledOrder.body.payment.reference,
       transferType: "in",
-      transferAmount: TEST_AMOUNT_VND,
+      transferAmount: cancelledOrder.body.total_minor,
     });
     const cancelledWebhook = await request("/payments/sepay/webhook", null, {
       method: "POST",
@@ -366,7 +387,7 @@ export async function runPaymentContract({
       accountNumber: receivingAccount,
       code: recoveryOrder.body.payment.reference,
       transferType: "in",
-      transferAmount: TEST_AMOUNT_VND,
+      transferAmount: recoveryOrder.body.total_minor,
     });
     await failOrderPayment(recoveryOrder.body.order_id);
     const failedProcessing = await request("/payments/sepay/webhook", null, {
@@ -389,7 +410,7 @@ export async function runPaymentContract({
     });
     assert.equal(recovered.response.status, 200);
     const recoveredStatus = await request(`/orders/${recoveryOrder.body.order_id}/status`, owner);
-    assert.equal(recoveredStatus.body.status, "PAID",
+    assert.equal(recoveredStatus.body.status, "FULFILLED",
       `${label}: provider retry recovers an event persisted before a failed transaction`);
     const recoveredEvent = await inspectWebhookEvent(recoveryTransactionId);
     assert.equal(recoveredEvent.outcome, "PROCESSED");
@@ -402,7 +423,7 @@ export async function runPaymentContract({
     accountNumber: receivingAccount,
     code: outgoingOrder.body.payment.reference,
     transferType: "out",
-    transferAmount: TEST_AMOUNT_VND,
+    transferAmount: outgoingOrder.body.total_minor,
   });
   const outgoing = await request("/payments/sepay/webhook", null, {
     method: "POST",
@@ -418,7 +439,7 @@ export async function runPaymentContract({
     accountNumber: receivingAccount,
     code: "CRFNOTANORDER",
     transferType: "in",
-    transferAmount: TEST_AMOUNT_VND,
+    transferAmount: TEST_TOTAL_VND,
   });
   const unmatched = await request("/payments/sepay/webhook", null, {
     method: "POST",
@@ -434,4 +455,173 @@ export async function runPaymentContract({
     body: malformedPayload,
   });
   assert.equal(malformed.response.status, 200, `${label}: signed malformed payload is retained for review`);
+
+  if (setPublicationExpiry && deactivateTemplatePrice && inspectEntitlement) {
+    const websites = await request("/publications", owner);
+    assert.equal(websites.response.status, 200, `${label}: load owned publication for renewal tests`);
+    const website = websites.body.websites.find((item) => item.design_id === designId);
+    assert.ok(website?.publication_id, `${label}: initial paid order creates a publication`);
+    const publication = await request(`/publications/${website.publication_id}`, owner);
+    assert.equal(publication.response.status, 200);
+    const originalUrl = publication.body.url;
+    await deactivateTemplatePrice();
+    await setPublicationExpiry(website.publication_id, "2099-01-31T12:00:00.000Z");
+
+    const submitRenewal = (planId, idempotencyKey = randomUUID()) => request("/orders", owner, {
+      method: "POST",
+      mutating: true,
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `renewal-${idempotencyKey}`,
+      },
+      body: JSON.stringify({
+        design_id: designId,
+        renewal_publication_id: website.publication_id,
+        storage_plan_id: planId,
+        asset_consents: [],
+      }),
+    });
+    const addMonths = (value, months) => {
+      const start = new Date(value);
+      const day = start.getUTCDate();
+      start.setUTCDate(1);
+      start.setUTCMonth(start.getUTCMonth() + months);
+      const lastDay = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0)).getUTCDate();
+      start.setUTCDate(Math.min(day, lastDay));
+      return start.toISOString();
+    };
+    let transactionSequence = 0;
+    const makeRenewalPayment = (order) => {
+      const transactionId = String(Date.now() * 100 + ++transactionSequence);
+      const payload = JSON.stringify({
+        id: transactionId,
+        accountNumber: receivingAccount,
+        code: order.body.payment.reference,
+        transferType: "in",
+        transferAmount: order.body.total_minor,
+      });
+      const options = {
+        method: "POST",
+        headers: signedHeaders(webhookSecret, payload),
+        body: payload,
+      };
+      return options;
+    };
+    const confirmRenewal = async (order) => {
+      const options = makeRenewalPayment(order);
+      const [firstDelivery, duplicateDelivery] = await Promise.all([
+        request("/payments/sepay/webhook", null, options),
+        request("/payments/sepay/webhook", null, options),
+      ]);
+      assert.deepEqual(
+        [firstDelivery.response.status, duplicateDelivery.response.status].sort(),
+        [200, 200],
+        `${label}: duplicate renewal webhook delivery is acknowledged`,
+      );
+      const status = await request(`/orders/${order.body.order_id}/status`, owner);
+      assert.equal(status.body.status, "FULFILLED", `${label}: renewal fulfillment completes`);
+      return { options };
+    };
+
+    const concurrentKey = randomUUID();
+    const [renewalA, renewalB] = await Promise.all([
+      submitRenewal("1-month", concurrentKey),
+      submitRenewal("1-month", concurrentKey),
+    ]);
+    assert.ok([200, 201].includes(renewalA.response.status));
+    assert.ok([200, 201].includes(renewalB.response.status));
+    assert.equal(renewalA.body.order_id, renewalB.body.order_id,
+      `${label}: concurrent renewal requests with one idempotency key share one order`);
+    assert.equal(renewalA.body.total_minor, TEST_STORAGE_AMOUNT_VND,
+      `${label}: renewal uses only the server-side storage price`);
+
+    let expectedExpiry = "2099-01-31T12:00:00.000Z";
+    const concurrentRenewals = await Promise.all([
+      submitRenewal("1-month"),
+      submitRenewal("1-month"),
+    ]);
+    assert.ok(concurrentRenewals.every((renewal) => renewal.response.status === 201),
+      `${label}: distinct concurrent renewal orders can be created`);
+    assert.notEqual(concurrentRenewals[0].body.order_id, concurrentRenewals[1].body.order_id);
+    const concurrentResults = await Promise.all(concurrentRenewals.map((order) =>
+      request("/payments/sepay/webhook", null, makeRenewalPayment(order))));
+    assert.ok(concurrentResults.every((result) => result.response.status === 200),
+      `${label}: concurrent paid renewal webhooks are acknowledged`);
+    for (const order of concurrentRenewals) {
+      const status = await request(`/orders/${order.body.order_id}/status`, owner);
+      assert.equal(status.body.status, "FULFILLED",
+        `${label}: distinct concurrent renewal orders both fulfill`);
+    }
+    const concurrentEntitlements = await Promise.all(concurrentRenewals.map((order) =>
+      inspectEntitlement(order.body.order_id)));
+    const orderedEntitlements = concurrentEntitlements.sort((left, right) =>
+      left.starts_at.localeCompare(right.starts_at));
+    const firstConcurrentExpiry = addMonths(expectedExpiry, 1);
+    expectedExpiry = addMonths(firstConcurrentExpiry, 1);
+    assert.equal(orderedEntitlements[0].previous_expires_at, "2099-01-31T12:00:00.000Z");
+    assert.equal(orderedEntitlements[0].expires_at, firstConcurrentExpiry);
+    assert.equal(orderedEntitlements[1].previous_expires_at, firstConcurrentExpiry);
+    assert.equal(orderedEntitlements[1].expires_at, expectedExpiry,
+      `${label}: concurrent renewals do not lose an extension`);
+
+    const firstRenewal = await confirmRenewal(renewalA);
+    let firstEntitlement = await inspectEntitlement(renewalA.body.order_id);
+    assert.equal(firstEntitlement.starts_at, expectedExpiry);
+    assert.equal(firstEntitlement.previous_expires_at, expectedExpiry);
+    expectedExpiry = addMonths(expectedExpiry, 1);
+    assert.equal(firstEntitlement.expires_at, expectedExpiry,
+      `${label}: one-month renewal uses calendar-month arithmetic at month end`);
+
+    await request("/payments/sepay/webhook", null, firstRenewal.options);
+    firstEntitlement = await inspectEntitlement(renewalA.body.order_id);
+    assert.equal(firstEntitlement.expires_at, expectedExpiry,
+      `${label}: replaying a processed renewal webhook does not extend twice`);
+
+    for (const [planId, months] of [["3-months", 3], ["6-months", 6], ["12-months", 12]]) {
+      const renewal = await submitRenewal(planId);
+      assert.equal(renewal.response.status, 201, `${label}: create ${planId} extension`);
+      assert.equal(renewal.body.total_minor, TEST_STORAGE_AMOUNT_VND);
+      await confirmRenewal(renewal);
+      const entitlement = await inspectEntitlement(renewal.body.order_id);
+      assert.equal(entitlement.previous_expires_at, expectedExpiry);
+      assert.equal(entitlement.starts_at, expectedExpiry);
+      expectedExpiry = addMonths(expectedExpiry, months);
+      assert.equal(entitlement.expires_at, expectedExpiry,
+        `${label}: ${planId} renewal extends from the existing expiry`);
+    }
+
+    const afterActiveRenewals = await request(`/publications/${website.publication_id}`, owner);
+    assert.equal(afterActiveRenewals.body.url, originalUrl, `${label}: active renewal preserves the slug`);
+    assert.equal(afterActiveRenewals.body.expires_at, expectedExpiry);
+
+    await setPublicationExpiry(website.publication_id, "2000-01-01T00:00:00.000Z");
+    const slug = new URL(originalUrl).pathname.split("/").at(-1);
+    const expiredRead = await request(`/publications/${slug}`);
+    assert.equal(expiredRead.response.status, 410, `${label}: expired recipient content is denied`);
+    const expiredRenewal = await submitRenewal("3-months");
+    assert.equal(expiredRenewal.response.status, 201);
+    await confirmRenewal(expiredRenewal);
+    const expiredEntitlement = await inspectEntitlement(expiredRenewal.body.order_id);
+    assert.equal(expiredEntitlement.starts_at, expiredEntitlement.activated_at,
+      `${label}: renewal after expiry starts when payment is confirmed`);
+    assert.equal(expiredEntitlement.previous_expires_at, "2000-01-01T00:00:00.000Z");
+    assert.equal(expiredEntitlement.expires_at, addMonths(expiredEntitlement.activated_at, 3));
+    const restored = await request(`/publications/${slug}`);
+    assert.equal(restored.response.status, 200, `${label}: verified renewal restores the stable URL`);
+    const stableUrl = await request(`/publications/${website.publication_id}`, owner);
+    assert.equal(stableUrl.body.url, originalUrl);
+
+    const lifetimeOrder = await submitRenewal("lifetime");
+    assert.equal(lifetimeOrder.response.status, 201);
+    await confirmRenewal(lifetimeOrder);
+    const lifetimeEntitlement = await inspectEntitlement(lifetimeOrder.body.order_id);
+    assert.equal(lifetimeEntitlement.status, "LIFETIME");
+    assert.equal(lifetimeEntitlement.expires_at, null);
+    const lifetimePublication = await request(`/publications/${website.publication_id}`, owner);
+    assert.equal(lifetimePublication.body.expires_at, null);
+    assert.equal(lifetimePublication.body.url, originalUrl);
+    const unnecessaryRenewal = await submitRenewal("1-month");
+    assert.equal(unnecessaryRenewal.response.status, 409);
+    assert.equal(unnecessaryRenewal.body.error.code, "LIFETIME_ACTIVE");
+  }
 }
