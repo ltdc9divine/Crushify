@@ -33,6 +33,8 @@ export interface VercelEnvironment {
   LOCAL_TEST_MODE?: string;
   VERCEL_ENV?: string;
   VERCEL_URL?: string;
+  VERCEL_BRANCH_URL?: string;
+  VERCEL_PROJECT_PRODUCTION_URL?: string;
   VERCEL_PROJECT_ID?: string;
   CRON_SECRET?: string;
   STAGING_OPS_TOKEN?: string;
@@ -236,7 +238,7 @@ export function createVercelApiHandler(
 
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
-    if (url.pathname === "/api/ops/staging") {
+    if (url.pathname === "/api/staging-ops") {
       return handleStagingOperationsRequest(request, environment, {
         runOperation: dependencies.runStagingOperation,
       });

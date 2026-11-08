@@ -73,16 +73,23 @@ function fail(name: string): StagingOperationCheck {
   return { name, status: "FAIL" };
 }
 
-function validHttpsVercelOrigin(value: string | undefined, vercelUrl: string | undefined): boolean {
+function validHttpsVercelOrigin(
+  value: string | undefined,
+  allowedHosts: Array<string | undefined>,
+): boolean {
   if (!value) return false;
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || url.origin !== value ||
         !url.hostname.toLowerCase().endsWith(".vercel.app")) return false;
-    if (!vercelUrl || !/^[a-z0-9.-]+$/i.test(vercelUrl)) return false;
     const host = url.hostname.toLowerCase();
-    return host === vercelUrl.toLowerCase() ||
-      host === "crushify.vercel.app";
+    return allowedHosts.some((allowedHost) =>
+      allowedHost !== undefined &&
+      /^[a-z0-9.-]+$/i.test(allowedHost) &&
+      host === allowedHost.toLowerCase()) ||
+      host === "crushify-one.vercel.app" ||
+      host === "crushify-ltdc9divine-5816s-projects.vercel.app" ||
+      host === "crushify-git-main-ltdc9divine-5816s-projects.vercel.app";
   } catch {
     return false;
   }
@@ -118,7 +125,11 @@ export function stagingEnvironmentChecks(
         Boolean(environment.CLOUDINARY_API_SECRET?.trim())
       ? pass("CLOUDINARY_TEST_CONFIGURATION")
       : fail("CLOUDINARY_TEST_CONFIGURATION"),
-    validHttpsVercelOrigin(environment.APP_ORIGIN, environment.VERCEL_URL)
+    validHttpsVercelOrigin(environment.APP_ORIGIN, [
+      environment.VERCEL_URL,
+      environment.VERCEL_BRANCH_URL,
+      environment.VERCEL_PROJECT_PRODUCTION_URL,
+    ])
       ? pass("APP_ORIGIN")
       : fail("APP_ORIGIN"),
   ];

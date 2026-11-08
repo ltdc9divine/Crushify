@@ -2,6 +2,12 @@
   "functions": {
     "api/[...path].ts": {
       "includeFiles": "migrations/**"
+    },
+    "api/staging-ops.ts": {
+      "includeFiles": "migrations/**"
+    },
+    "api/cron/publication-lifecycle.ts": {
+      "includeFiles": "migrations/**"
     }
   },
   "rewrites": [

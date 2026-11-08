@@ -20,7 +20,8 @@ const operationToken = randomBytes(32).toString("base64url");
 const validEnvironment: VercelEnvironment = {
   VERCEL_ENV: "production",
   VERCEL_PROJECT_ID: "prj_nw874WiBWiUZlIjBzOFn6yG2CeHH",
-  VERCEL_URL: "crushify.vercel.app",
+  VERCEL_URL: "crushify-generated-deployment.vercel.app",
+  VERCEL_PROJECT_PRODUCTION_URL: "crushify-one.vercel.app",
   ENVIRONMENT: "staging",
   DATABASE_PROVIDER: "turso",
   TURSO_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
@@ -29,7 +30,7 @@ const validEnvironment: VercelEnvironment = {
   CLOUDINARY_CLOUD_NAME: "hgtcizux",
   CLOUDINARY_API_KEY: "synthetic-cloudinary-key",
   CLOUDINARY_API_SECRET: "synthetic-cloudinary-secret",
-  APP_ORIGIN: "https://crushify.vercel.app",
+  APP_ORIGIN: "https://crushify-one.vercel.app",
   STAGING_OPS_TOKEN: operationToken,
 };
 
@@ -44,7 +45,7 @@ async function request(
     requestHeaders.set("Authorization", `Bearer ${operationToken}`);
   }
   requestHeaders.set("Content-Type", "application/json");
-  return handleStagingOperationsRequest(new Request("https://crushify.vercel.app/api/ops/staging", {
+  return handleStagingOperationsRequest(new Request("https://crushify-one.vercel.app/api/staging-ops", {
     method: "POST",
     headers: requestHeaders,
     body: JSON.stringify(body),
@@ -105,7 +106,7 @@ describe("restricted Vercel staging operations endpoint", () => {
         return { checks: [{ name: "TEST_OPERATION", status: "PASS" as const }] };
       },
     };
-    const url = "https://crushify.vercel.app/api/ops/staging";
+    const url = "https://crushify-one.vercel.app/api/staging-ops";
     const get = await handleStagingOperationsRequest(new Request(url), validEnvironment, dependencies);
     assert.equal(get.status, 405);
     assert.equal(get.headers.get("cache-control"), "no-store");
@@ -139,7 +140,7 @@ describe("restricted Vercel staging operations endpoint", () => {
 
   it("accepts only fixed operations and exact request shapes", async () => {
     const wrongContentType = await handleStagingOperationsRequest(new Request(
-      "https://crushify.vercel.app/api/ops/staging",
+      "https://crushify-one.vercel.app/api/staging-ops",
       {
         method: "POST",
         headers: { Authorization: `******`, "Content-Type": "text/plain" },
@@ -183,6 +184,7 @@ describe("restricted Vercel staging operations endpoint", () => {
       { ...validEnvironment, VERCEL_PROJECT_ID: "prj_other" },
       { ...validEnvironment, TURSO_DATABASE_URL: "libsql://other-db-test-org.turso.io" },
       { ...validEnvironment, CLOUDINARY_CLOUD_NAME: "another-cloud" },
+      { ...validEnvironment, APP_ORIGIN: "https://another-project.vercel.app" },
     ]) {
       let called = false;
       const response = await request(environment, {
@@ -222,7 +224,7 @@ describe("restricted Vercel staging operations endpoint", () => {
         return { checks: [{ name: operation === "status" ? "STATUS" : "OTHER", status: "PASS" }] };
       },
     });
-    const response = await handler(new Request("https://crushify.vercel.app/api/ops/staging", {
+    const response = await handler(new Request("https://crushify-one.vercel.app/api/staging-ops", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${operationToken}`,
