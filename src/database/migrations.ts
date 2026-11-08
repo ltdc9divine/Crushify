@@ -13,7 +13,7 @@ interface AppliedMigration {
   checksum: string;
 }
 
-function checksum(sql: string): string {
+export function migrationChecksum(sql: string): string {
   return createHash("sha256").update(sql).digest("hex");
 }
 
@@ -73,7 +73,7 @@ export async function applyMigrations(
   for (const [index, record] of applied.entries()) {
     const migration = ordered[index];
     if (!migration || migration.version !== record.version ||
-        migration.name !== record.name || checksum(migration.sql) !== record.checksum) {
+        migration.name !== record.name || migrationChecksum(migration.sql) !== record.checksum) {
       throw new Error(`Applied migration ${record.version} does not match the migration files`);
     }
   }
@@ -92,7 +92,7 @@ export async function applyMigrations(
         args: [
           migration.version,
           migration.name,
-          checksum(migration.sql),
+          migrationChecksum(migration.sql),
           new Date().toISOString(),
         ],
       });

@@ -13,7 +13,11 @@
     "db:migrate:turso": "node --experimental-strip-types scripts/migrate-turso.ts",
     "test:integration": "node tests/integration.mjs",
     "db:apply:staging": "wrangler d1 migrations apply crushify-staging-db --remote --config wrangler.staging.jsonc",
-    "deploy:staging": "wrangler deploy --config wrangler.staging.jsonc"
+    "deploy:staging": "wrangler deploy --config wrangler.staging.jsonc",
+    "db:preflight:turso:staging": "node --experimental-strip-types scripts/staging-turso.ts --preflight",
+    "db:migrate:turso:staging": "node --experimental-strip-types scripts/staging-turso.ts --migrate",
+    "smoke:turso:staging": "node --experimental-strip-types scripts/smoke-turso-staging.ts",
+    "smoke:cloudinary:staging": "node --experimental-strip-types scripts/smoke-cloudinary-staging.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261104.1",

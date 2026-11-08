@@ -5,6 +5,7 @@ import type { Database } from "../database.ts";
 import type { Storage } from "../storage.ts";
 import { CloudinaryStorageAdapter } from "../storage/cloudinary.ts";
 import { MemoryStorageAdapter } from "../storage/mock.ts";
+import { runScheduledPublicationLifecycle } from "../scheduler.ts";
 import type { Env } from "../types.ts";
 
 export const VERCEL_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
@@ -15,6 +16,7 @@ export interface VercelEnvironment {
   DATABASE_PROVIDER?: string;
   TURSO_DATABASE_URL?: string;
   TURSO_AUTH_TOKEN?: string;
+  ENVIRONMENT?: string;
   STORAGE_PROVIDER?: string;
   CLOUDINARY_CLOUD_NAME?: string;
   CLOUDINARY_API_KEY?: string;
@@ -26,6 +28,8 @@ export interface VercelEnvironment {
   LOCAL_TEST_MODE?: string;
   VERCEL_ENV?: string;
   VERCEL_URL?: string;
+  CRON_SECRET?: string;
+  DATA_RETENTION_DAYS?: string;
   PAYMENT_MODE?: string;
   SEPAY_WEBHOOK_SECRET?: string;
   SEPAY_BANK_CODE?: string;
@@ -72,9 +76,29 @@ function originFromEnvironment(environment: VercelEnvironment): string | null {
 }
 
 function runtimeEnvironment(environment: VercelEnvironment): Env["ENVIRONMENT"] {
+  if (environment.ENVIRONMENT === "staging" &&
+      (environment.VERCEL_ENV === "preview" || environment.VERCEL_ENV === "production")) {
+    return "staging";
+  }
+  if (environment.ENVIRONMENT === "local" && environment.VERCEL_ENV === "development") {
+    return "local";
+  }
+  if (environment.ENVIRONMENT === "production" && environment.VERCEL_ENV === "production") {
+    return "production";
+  }
   if (environment.VERCEL_ENV === "production") return "production";
   if (environment.VERCEL_ENV === "preview") return "staging";
   return "local";
+}
+
+function validateEnvironmentOverride(environment: VercelEnvironment): boolean {
+  if (environment.ENVIRONMENT === undefined) return true;
+  if (environment.ENVIRONMENT === "staging") {
+    return environment.VERCEL_ENV === "preview" || environment.VERCEL_ENV === "production";
+  }
+  if (environment.ENVIRONMENT === "production") return environment.VERCEL_ENV === "production";
+  if (environment.ENVIRONMENT === "local") return environment.VERCEL_ENV === "development";
+  return false;
 }
 
 function corsHeaders(origin: string): Headers {
@@ -107,19 +131,30 @@ function validateDatabaseConfiguration(environment: VercelEnvironment): string |
   const url = environment.TURSO_DATABASE_URL;
   if (!url) return "DATABASE_CONFIGURATION_ERROR";
   let protocol: string;
+  let parsedUrl: URL;
   try {
-    protocol = new URL(url).protocol;
+    parsedUrl = new URL(url);
+    protocol = parsedUrl.protocol;
   } catch {
+    return "DATABASE_CONFIGURATION_ERROR";
+  }
+  if (parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
     return "DATABASE_CONFIGURATION_ERROR";
   }
   if (protocol === "file:" && environment.VERCEL_ENV !== "development") {
     return "DATABASE_CONFIGURATION_ERROR";
   }
-  if (protocol !== "file:" && !environment.TURSO_AUTH_TOKEN) {
+  if (protocol !== "file:" && !environment.TURSO_AUTH_TOKEN?.trim()) {
     return "DATABASE_CONFIGURATION_ERROR";
   }
   if (protocol !== "file:" && protocol !== "libsql:" && protocol !== "https:") {
     return "DATABASE_CONFIGURATION_ERROR";
+  }
+  if (environment.ENVIRONMENT === "staging") {
+    const hostname = parsedUrl.hostname;
+    if (protocol === "file:" || !/^crushify-staging(?:-[a-z0-9-]+)?\.turso\.io$/i.test(hostname)) {
+      return "DATABASE_CONFIGURATION_ERROR";
+    }
   }
   return null;
 }
@@ -132,7 +167,8 @@ function createStorage(
     const cloudName = environment.CLOUDINARY_CLOUD_NAME;
     const apiKey = environment.CLOUDINARY_API_KEY;
     const apiSecret = environment.CLOUDINARY_API_SECRET;
-    if (!cloudName || !apiKey || !apiSecret) {
+    if (!cloudName || !apiKey || !apiSecret ||
+        (environment.ENVIRONMENT === "staging" && cloudName !== "hgtcizux")) {
       throw new TypeError("Cloudinary configuration is incomplete");
     }
     return dependencies.createCloudinaryStorage
@@ -164,6 +200,18 @@ function safeErrorCode(error: unknown): string {
   return error instanceof Error ? error.name : "UnknownError";
 }
 
+function secureSecretMatch(provided: string | null, expected: string | undefined): boolean {
+  if (!provided || !expected || expected.length < 32) return false;
+  const left = new TextEncoder().encode(provided);
+  const right = new TextEncoder().encode(expected);
+  let difference = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    difference |= (left[index] ?? 0) ^ (right[index] ?? 0);
+  }
+  return difference === 0;
+}
+
 export function createVercelApiHandler(
   environment: VercelEnvironment,
   dependencies: VercelRuntimeDependencies = {},
@@ -176,6 +224,54 @@ export function createVercelApiHandler(
 
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
+    if (url.pathname === "/api/cron/publication-lifecycle") {
+      if (request.method !== "GET") {
+        return apiError(requestId(), 405, "METHOD_NOT_ALLOWED", "Method not allowed");
+      }
+      if (!secureSecretMatch(
+        request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null,
+        environment.CRON_SECRET,
+      )) {
+        return apiError(requestId(), 401, "UNAUTHENTICATED", "Scheduled request is not authorized");
+      }
+      if (environment.ENVIRONMENT !== "staging" ||
+          !["preview", "production"].includes(environment.VERCEL_ENV ?? "")) {
+        return apiError(requestId(), 404, "NOT_FOUND", "Route not found");
+      }
+      const databaseError = validateDatabaseConfiguration(environment);
+      if (databaseError) {
+        return apiError(requestId(), 500, databaseError, "Database provider is not configured for this runtime");
+      }
+      try {
+        storage ??= createStorage(environment, dependencies);
+      } catch {
+        return apiError(requestId(), 500, "STORAGE_CONFIGURATION_ERROR", "Storage provider is not configured for this runtime");
+      }
+      if (!databasePromise) {
+        const connection = connectDatabase(environment).catch((error: unknown) => {
+          if (databasePromise === connection) databasePromise = undefined;
+          throw error;
+        });
+        databasePromise = connection;
+      }
+      try {
+        const connection = await databasePromise;
+        const result = await runScheduledPublicationLifecycle({
+          DB: connection.database,
+          STORAGE: storage,
+          ENVIRONMENT: "staging",
+          DATA_RETENTION_DAYS: environment.DATA_RETENTION_DAYS,
+        });
+        return Response.json(result, {
+          status: result.acquired ? 200 : 202,
+          headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
+        });
+      } catch (error) {
+        console.error("Vercel scheduled lifecycle failed", { code: safeErrorCode(error) });
+        return apiError(requestId(), 503, "DEPENDENCY_UNAVAILABLE", "Scheduled maintenance could not complete");
+      }
+    }
+
     const origin = originFromEnvironment(environment);
     const requestOrigin = request.headers.get("origin");
 
@@ -197,6 +293,9 @@ export function createVercelApiHandler(
 
     if (!["development", "preview", "production"].includes(environment.VERCEL_ENV ?? "") || !origin) {
       return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Application origin is not configured for this runtime");
+    }
+    if (!validateEnvironmentOverride(environment)) {
+      return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Application environment does not match the Vercel deployment");
     }
 
     const databaseError = validateDatabaseConfiguration(environment);

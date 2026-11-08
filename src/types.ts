@@ -17,6 +17,7 @@ export interface Env {
   MAIL_FROM_EMAIL?: string;
   MAILER?: Fetcher;
   MAILER_AUTH_TOKEN?: string;
+  CRON_SECRET?: string;
   APP_ORIGIN?: string;
   LOCAL_TEST_MODE?: string;
   PAYMENT_MODE?: "mock" | "sepay-test";

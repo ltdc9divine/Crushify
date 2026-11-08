@@ -7,6 +7,7 @@ const apiHandler = createVercelApiHandler(process.env);
 
 export const config = {
   api: { bodyParser: false },
+  maxDuration: 60,
 };
 
 class RequestBodyError extends Error {

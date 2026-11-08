@@ -65,15 +65,15 @@ For Vercel local development:
 3. Run `npm run db:migrate:turso` against that local file database, then run `vercel dev`. Local `mock` storage is accepted only with local test mode; do not deploy those values.
 4. The Vercel function limit is set to 4 MiB for images, below Vercel's documented 4.5 MB function request/response payload limit; the Cloudflare Worker retains its existing 5 MiB limit. The create-upload response advertises the runtime's actual limit. See [Vercel Function limits](https://vercel.com/docs/functions/limitations#request-body-size).
 
-For a Vercel Preview:
+For Vercel staging:
 
-1. Use a dedicated, non-production Turso test database and a separate Cloudinary test account/folder; Vercel serverless filesystems are ephemeral and must not be used for persistent databases.
-2. Set server-only `DATABASE_PROVIDER=turso`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `STORAGE_PROVIDER=cloudinary`, `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`.
-3. Configure `APP_ORIGIN` to the exact preview origin if using a stable alias. Otherwise the adapter derives the deployment origin from Vercel's server-provided `VERCEL_URL`. Never use browser-visible prefixes such as `NEXT_PUBLIC_` or `VITE_`.
-4. Keep `LOCAL_TEST_MODE` disabled in Preview/Production. Set an appropriate Resend test sender if magic-link email is required; the Cloudflare-only `MAILER` binding is not used by Vercel.
-5. Do not add production customer data or enable checkout. The adapter does not pass payment mode or SePay secrets in Preview/Production. Cloudinary adapter behavior is not verified against a real account.
+1. Use the dedicated non-production Turso database and Cloudinary Test cloud. Vercel serverless filesystems are ephemeral and must not be used for persistent databases.
+2. Set `ENVIRONMENT=staging` even when Vercel labels the `main` deployment as `production`; the adapter accepts this override only for Vercel Preview/Production channels. Configure server-only `DATABASE_PROVIDER=turso`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `STORAGE_PROVIDER=cloudinary`, `CLOUDINARY_CLOUD_NAME=hgtcizux`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `APP_ORIGIN`, and a random `CRON_SECRET` of at least 32 characters.
+3. Keep `LOCAL_TEST_MODE` and all payment/SePay variables disabled. The Vercel adapter does not pass payment mode or SePay secrets outside local development. Set a staging-only Resend test sender only if email is specifically required.
+4. Configure Vercel Cron's `CRON_SECRET` using the Vercel secret store; Vercel sends it as a bearer token. The lifecycle route is staging-only and rejects mismatched runtime settings. The daily cron is a repository configuration, not proof that a deployed schedule is active.
+5. Do not add production customer data, test with real users, or enable checkout. See [Vercel staging setup](./VERCEL_STAGING.md) for guarded database migration, synthetic-only smoke tests, and post-deployment checks.
 
-No `vercel.json` is required: conventional `api/` routing creates the function, and root static hosting preserves direct template paths without rewriting those routes to HTML.
+Conventional `api/` routing creates the function, and root static hosting preserves direct template paths without rewriting those routes to HTML. `vercel.json` also configures one daily lifecycle Cron at 03:00 UTC. It is not active until this repository is deployed to the Vercel project, the staging variables and `CRON_SECRET` are configured, and the first invocation is observed.
 
 ## Turso/libSQL configuration
 
@@ -83,11 +83,13 @@ Required server-side variables:
 - `TURSO_DATABASE_URL`
 - `TURSO_AUTH_TOKEN` (omit only for an isolated local `file:` database)
 
-The migration command is:
+The generic migration command is for isolated local database files:
 
 ```powershell
 npm run db:migrate:turso
 ```
+
+Do not use the generic command against a remote database. For the Vercel staging target, follow [Vercel staging setup](./VERCEL_STAGING.md), including the read-only preflight, exact Turso dashboard confirmations, and a separate explicit migration command.
 
 Before using a remote database:
 
