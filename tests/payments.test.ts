@@ -143,4 +143,55 @@ describe("SePay local-only payment safeguards", () => {
     assert.equal(response.status, 503);
     assert.equal((await response.json() as { error: { code: string } }).error.code, "PAYMENTS_DISABLED");
   });
+
+  it("allows local mock checkout without SePay webhook credentials but keeps webhook settlement disabled", async () => {
+    const unusedDatabase: Database = {
+      prepare() {
+        throw new Error("database must not be accessed");
+      },
+      async batch() {
+        throw new Error("database must not be accessed");
+      },
+    };
+    const env = {
+      DB: unusedDatabase,
+      ENVIRONMENT: "local" as const,
+      LOCAL_TEST_MODE: "true",
+      PAYMENT_MODE: "mock" as const,
+    };
+
+    const checkout = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+      env,
+    );
+    assert.equal(checkout.status, 401);
+    assert.equal((await checkout.json() as { error: { code: string } }).error.code, "UNAUTHENTICATED");
+
+    for (const path of [
+      "/api/v1/orders",
+      `/api/v1/orders/${crypto.randomUUID()}/status`,
+    ]) {
+      const response = await handleApiRequest(new Request(`https://crushify.test${path}`), env);
+      assert.equal(response.status, 401);
+      assert.equal((await response.json() as { error: { code: string } }).error.code, "UNAUTHENTICATED");
+    }
+
+    const webhook = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/payments/sepay/webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      }),
+      env,
+    );
+    assert.equal(webhook.status, 503);
+    assert.equal(
+      (await webhook.json() as { error: { code: string } }).error.code,
+      "PAYMENT_CONFIGURATION_ERROR",
+    );
+  });
 });

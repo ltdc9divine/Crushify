@@ -23,18 +23,29 @@ async function main(): Promise<void> {
   const url = process.env.TURSO_DATABASE_URL;
   if (!url) throw new Error("TURSO_DATABASE_URL is required");
 
-  if (url.startsWith("file:")) {
-    const filePath = url.startsWith("file://")
-      ? fileURLToPath(url)
-      : isAbsolute(url.slice("file:".length))
-        ? url.slice("file:".length)
-        : resolve(process.cwd(), url.slice("file:".length));
-    await mkdir(dirname(filePath), { recursive: true });
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    throw new Error("TURSO_DATABASE_URL must be a local SQLite file URL");
   }
+  if (parsedUrl.protocol !== "file:" || parsedUrl.host || parsedUrl.search || parsedUrl.hash) {
+    throw new Error("TURSO_DATABASE_URL must be a local SQLite file URL");
+  }
+  if (process.env.TURSO_AUTH_TOKEN?.trim()) {
+    throw new Error("TURSO_AUTH_TOKEN must be empty for local SQLite migrations");
+  }
+
+  const filePath = url.startsWith("file://")
+    ? fileURLToPath(parsedUrl)
+    : isAbsolute(url.slice("file:".length))
+      ? url.slice("file:".length)
+      : resolve(process.cwd(), url.slice("file:".length));
+  if (!filePath) throw new Error("TURSO_DATABASE_URL must include a local SQLite file path");
+  await mkdir(dirname(filePath), { recursive: true });
 
   const client = createClient({
     url,
-    authToken: process.env.TURSO_AUTH_TOKEN || undefined,
     intMode: "number",
   });
   try {

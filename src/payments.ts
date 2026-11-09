@@ -69,11 +69,16 @@ function isLocalPaymentEnabled(env: Env): boolean {
     (env.PAYMENT_MODE === "mock" || env.PAYMENT_MODE === "sepay-test");
 }
 
-function paymentModeError(requestId: string, env: Env): Response | null {
+function paymentModeError(
+  requestId: string,
+  env: Env,
+  requiresWebhookSecret = false,
+): Response | null {
   if (!isLocalPaymentEnabled(env)) {
     return apiError(requestId, 503, "PAYMENTS_DISABLED", "Payments are available only in local test mode");
   }
-  if (!env.SEPAY_WEBHOOK_SECRET || env.SEPAY_WEBHOOK_SECRET.length < 16) {
+  if ((requiresWebhookSecret || env.PAYMENT_MODE === "sepay-test") &&
+      (!env.SEPAY_WEBHOOK_SECRET || env.SEPAY_WEBHOOK_SECRET.length < 16)) {
     return apiError(requestId, 503, "PAYMENT_CONFIGURATION_ERROR", "Local webhook verification is not configured");
   }
   if (env.PAYMENT_MODE === "sepay-test" &&
@@ -791,7 +796,7 @@ async function handleSepayWebhook(
   env: Env,
   requestId: string,
 ): Promise<Response> {
-  const unavailable = paymentModeError(requestId, env);
+  const unavailable = paymentModeError(requestId, env, true);
   if (unavailable) return unavailable;
   const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
   if (contentType !== "application/json") {
