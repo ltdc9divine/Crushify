@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/[...path].ts": {
+      "includeFiles": "migrations/**"
+    }
+  },
   "rewrites": [
     { "source": "/p/:slug", "destination": "/p/index.html" }
   ],

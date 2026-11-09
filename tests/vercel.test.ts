@@ -39,6 +39,43 @@ function requestWithOrigin(path: string, origin: string, init: RequestInit = {})
 }
 
 describe("Vercel API runtime adapter", () => {
+  it("uses the stable project production origin when configured and rejects mismatched APP_ORIGIN", async () => {
+    const productionHost = "crushify-n3l98mrkf-ltdc9divine-5816s-projects.vercel.app";
+    const validHandler = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "https://example.turso.io",
+      TURSO_AUTH_TOKEN: "secret-token",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_API_KEY: "key",
+      CLOUDINARY_API_SECRET: "secret",
+      APP_ORIGIN: `https://${productionHost}`,
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: productionHost,
+    });
+    const validResponse = await validHandler(new Request(`https://${productionHost}/api/v1/customers/me`));
+    assert.notEqual(validResponse.status, 500);
+    assert.equal((await validResponse.text()).includes("RUNTIME_CONFIGURATION_ERROR"), false);
+
+    const mismatchedHandler = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "https://example.turso.io",
+      TURSO_AUTH_TOKEN: "secret-token",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_API_KEY: "key",
+      CLOUDINARY_API_SECRET: "secret",
+      APP_ORIGIN: "https://attacker.example",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: productionHost,
+    });
+    const mismatchedResponse = await mismatchedHandler(
+      new Request("https://attacker.example/api/v1/customers/me"),
+    );
+    assert.equal(mismatchedResponse.status, 500);
+    assert.equal((await mismatchedResponse.text()).includes("RUNTIME_CONFIGURATION_ERROR"), true);
+  });
+
   it("runs the shared API contract on a local Turso file and local mock storage", async () => {
     const directory = await mkdtemp(join(tmpdir(), "crushify-vercel-runtime-"));
     const databasePath = join(directory, "vercel.db");

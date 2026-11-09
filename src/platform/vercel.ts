@@ -1,6 +1,11 @@
 import { apiError } from "../http.ts";
 import { handleApiRequest } from "../index.ts";
 import { connectDatabaseFromEnvironment } from "../database/provider.ts";
+import {
+  handleStagingOperationsRequest,
+  type StagingOperation,
+  type StagingOperationResult,
+} from "./staging-operations.ts";
 import type { Database } from "../database.ts";
 import type { Storage } from "../storage.ts";
 import { CloudinaryStorageAdapter } from "../storage/cloudinary.ts";
@@ -28,6 +33,11 @@ export interface VercelEnvironment {
   LOCAL_TEST_MODE?: string;
   VERCEL_ENV?: string;
   VERCEL_URL?: string;
+  VERCEL_BRANCH_URL?: string;
+  VERCEL_PROJECT_ID?: string;
+  VERCEL_PROJECT_PRODUCTION_URL?: string;
+  TURSO_STAGING_TARGET?: string;
+  STAGING_OPS_TOKEN?: string;
   CRON_SECRET?: string;
   DATA_RETENTION_DAYS?: string;
   PAYMENT_MODE?: string;
@@ -46,28 +56,52 @@ export interface VercelRuntimeDependencies {
   connectDatabase?: (environment: VercelEnvironment) => Promise<DatabaseConnection>;
   createCloudinaryStorage?: (environment: VercelEnvironment) => Storage;
   createMockStorage?: () => Storage;
+  runStagingOperation?: (
+    environment: VercelEnvironment,
+    operation: StagingOperation,
+    preflightId: string | null,
+  ) => Promise<Omit<StagingOperationResult, "operation_id">>;
 }
 
 function requestId(): string {
   return crypto.randomUUID();
 }
 
-function originFromEnvironment(environment: VercelEnvironment): string | null {
-  if (environment.APP_ORIGIN) {
-    try {
-      const parsed = new URL(environment.APP_ORIGIN);
-      if (parsed.origin !== environment.APP_ORIGIN ||
-          (parsed.protocol !== "https:" &&
-            !(environment.VERCEL_ENV === "development" &&
-              (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") &&
-              parsed.protocol === "http:"))) {
-        return null;
-      }
-      return parsed.origin;
-    } catch {
+function normalizeOrigin(value: string, allowLocalHttp: boolean): string | null {
+  try {
+    const parsed = new URL(value);
+    const isLocalHost = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+    if (parsed.origin !== value ||
+        (parsed.protocol !== "https:" &&
+          !(allowLocalHttp && parsed.protocol === "http:" && isLocalHost))) {
       return null;
     }
+    return parsed.origin;
+  } catch {
+    return null;
   }
+}
+
+function originFromEnvironment(environment: VercelEnvironment): string | null {
+  const configuredOrigin = environment.APP_ORIGIN
+    ? normalizeOrigin(environment.APP_ORIGIN, environment.VERCEL_ENV === "development")
+    : null;
+  const productionOrigin = environment.VERCEL_PROJECT_PRODUCTION_URL
+    ? normalizeOrigin(
+        /^https?:\/\//i.test(environment.VERCEL_PROJECT_PRODUCTION_URL)
+          ? environment.VERCEL_PROJECT_PRODUCTION_URL
+          : `https://${environment.VERCEL_PROJECT_PRODUCTION_URL}`,
+        false,
+      )
+    : null;
+
+  if (configuredOrigin && productionOrigin &&
+      (environment.VERCEL_ENV === "production" || environment.ENVIRONMENT === "production") &&
+      configuredOrigin !== productionOrigin) {
+    return null;
+  }
+  if (configuredOrigin) return configuredOrigin;
+  if (productionOrigin) return productionOrigin;
   if (environment.VERCEL_ENV === "preview" && environment.VERCEL_URL &&
       /^[A-Za-z0-9.-]+$/.test(environment.VERCEL_URL)) {
     return `https://${environment.VERCEL_URL}`;
@@ -224,6 +258,11 @@ export function createVercelApiHandler(
 
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
+    if (url.pathname === "/api/ops/staging") {
+      return await handleStagingOperationsRequest(request, environment, {
+        runOperation: dependencies.runStagingOperation,
+      });
+    }
     if (url.pathname === "/api/cron/publication-lifecycle") {
       if (request.method !== "GET") {
         return apiError(requestId(), 405, "METHOD_NOT_ALLOWED", "Method not allowed");
