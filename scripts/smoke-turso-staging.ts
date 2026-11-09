@@ -1,32 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { createClient } from "@libsql/client";
-
-const expectedDatabase = "crushify-staging";
-const expectedGroup = "crushify-staging-sg";
-const expectedRegion = "Singapore";
-
-function assertStagingTarget(): { url: string; authToken: string } {
-  const url = process.env.TURSO_DATABASE_URL;
-  const authToken = process.env.TURSO_AUTH_TOKEN;
-  if (process.env.ENVIRONMENT !== "staging" ||
-      process.env.DATABASE_PROVIDER !== "turso" ||
-      process.env.TURSO_CONFIRM_DATABASE !== expectedDatabase ||
-      process.env.TURSO_CONFIRM_GROUP !== expectedGroup ||
-      process.env.TURSO_CONFIRM_REGION !== expectedRegion ||
-      process.env.TURSO_SMOKE_TEST !== "I_CONFIRM_SYNTHETIC_DATA" ||
-      !url || !authToken?.trim()) {
-    throw new Error("Remote Turso smoke test requires the staging target confirmations and explicit synthetic-data opt-in");
-  }
-  const parsed = new URL(url);
-  if (parsed.protocol !== "libsql:" || parsed.username || parsed.password || parsed.search || parsed.hash ||
-      !/^crushify-staging-[a-z0-9-]+\.turso\.io$/i.test(parsed.hostname)) {
-    throw new Error("Turso URL does not match the confirmed staging target");
-  }
-  return { url: parsed.toString(), authToken };
-}
+import { assertTursoStagingConfiguration } from "./staging-config.ts";
 
 async function main(): Promise<void> {
-  const target = assertStagingTarget();
+  const target = assertTursoStagingConfiguration(process.env, true);
   const table = `crushify_smoke_${randomUUID().replaceAll("-", "")}`;
   const first = createClient({ ...target, intMode: "number" });
   const second = createClient({ ...target, intMode: "number" });

@@ -145,6 +145,9 @@ describe("Vercel API runtime adapter", () => {
       assert.equal(wrongMethod.status, 404);
       assert.equal(wrongMethod.headers.get("cache-control"), "no-store");
 
+      const removedStagingRoute = await handler(new Request("https://crushify.test/api/ops/staging"));
+      assert.equal(removedStagingRoute.status, 404);
+
       const originalInfo = console.info;
       console.info = (message?: unknown, details?: unknown, ...extra: unknown[]) => {
         if (message === "Local-only Crushify magic link" && details && typeof details === "object" &&

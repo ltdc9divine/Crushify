@@ -2,16 +2,14 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import {
+  assertTursoStagingConfiguration,
+  StagingConfigurationError,
+} from "./staging-config.ts";
+import {
   applyMigrations,
   migrationChecksum,
   type SqlMigration,
 } from "../src/database/migrations.ts";
-
-const expectedDatabase = "crushify-staging";
-const expectedGroup = "crushify-staging-sg";
-const expectedRegion = "Singapore";
-
-class StagingPreflightError extends Error {}
 
 async function loadMigrations(): Promise<SqlMigration[]> {
   const directory = join(process.cwd(), "migrations");
@@ -27,29 +25,6 @@ async function loadMigrations(): Promise<SqlMigration[]> {
       sql: await readFile(join(directory, file), "utf8"),
     };
   }));
-}
-
-function assertOperatorConfirmation(): URL {
-  if (process.env.ENVIRONMENT !== "staging" ||
-      process.env.DATABASE_PROVIDER !== "turso" ||
-      process.env.TURSO_CONFIRM_DATABASE !== expectedDatabase ||
-      process.env.TURSO_CONFIRM_GROUP !== expectedGroup ||
-      process.env.TURSO_CONFIRM_REGION !== expectedRegion) {
-    throw new StagingPreflightError(
-      "Staging migration requires ENVIRONMENT=staging and exact dashboard confirmations for database, group, and Singapore region",
-    );
-  }
-  const rawUrl = process.env.TURSO_DATABASE_URL;
-  if (!rawUrl || !process.env.TURSO_AUTH_TOKEN?.trim()) {
-    throw new StagingPreflightError("TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required");
-  }
-  const url = new URL(rawUrl);
-  if (url.protocol !== "libsql:" ||
-      url.username || url.password || url.search || url.hash ||
-      !/^crushify-staging-[a-z0-9-]+\.turso\.io$/i.test(url.hostname)) {
-    throw new StagingPreflightError("Turso URL does not match the confirmed staging database identity");
-  }
-  return url;
 }
 
 async function verifyMigrationState(
@@ -98,22 +73,21 @@ async function main(): Promise<void> {
   if (mode !== "--preflight" && mode !== "--migrate") {
     throw new Error("Use --preflight or --migrate");
   }
-  const url = assertOperatorConfirmation();
+  const target = assertTursoStagingConfiguration(process.env);
   const migrations = await loadMigrations();
   if (migrations.length === 0) throw new Error("No database migrations were found");
   if (migrations.some((migration, index) => migration.version !== index + 1)) {
     throw new Error("Migration files must be numbered consecutively from version 1");
   }
   const client = createClient({
-    url: url.toString(),
-    authToken: process.env.TURSO_AUTH_TOKEN,
+    ...target,
     intMode: "number",
   });
   try {
     const applied = await verifyMigrationState(client, migrations);
     if (mode === "--preflight") {
       console.info(
-        `Staging target confirmed: ${expectedDatabase}, ${expectedGroup}, ${expectedRegion}; ` +
+        "Staging target confirmed: crushify-staging, crushify-staging-sg, Singapore; " +
         `applied migrations ${applied.length ? applied.join(", ") : "none"}; ` +
         `${migrations.length - applied.length} pending`,
       );
@@ -131,7 +105,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  const message = error instanceof StagingPreflightError
+  const message = error instanceof StagingConfigurationError
     ? error.message
     : `Remote database operation failed (${error instanceof Error ? error.name : "UnknownError"})`;
   console.error("Staging Turso operation failed", message);

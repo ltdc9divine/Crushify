@@ -1,11 +1,6 @@
 import { apiError } from "../http.ts";
 import { handleApiRequest } from "../index.ts";
 import { connectDatabaseFromEnvironment } from "../database/provider.ts";
-import {
-  handleStagingOperationsRequest,
-  type StagingOperation,
-  type StagingOperationResult,
-} from "./staging-operations.ts";
 import type { Database } from "../database.ts";
 import type { Storage } from "../storage.ts";
 import { CloudinaryStorageAdapter } from "../storage/cloudinary.ts";
@@ -36,8 +31,6 @@ export interface VercelEnvironment {
   VERCEL_BRANCH_URL?: string;
   VERCEL_PROJECT_ID?: string;
   VERCEL_PROJECT_PRODUCTION_URL?: string;
-  TURSO_STAGING_TARGET?: string;
-  STAGING_OPS_TOKEN?: string;
   CRON_SECRET?: string;
   DATA_RETENTION_DAYS?: string;
   PAYMENT_MODE?: string;
@@ -56,11 +49,6 @@ export interface VercelRuntimeDependencies {
   connectDatabase?: (environment: VercelEnvironment) => Promise<DatabaseConnection>;
   createCloudinaryStorage?: (environment: VercelEnvironment) => Storage;
   createMockStorage?: () => Storage;
-  runStagingOperation?: (
-    environment: VercelEnvironment,
-    operation: StagingOperation,
-    preflightId: string | null,
-  ) => Promise<Omit<StagingOperationResult, "operation_id">>;
 }
 
 function requestId(): string {
@@ -258,11 +246,6 @@ export function createVercelApiHandler(
 
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
-    if (url.pathname === "/api/ops/staging") {
-      return await handleStagingOperationsRequest(request, environment, {
-        runOperation: dependencies.runStagingOperation,
-      });
-    }
     if (url.pathname === "/api/cron/publication-lifecycle") {
       if (request.method !== "GET") {
         return apiError(requestId(), 405, "METHOD_NOT_ALLOWED", "Method not allowed");
