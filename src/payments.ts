@@ -46,6 +46,8 @@ interface PaymentRow {
   order_id: string;
   order_reference: string;
   order_status: string;
+  order_total_minor: number;
+  order_currency: string;
   payment_review_required: number;
   payment_status: string;
   review_required: number;
@@ -549,6 +551,11 @@ function webhookMismatch(
   if (!transaction.paymentReference || transaction.paymentReference !== payment.payment_reference) {
     return "Payment reference does not match";
   }
+  if (payment.currency !== "VND" ||
+      payment.order_currency !== payment.currency ||
+      payment.order_total_minor !== payment.amount_minor) {
+    return "Payment amount or currency does not match the order";
+  }
   if (transaction.amountMinor !== payment.amount_minor) {
     return "Transfer amount does not match";
   }
@@ -564,7 +571,8 @@ async function markWebhookReview(
 ): Promise<void> {
   const now = nowIso();
   const statements = [];
-  if (payment && payment.payment_status !== "SUCCEEDED" && payment.order_status !== "PAID") {
+  if (env.PAYMENT_MODE !== "mock" &&
+      payment && payment.payment_status !== "SUCCEEDED" && payment.order_status !== "PAID") {
     statements.push(
       env.DB.prepare(
         `UPDATE payments SET review_required = 1, updated_at = ?
@@ -628,6 +636,7 @@ async function processWebhookEvent(
   const payment = transaction.paymentReference
     ? await env.DB.prepare(
       `SELECT p.id, p.order_id, o.order_reference, o.status AS order_status,
+              o.total_minor AS order_total_minor, o.currency AS order_currency,
               o.payment_review_required, p.status AS payment_status,
               p.review_required, p.amount_minor, p.currency, p.payment_reference,
               p.provider_payment_id, o.expires_at
@@ -669,16 +678,21 @@ async function processWebhookEvent(
            AND EXISTS (
              SELECT 1 FROM orders WHERE id = ? AND status = 'AWAITING_PAYMENT'
                AND payment_review_required = 0 AND expires_at > ?
+             AND total_minor = ? AND currency = ?
            )`,
-      ).bind(transactionId, now, now, payment.id, payment.amount_minor, payment.order_id, now),
+      ).bind(transactionId, now, now, payment.id, payment.amount_minor, payment.order_id, now,
+        payment.order_total_minor, payment.order_currency),
       env.DB.prepare(
         `UPDATE orders SET status = 'PAID', paid_at = ?, updated_at = ?
          WHERE id = ? AND status = 'AWAITING_PAYMENT' AND payment_review_required = 0
            AND EXISTS (
              SELECT 1 FROM payments WHERE id = ? AND status = 'SUCCEEDED'
                AND provider_payment_id = ?
+               AND amount_minor = (SELECT total_minor FROM orders WHERE id = ?)
+               AND currency = (SELECT currency FROM orders WHERE id = ?)
            )`,
-      ).bind(now, now, payment.order_id, payment.id, transactionId),
+      ).bind(now, now, payment.order_id, payment.id, transactionId,
+        payment.order_id, payment.order_id),
       env.DB.prepare(
         `UPDATE payment_webhook_events
          SET outcome = CASE WHEN EXISTS (
@@ -743,6 +757,7 @@ async function reviewWebhookCollision(
   const payment = transaction?.paymentReference
     ? await env.DB.prepare(
       `SELECT p.id, p.order_id, o.order_reference, o.status AS order_status,
+              o.total_minor AS order_total_minor, o.currency AS order_currency,
               o.payment_review_required, p.status AS payment_status,
               p.review_required, p.amount_minor, p.currency, p.payment_reference,
               p.provider_payment_id, o.expires_at

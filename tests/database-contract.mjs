@@ -32,7 +32,13 @@ function makePng() {
   ]);
 }
 
-export async function runDatabaseContract({ request, getMagicToken, label, beforeAssetDelete }) {
+export async function runDatabaseContract({
+  request,
+  getMagicToken,
+  label,
+  beforeAssetDelete,
+  emailPrefix = "adapter",
+}) {
   async function signIn(email) {
     const requested = await request("/customers/session", null, {
       method: "POST",
@@ -64,7 +70,7 @@ export async function runDatabaseContract({ request, getMagicToken, label, befor
     return session;
   }
 
-  const owner = await signIn(`adapter-${crypto.randomUUID()}@example.test`);
+  const owner = await signIn(`${emailPrefix}-${crypto.randomUUID()}@example.test`);
   const created = await request("/designs", owner, {
     method: "POST",
     mutating: true,
@@ -109,7 +115,7 @@ export async function runDatabaseContract({ request, getMagicToken, label, befor
   assert.equal(preview.body.revision, 2);
   assert.equal(preview.body.data.sender, changed.sender);
 
-  const other = await signIn(`adapter-other-${crypto.randomUUID()}@example.test`);
+  const other = await signIn(`${emailPrefix}-other-${crypto.randomUUID()}@example.test`);
   const privateDesign = await request(`/designs/${designId}`, other);
   assert.equal(privateDesign.response.status, 404, `${label}: design owner isolation`);
 

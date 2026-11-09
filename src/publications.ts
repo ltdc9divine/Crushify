@@ -675,17 +675,29 @@ async function unpublishOrRevoke(
   }
   const retentionUntil = new Date(Date.parse(now) + retentionDays * 86400_000).toISOString();
   const status = revoke ? "REVOKED" : "UNPUBLISHED";
-  const result = await env.DB.prepare(
-    `UPDATE publications SET status = ?, unpublished_at = ?,
+  const statements = [
+    env.DB.prepare(
+      `UPDATE publications SET status = ?, unpublished_at = ?,
        revoked_at = CASE WHEN ? = 1 THEN ? ELSE revoked_at END,
        retention_delete_after_at = CASE WHEN ? = 1
          THEN COALESCE(retention_delete_after_at, ?) ELSE retention_delete_after_at END,
        lifecycle_revision = lifecycle_revision + 1, updated_at = ?
      WHERE id = ? AND lifecycle_revision = ?
        AND status IN ('PUBLISHED','UNPUBLISHED')`,
-  ).bind(status, now, revoke ? 1 : 0, now, revoke ? 1 : 0, retentionUntil,
-    now, publicationId, expectedLifecycle).run();
-  if (result.meta.changes !== 1) return apiError(requestId, 409, "CONFLICT", "Publication state changed; retry");
+    ).bind(status, now, revoke ? 1 : 0, now, revoke ? 1 : 0, retentionUntil,
+      now, publicationId, expectedLifecycle),
+  ];
+  if (revoke) {
+    statements.push(env.DB.prepare(
+      `UPDATE storage_entitlements SET status = 'REVOKED'
+       WHERE publication_id = ? AND status IN ('ACTIVE','EXTENDED','LIFETIME')
+         AND EXISTS (SELECT 1 FROM publications WHERE id = ? AND status = 'REVOKED')`,
+    ).bind(publicationId, publicationId));
+  }
+  const result = await env.DB.batch(statements);
+  if (result[0]?.meta.changes !== 1) {
+    return apiError(requestId, 409, "CONFLICT", "Publication state changed; retry");
+  }
   const cleaned = await cleanupAssets(env, publicationId);
   await env.DB.prepare(
     `INSERT INTO audit_logs (

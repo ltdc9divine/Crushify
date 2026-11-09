@@ -1,0 +1,29 @@
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: DENY
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+/
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; img-src 'self'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Cache-Control: public, max-age=0, must-revalidate
+/index.html
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; img-src 'self'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Cache-Control: public, max-age=0, must-revalidate
+/templates/our-universe/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-L2vWPEAZuzye4CcDsosy+ToetAG37HZkxQwLfV8Fgzo='; style-src 'self' https://fonts.googleapis.com 'sha256-P5jgEAru5dIbNlU9ui69zm3nB+XNecxiabdg+GBRJ3Q='; style-src-attr 'unsafe-hashes' 'sha256-ksGPa9rBx3qdJd85P0QDyQNATrJagvS5YtLUpHxWuto='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Cache-Control: public, max-age=0, must-revalidate
+/templates/love-letter/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-9jCMe+ApcxPlMtrngmUWxXUvnu0FqFc2TkTuaS3GKes='; style-src 'self' https://fonts.googleapis.com 'sha256-1t+C2WsKcJT0zJVn1nw7vaIm5Do8q35eVbG0bRjBWzA='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Cache-Control: public, max-age=0, must-revalidate
+/templates/our-memories/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-hashes' 'sha256-cGEagIvXbQPQDHsiH2BCim5CHBIl3KEsgQD08tQTKH0=' 'sha256-O4CgWUeJb6The+WkhouFJ6+mQAWj0fsm/X89ObW8+I4=' 'sha256-LvVOESM3FDozTISaaUDwIE7AD3KHY8H/HrMcNE9Rxho=' 'sha256-phCU6XrbmuTwnZw1ZahV7YBkdSYAX7GqZpEyn8505ro='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Cache-Control: public, max-age=0, must-revalidate
+/templates/say-yes/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-hashes' 'sha256-bRdxh3sKyhsFTsApYdHxJY01mqvVNlXR1G+l3fmKCKE=' 'sha256-wnwn9243frb26/JF0z1NSk1tig1C8XFvbh6ohrwX5Yc=' 'sha256-8nT5VzplcTZbJp39vh0BEF2kUcVOmE3M0K8yi376Nmc=' 'sha256-K75omsx13zDCE4bRXWKvDxZ7mpXyj53bmfEJB6duTtY='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Cache-Control: public, max-age=0, must-revalidate
+/templates/distance-means-nothing/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net/npm/three@0.160.0/ 'sha256-UK9O+rbB3KhDsGQrE55qyNAJCpV7WHc47zV2U5f4bE4='; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-hashes' 'sha256-isGSs4ZJwnNHGhM0ULkwjl9RZ3Jj4BEr8M7LohcB9b8='; img-src 'self'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Cache-Control: public, max-age=0, must-revalidate
+/p/index.html
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Cache-Control: no-store

@@ -34,6 +34,13 @@ export async function runPaymentContract({
   setPublicationExpiry,
   deactivateTemplatePrice,
   inspectEntitlement,
+  inspectOrderArtifacts,
+  setPaymentCurrency,
+  restorePaymentCurrency,
+  failPublicationCreation,
+  restorePublicationCreation,
+  recoverFulfillments,
+  allTemplates = false,
   expectedMode = "sepay-test",
   label,
 }) {
@@ -69,6 +76,14 @@ export async function runPaymentContract({
 
   const tampered = await createRequest(`tampered-${randomUUID()}`, designId, { amount: 1 });
   assert.equal(tampered.response.status, 400, `${label}: client cannot set amount`);
+  const forgedPayment = await createRequest(`forged-payment-${randomUUID()}`, designId, {
+    paid: true,
+    status: "PAID",
+    payment_verified: true,
+    amount_paid: TEST_TOTAL_VND,
+  });
+  assert.equal(forgedPayment.response.status, 400,
+    `${label}: customer-supplied payment claims are rejected`);
 
   const created = await createRequest();
   assert.equal(created.response.status, 201, `${label}: create test order`);
@@ -229,6 +244,217 @@ export async function runPaymentContract({
   assert.equal(replay.response.status, 200, `${label}: provider retry is acknowledged`);
   const stillPaid = await request(`/orders/${created.body.order_id}/status`, owner);
   assert.equal(stillPaid.body.status, "FULFILLED", `${label}: replay does not apply the payment twice`);
+  if (inspectOrderArtifacts) {
+    const artifacts = await inspectOrderArtifacts(created.body.order_id);
+    assert.deepEqual(artifacts, {
+      payments: 1,
+      processedEvents: 1,
+      publications: 1,
+      entitlements: 1,
+      fulfillmentJobs: 1,
+    }, `${label}: replay creates no duplicate settlement or fulfillment records`);
+  }
+
+  if (allTemplates) {
+    const templateIds = [
+      "our-universe",
+      "love-letter",
+      "our-memories",
+      "say-yes",
+      "distance-means-nothing",
+    ];
+    const workflows = [];
+    for (const [index, templateId] of templateIds.entries()) {
+      if (templateId === "our-universe") continue;
+      const createdDesign = await request("/designs", owner, {
+        method: "POST",
+        mutating: true,
+        json: { template_id: templateId, schema_version: templateId === "love-letter" ? 2 : 1 },
+      });
+      assert.equal(createdDesign.response.status, 201,
+        `${label}: create ${templateId} with its current schema version`);
+      const data = structuredClone(createdDesign.body.data);
+      const marker = `mock-publication-${templateId}-${randomUUID()}`;
+      if (templateId === "love-letter") {
+        data.from = "Synthetic Sender";
+        data.to = "Synthetic Recipient";
+        data.msg = marker;
+      } else if (templateId === "our-memories") {
+        data.sender = "Synthetic Sender";
+        data.receiver = "Synthetic Recipient";
+        data.story = marker;
+      } else if (templateId === "say-yes") {
+        data.sender = "Synthetic Sender";
+        data.receiver = "Synthetic Recipient";
+        data.question = marker;
+      } else if (templateId === "distance-means-nothing") {
+        data.sender.name = "Synthetic Sender";
+        data.receiver.name = "Synthetic Recipient";
+        data.message = marker;
+      }
+      const saved = await request(`/designs/${createdDesign.body.design_id}`, owner, {
+        method: "PUT",
+        mutating: true,
+        json: {
+          schema_version: createdDesign.body.schema_version,
+          expected_revision: 1,
+          data,
+        },
+      });
+      assert.equal(saved.response.status, 200, `${label}: customize ${templateId}`);
+      assert.equal(saved.body.revision, 2);
+      const preview = await request(`/designs/${createdDesign.body.design_id}/preview`, owner, {
+        method: "POST",
+        mutating: true,
+      });
+      assert.equal(preview.response.status, 201, `${label}: preview ${templateId}`);
+      const previewData = await request("/previews", null, { token: preview.body.token });
+      assert.equal(previewData.response.status, 200);
+      assert.equal(previewData.body.template_id, templateId);
+
+      const order = await request("/orders", owner, {
+        method: "POST",
+        mutating: true,
+        headers: { "Idempotency-Key": `phase712-${randomUUID()}` },
+        json: {
+          design_id: createdDesign.body.design_id,
+          storage_plan_id: "1-month",
+          asset_consents: [],
+        },
+      });
+      assert.equal(order.response.status, 201, `${label}: create ${templateId} order`);
+      assert.equal(order.body.total_minor, TEST_TOTAL_VND);
+      assert.equal(order.body.design_revision, 2);
+      const unpaidPublication = await request("/publications", owner, {
+        method: "POST",
+        mutating: true,
+        json: {
+          order_id: order.body.order_id,
+          expected_revision: 2,
+          asset_consents: [],
+        },
+      });
+      assert.equal(unpaidPublication.response.status, 422,
+        `${label}: unpublished ${templateId} order cannot be published`);
+      assert.equal(unpaidPublication.body.error.code, "PAYMENT_NOT_VERIFIED");
+      workflows.push({ templateId, marker, designId: createdDesign.body.design_id, order });
+    }
+
+    for (const [index, workflow] of workflows.entries()) {
+      const transactionId = String(Date.now() * 100 + index + 100);
+      const payload = JSON.stringify({
+        id: transactionId,
+        accountNumber: receivingAccount,
+        code: workflow.order.body.payment.reference,
+        transferType: "in",
+        transferAmount: workflow.order.body.total_minor,
+      });
+      if (workflow.templateId === "distance-means-nothing" && failPublicationCreation) {
+        await failPublicationCreation(workflow.order.body.order_id);
+      }
+      const settlement = await request("/payments/sepay/webhook", null, {
+        method: "POST",
+        headers: signedHeaders(webhookSecret, payload),
+        body: payload,
+      });
+      assert.equal(settlement.response.status, 200,
+        `${label}: signed local settlement for ${workflow.templateId}`);
+      if (workflow.templateId === "distance-means-nothing" && failPublicationCreation) {
+        const deferred = await request(`/orders/${workflow.order.body.order_id}/status`, owner);
+        assert.equal(deferred.body.status, "FULFILLING",
+          `${label}: publication failure leaves the paid order retryable`);
+        assert.equal(deferred.body.payment.status, "SUCCEEDED");
+        const failed = await inspectOrderArtifacts(workflow.order.body.order_id);
+        assert.deepEqual(failed, {
+          payments: 1,
+          processedEvents: 1,
+          publications: 0,
+          entitlements: 0,
+          fulfillmentJobs: 1,
+          failedJobs: 1,
+        });
+        await restorePublicationCreation(workflow.order.body.order_id);
+        const recovered = await recoverFulfillments();
+        assert.equal(recovered.completed, 1, `${label}: recovery retries failed fulfillment`);
+      }
+
+      const status = await request(`/orders/${workflow.order.body.order_id}/status`, owner);
+      assert.equal(status.body.status, "FULFILLED",
+        `${label}: ${workflow.templateId} fulfillment completes`);
+      assert.equal(status.body.payment.status, "SUCCEEDED");
+      const websites = await request("/publications", owner);
+      assert.equal(websites.response.status, 200);
+      const website = websites.body.websites.find((item) => item.design_id === workflow.designId);
+      assert.ok(website?.publication_id, `${label}: ${workflow.templateId} has a publication`);
+      assert.equal(website.template_id, workflow.templateId);
+      assert.equal(website.publication_status, "PUBLISHED");
+      assert.ok(website.storage_plan?.expires_at, `${label}: storage entitlement has an expiry`);
+
+      const detail = await request(`/publications/${website.publication_id}`, owner);
+      assert.equal(detail.response.status, 200);
+      assert.equal(detail.body.status, "PUBLISHED");
+      const slug = new URL(detail.body.url).pathname.split("/").at(-1);
+      assert.match(slug, /^g[A-Za-z0-9_-]{20,40}$/);
+      const publicSite = await request(`/publications/${slug}`);
+      assert.equal(publicSite.response.status, 200,
+        `${label}: public ${workflow.templateId} site resolves without a session`);
+      assert.equal(publicSite.body.template_id, workflow.templateId);
+      const publicMarker = workflow.templateId === "love-letter"
+        ? publicSite.body.data.msg
+        : workflow.templateId === "our-memories"
+          ? publicSite.body.data.story
+          : workflow.templateId === "say-yes"
+            ? publicSite.body.data.question
+            : publicSite.body.data.message;
+      assert.equal(publicMarker, workflow.marker,
+        `${label}: ${workflow.templateId} public snapshot matches its saved revision`);
+      const foreignDesign = await request(`/designs/${workflow.designId}`, otherOwner);
+      assert.equal(foreignDesign.response.status, 404);
+      const foreignOrder = await request(`/orders/${workflow.order.body.order_id}/status`, otherOwner);
+      assert.equal(foreignOrder.response.status, 404);
+      const foreignPublication = await request(`/publications/${website.publication_id}`, otherOwner);
+      assert.equal(foreignPublication.response.status, 404);
+      const foreignMutation = await request(`/publications/${website.publication_id}/revoke`, otherOwner, {
+        method: "POST",
+        mutating: true,
+        json: { expected_lifecycle_revision: detail.body.lifecycle_revision },
+      });
+      assert.equal(foreignMutation.response.status, 404);
+      if (workflow.templateId === "love-letter") {
+        await setPublicationExpiry(website.publication_id, "2000-01-01T00:00:00.000Z");
+        const expired = await request(`/publications/${slug}`);
+        assert.equal(expired.response.status, 410,
+          `${label}: expired ${workflow.templateId} site is not served`);
+        const entitlement = await inspectEntitlement(workflow.order.body.order_id);
+        assert.equal(entitlement.status, "EXPIRED");
+      } else if (workflow.templateId === "say-yes") {
+        const revoked = await request(`/publications/${website.publication_id}/revoke`, owner, {
+          method: "POST",
+          mutating: true,
+          json: { expected_lifecycle_revision: detail.body.lifecycle_revision },
+        });
+        assert.equal(revoked.response.status, 200);
+        const revokedEntitlement = await inspectEntitlement(workflow.order.body.order_id);
+        assert.equal(revokedEntitlement.status, "REVOKED");
+        const unavailable = await request(`/publications/${slug}`);
+        assert.equal(unavailable.response.status, 410,
+          `${label}: revoked ${workflow.templateId} site is not served`);
+      }
+      if (inspectOrderArtifacts) {
+        const artifacts = await inspectOrderArtifacts(workflow.order.body.order_id);
+        assert.deepEqual(artifacts, {
+          payments: 1,
+          processedEvents: 1,
+          publications: 1,
+          entitlements: 1,
+          fulfillmentJobs: 1,
+        }, `${label}: ${workflow.templateId} settlement and fulfillment are idempotent`);
+      }
+    }
+    const invalidSlug = await request("/publications/not-a-valid-slug");
+    assert.equal(invalidSlug.response.status, 404,
+      `${label}: invalid public slugs are not served`);
+  }
 
   const mismatchOrder = await createRequest(`mismatch-${randomUUID()}`);
   assert.equal(mismatchOrder.response.status, 201);
@@ -247,8 +473,8 @@ export async function runPaymentContract({
   });
   assert.equal(mismatch.response.status, 200, `${label}: verified mismatch is persisted for review`);
   const manualReview = await request(`/orders/${mismatchOrder.body.order_id}/status`, owner);
-  assert.equal(manualReview.body.status, "MANUAL_REVIEW");
-  assert.equal(manualReview.body.payment.status, "MANUAL_REVIEW");
+  assert.equal(manualReview.body.status, expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW");
+  assert.equal(manualReview.body.payment.status, expectedMode === "mock" ? "PENDING" : "MANUAL_REVIEW");
   if (inspectWebhookEvent) {
     const mismatchEvent = await inspectWebhookEvent(mismatchTransactionId);
     assert.equal(mismatchEvent.outcome, "MANUAL_REVIEW");
@@ -256,6 +482,60 @@ export async function runPaymentContract({
     assert.equal(mismatchEvent.actual_amount_minor, mismatchOrder.body.total_minor - 1);
     assert.equal(mismatchEvent.provider_transaction_id, mismatchTransactionId);
     assert.ok(mismatchEvent.processing_attempts >= 1);
+  }
+  if (setPaymentCurrency && restorePaymentCurrency) {
+    const currencyOrder = await createRequest(`currency-${randomUUID()}`);
+    const currencyTransactionId = String(Number(`${Date.now()}`.slice(-8)) + 11);
+    const currencyPayload = JSON.stringify({
+      id: currencyTransactionId,
+      accountNumber: receivingAccount,
+      code: currencyOrder.body.payment.reference,
+      transferType: "in",
+      transferAmount: currencyOrder.body.total_minor,
+    });
+    await setPaymentCurrency(currencyOrder.body.order_id, "USD");
+    try {
+      const currencyWebhook = await request("/payments/sepay/webhook", null, {
+        method: "POST",
+        headers: signedHeaders(webhookSecret, currencyPayload),
+        body: currencyPayload,
+      });
+      assert.equal(currencyWebhook.response.status, 200);
+    } finally {
+      await restorePaymentCurrency(currencyOrder.body.order_id);
+    }
+    const currencyStatus = await request(`/orders/${currencyOrder.body.order_id}/status`, owner);
+    assert.equal(currencyStatus.body.status,
+      expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW",
+      `${label}: mismatched payment currency cannot settle the order`);
+    if (expectedMode === "mock") assert.equal(currencyStatus.body.payment.status, "PENDING");
+    if (inspectWebhookEvent) {
+      const currencyEvent = await inspectWebhookEvent(currencyTransactionId);
+      assert.equal(currencyEvent.outcome, "MANUAL_REVIEW");
+    }
+  }
+  const referenceOrder = await createRequest(`reference-${randomUUID()}`);
+  const referenceTransactionId = String(Number(`${Date.now()}`.slice(-8)) + 12);
+  const referencePayload = JSON.stringify({
+    id: referenceTransactionId,
+    accountNumber: receivingAccount,
+    code: `${referenceOrder.body.payment.reference}X`,
+    transferType: "in",
+    transferAmount: referenceOrder.body.total_minor,
+  });
+  const referenceWebhook = await request("/payments/sepay/webhook", null, {
+    method: "POST",
+    headers: signedHeaders(webhookSecret, referencePayload),
+    body: referencePayload,
+  });
+  assert.equal(referenceWebhook.response.status, 200);
+  const referenceStatus = await request(`/orders/${referenceOrder.body.order_id}/status`, owner);
+  assert.equal(referenceStatus.body.status, "AWAITING_PAYMENT",
+    `${label}: a mismatched payment reference is rejected without settling the order`);
+  assert.equal(referenceStatus.body.payment.status, "PENDING");
+  if (inspectWebhookEvent) {
+    const referenceEvent = await inspectWebhookEvent(referenceTransactionId);
+    assert.equal(referenceEvent.outcome, "MANUAL_REVIEW");
   }
 
   const wrongAccountOrder = await createRequest(`account-${randomUUID()}`);
@@ -273,7 +553,8 @@ export async function runPaymentContract({
   });
   assert.equal(wrongAccount.response.status, 200);
   const accountReview = await request(`/orders/${wrongAccountOrder.body.order_id}/status`, owner);
-  assert.equal(accountReview.body.status, "MANUAL_REVIEW");
+  assert.equal(accountReview.body.status, expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW");
+  if (expectedMode === "mock") assert.equal(accountReview.body.payment.status, "PENDING");
 
   const overpaymentOrder = await createRequest(`overpayment-${randomUUID()}`);
   const overpaymentPayload = JSON.stringify({
@@ -290,8 +571,9 @@ export async function runPaymentContract({
   });
   assert.equal(overpayment.response.status, 200);
   const overpaymentReview = await request(`/orders/${overpaymentOrder.body.order_id}/status`, owner);
-  assert.equal(overpaymentReview.body.status, "MANUAL_REVIEW",
+  assert.equal(overpaymentReview.body.status, expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW",
     `${label}: overpayment never marks an order paid`);
+  if (expectedMode === "mock") assert.equal(overpaymentReview.body.payment.status, "PENDING");
 
   const competingOrder = await createRequest(`competing-${randomUUID()}`);
   assert.equal(competingOrder.response.status, 201);
@@ -334,7 +616,7 @@ export async function runPaymentContract({
   });
   assert.equal(collision.response.status, 200);
   const collisionReview = await request(`/orders/${duplicateOrder.body.order_id}/status`, owner);
-  assert.equal(collisionReview.body.status, "MANUAL_REVIEW",
+  assert.equal(collisionReview.body.status, expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW",
     `${label}: one provider transaction cannot pay a second order`);
 
   const expiredOrder = await createRequest(`expired-${randomUUID()}`);
@@ -356,7 +638,8 @@ export async function runPaymentContract({
   });
   assert.equal(late.response.status, 200);
   const lateReview = await request(`/orders/${expiredOrder.body.order_id}/status`, owner);
-  assert.equal(lateReview.body.status, "MANUAL_REVIEW", `${label}: late transfer is reviewed, not paid`);
+  assert.equal(lateReview.body.status, expectedMode === "mock" ? "EXPIRED" : "MANUAL_REVIEW",
+    `${label}: late transfer is reviewed, not paid`);
 
   if (cancelOrder) {
     const cancelledOrder = await createRequest(`cancelled-${randomUUID()}`);
@@ -375,7 +658,7 @@ export async function runPaymentContract({
     });
     assert.equal(cancelledWebhook.response.status, 200);
     const cancelledStatus = await request(`/orders/${cancelledOrder.body.order_id}/status`, owner);
-    assert.equal(cancelledStatus.body.status, "MANUAL_REVIEW",
+    assert.equal(cancelledStatus.body.status, expectedMode === "mock" ? "CANCELLED" : "MANUAL_REVIEW",
       `${label}: a late transfer cannot pay a cancelled order`);
   }
 
@@ -432,7 +715,8 @@ export async function runPaymentContract({
   });
   assert.equal(outgoing.response.status, 200);
   const outgoingReview = await request(`/orders/${outgoingOrder.body.order_id}/status`, owner);
-  assert.equal(outgoingReview.body.status, "MANUAL_REVIEW");
+  assert.equal(outgoingReview.body.status, expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW");
+  if (expectedMode === "mock") assert.equal(outgoingReview.body.payment.status, "PENDING");
 
   const unmatchedPayload = JSON.stringify({
     id: Number(`${Date.now()}`.slice(-8)) + 6,

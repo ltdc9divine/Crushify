@@ -3,22 +3,6 @@
 
   const API = "/api/v1";
   const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  const style = document.createElement("style");
-  style.textContent = `
-    .crushify-customer-tools{margin:12px 0;padding:14px;border:1px solid rgba(233,74,156,.35);
-      border-radius:14px;background:rgba(233,74,156,.08);font:14px/1.45 system-ui,sans-serif}
-    .crushify-customer-tools h3{margin:0 0 8px;font-size:15px}
-    .crushify-customer-tools input{box-sizing:border-box;width:100%;margin:0 0 8px;padding:9px 10px;
-      border:1px solid rgba(150,90,120,.5);border-radius:8px;font:inherit}
-    .crushify-customer-tools button,.crushify-customer-tools a{display:inline-block;margin:3px 4px 3px 0;
-      padding:8px 11px;border:1px solid rgba(220,100,160,.5);border-radius:999px;background:transparent;
-      color:inherit;font:inherit;text-decoration:none;cursor:pointer}
-    .crushify-customer-tools button:disabled{opacity:.55;cursor:wait}
-    .crushify-customer-status{min-height:1.4em;margin:8px 0 0;font-size:13px}
-    .crushify-customer-status[data-state=error]{color:#e44}
-    .crushify-customer-status[data-state=saved]{color:#3a8}
-  `;
-  document.head.append(style);
 
   function record(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);

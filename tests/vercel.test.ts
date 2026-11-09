@@ -10,9 +10,12 @@ import { createClient } from "@libsql/client";
 import { describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
+import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { connectDatabaseFromEnvironment } from "../src/database/provider.ts";
+import type { Database } from "../src/database.ts";
 import type { Storage } from "../src/storage.ts";
 import { MemoryStorageAdapter } from "../src/storage/mock.ts";
+import { recoverPendingFulfillments } from "../src/publications.ts";
 import { createVercelApiHandler, VERCEL_UPLOAD_MAX_BYTES } from "../src/platform/vercel.ts";
 import nodeHandler, { readVercelRequestBody } from "../api/[...path].ts";
 import { runDatabaseContract } from "./database-contract.mjs";
@@ -39,6 +42,118 @@ function requestWithOrigin(path: string, origin: string, init: RequestInit = {})
 }
 
 describe("Vercel API runtime adapter", () => {
+  it("enables mock settlement only for explicit local SQLite and mock storage", async () => {
+    const unusedDatabase: Database = {
+      prepare() {
+        throw new Error("Database must not be accessed by this guard test");
+      },
+      async batch() {
+        throw new Error("Database must not be accessed by this guard test");
+      },
+    };
+    const dependencies = {
+      async connectDatabase() {
+        return { database: unusedDatabase, close: () => undefined };
+      },
+      createMockStorage: () => new MemoryStorageAdapter(),
+      createCloudinaryStorage: () => new MemoryStorageAdapter(),
+    };
+    const secret = randomBytes(32).toString("hex");
+    const webhook = () => new Request("https://crushify.test/api/v1/payments/sepay/webhook", {
+      method: "POST",
+      headers: { Origin: "https://crushify.test", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const local = {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "file:.local/mock-settlement.db",
+      STORAGE_PROVIDER: "mock",
+      LOCAL_TEST_MODE: "true",
+      ENVIRONMENT: "local",
+      PAYMENT_MODE: "mock",
+      SEPAY_WEBHOOK_SECRET: secret,
+      APP_ORIGIN: "https://crushify.test",
+      VERCEL_ENV: "development",
+    };
+
+    const enabled = createVercelApiHandler(local, dependencies);
+    const enabledResponse = await enabled(webhook());
+    assert.equal(enabledResponse.status, 401, "a correctly configured local mock runtime reaches signature verification");
+    assert.equal((await enabledResponse.json() as { error: { code: string } }).error.code,
+      "INVALID_WEBHOOK_SIGNATURE");
+
+    const remoteDatabase = createVercelApiHandler({
+      ...local,
+      TURSO_DATABASE_URL: "libsql://crushify-staging.invalid",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+    }, dependencies);
+    const remoteResponse = await remoteDatabase(webhook());
+    assert.equal(remoteResponse.status, 503);
+    assert.equal((await remoteResponse.json() as { error: { code: string } }).error.code,
+      "PAYMENTS_DISABLED");
+
+    const cloudStorage = createVercelApiHandler({
+      ...local,
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+    }, dependencies);
+    const cloudStorageResponse = await cloudStorage(webhook());
+    assert.equal(cloudStorageResponse.status, 503);
+    assert.equal((await cloudStorageResponse.json() as { error: { code: string } }).error.code,
+      "PAYMENTS_DISABLED");
+
+    const preview = createVercelApiHandler({
+      ...local,
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-staging.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      ENVIRONMENT: "staging",
+      VERCEL_ENV: "preview",
+    }, dependencies);
+    const previewResponse = await preview(webhook());
+    assert.equal(previewResponse.status, 503);
+    assert.equal((await previewResponse.json() as { error: { code: string } }).error.code,
+      "PAYMENTS_DISABLED");
+
+    const production = createVercelApiHandler({
+      ...local,
+      TURSO_DATABASE_URL: "https://production.invalid",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      ENVIRONMENT: "production",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    }, dependencies);
+    const productionResponse = await production(webhook());
+    assert.equal(productionResponse.status, 503);
+    assert.equal((await productionResponse.json() as { error: { code: string } }).error.code,
+      "PAYMENTS_DISABLED");
+
+    const nonLocal = createVercelApiHandler({
+      ...local,
+      ENVIRONMENT: "staging",
+    }, dependencies);
+    const nonLocalResponse = await nonLocal(webhook());
+    assert.equal(nonLocalResponse.status, 500);
+    assert.equal((await nonLocalResponse.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR");
+
+    const noPrivilegedRoute = createVercelApiHandler(local, dependencies);
+    const absentRoute = await noPrivilegedRoute(
+      new Request("https://crushify.test/api/v1/payments/mock/settle"),
+    );
+    assert.equal(absentRoute.status, 404);
+  });
+
   it("uses the stable project production origin when configured and rejects mismatched APP_ORIGIN", async () => {
     const productionHost = "crushify-n3l98mrkf-ltdc9divine-5816s-projects.vercel.app";
     const validHandler = createVercelApiHandler({
@@ -92,7 +207,8 @@ describe("Vercel API runtime adapter", () => {
       TURSO_DATABASE_URL: databaseUrl,
       STORAGE_PROVIDER: "mock",
       LOCAL_TEST_MODE: "true",
-      PAYMENT_MODE: "sepay-test",
+      ENVIRONMENT: "local",
+      PAYMENT_MODE: "mock",
       SEPAY_WEBHOOK_SECRET: webhookSecret,
       SEPAY_BANK_CODE: "MB",
       SEPAY_BANK_ACCOUNT: receivingAccount,
@@ -144,6 +260,9 @@ describe("Vercel API runtime adapter", () => {
       }));
       assert.equal(wrongMethod.status, 404);
       assert.equal(wrongMethod.headers.get("cache-control"), "no-store");
+      assert.equal(wrongMethod.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(wrongMethod.headers.get("referrer-policy"), "no-referrer");
+      assert.equal(wrongMethod.headers.get("x-frame-options"), "DENY");
 
       const removedStagingRoute = await handler(new Request("https://crushify.test/api/ops/staging"));
       assert.equal(removedStagingRoute.status, 404);
@@ -211,6 +330,7 @@ describe("Vercel API runtime adapter", () => {
             };
             const headers = new Headers(settings.headers);
             if (session?.cookies.length) headers.set("Cookie", session.cookies.join("; "));
+            if (settings.token) headers.set("Authorization", `Bearer ${settings.token}`);
             if (settings.mutating ||
                 ["POST", "PUT", "PATCH", "DELETE"].includes(settings.method ?? "")) {
               headers.set("Origin", "https://crushify.test");
@@ -229,12 +349,28 @@ describe("Vercel API runtime adapter", () => {
             return { response, body };
           },
           async seedPrice(amount) {
-            await migrationClient.execute({
-              sql: `INSERT INTO template_prices (
-                id, template_id, schema_version, currency, amount_minor, is_active, created_at, updated_at
-              ) VALUES (?, 'our-universe', 1, 'VND', ?, 1, ?, ?)`,
-              args: [`test-price-${crypto.randomUUID()}`, amount, new Date().toISOString(), new Date().toISOString()],
-            });
+            const versions = await migrationClient.execute(
+              `SELECT t.id AS template_id, t.current_schema_version AS schema_version
+               FROM templates t
+               JOIN template_versions v ON v.template_id = t.id
+                 AND v.schema_version = t.current_schema_version AND v.status = 'ACTIVE'
+               WHERE t.status = 'ACTIVE' ORDER BY t.id`,
+            );
+            for (const version of versions.rows) {
+              await migrationClient.execute({
+                sql: `INSERT INTO template_prices (
+                  id, template_id, schema_version, currency, amount_minor, is_active, created_at, updated_at
+                ) VALUES (?, ?, ?, 'VND', ?, 1, ?, ?)`,
+                args: [
+                  `test-price-${crypto.randomUUID()}`,
+                  String(version.template_id),
+                  Number(version.schema_version),
+                  amount,
+                  new Date().toISOString(),
+                  new Date().toISOString(),
+                ],
+              });
+            }
             for (const [planId, priceId] of [
               ["1-month", "test-storage-price-1"],
               ["3-months", "test-storage-price-3"],
@@ -318,6 +454,59 @@ describe("Vercel API runtime adapter", () => {
             assert.equal(result.rows.length, 1);
             return result.rows[0];
           },
+          async inspectOrderArtifacts(orderId: string) {
+            const result = await migrationClient.execute({
+              sql: `SELECT
+                (SELECT COUNT(*) FROM payments WHERE order_id = ?) AS payments,
+                (SELECT COUNT(*) FROM payment_webhook_events e
+                 JOIN payments p ON p.provider = e.provider AND p.provider_payment_id = e.event_id
+                 WHERE p.order_id = ? AND e.outcome = 'PROCESSED') AS processed_events,
+                (SELECT COUNT(*) FROM publications WHERE order_id = ?) AS publications,
+                (SELECT COUNT(*) FROM storage_entitlements WHERE order_id = ?) AS entitlements,
+                (SELECT COUNT(*) FROM fulfillment_jobs WHERE order_id = ?) AS fulfillment_jobs,
+                (SELECT COUNT(*) FROM fulfillment_jobs WHERE order_id = ? AND status = 'FAILED') AS failed_jobs`,
+              args: [orderId, orderId, orderId, orderId, orderId, orderId],
+            });
+            const row = result.rows[0]!;
+            return {
+              payments: Number(row.payments),
+              processedEvents: Number(row.processed_events),
+              publications: Number(row.publications),
+              entitlements: Number(row.entitlements),
+              fulfillmentJobs: Number(row.fulfillment_jobs),
+              ...(Number(row.failed_jobs) ? { failedJobs: Number(row.failed_jobs) } : {}),
+            };
+          },
+          async setPaymentCurrency(orderId: string, currency: string) {
+            await migrationClient.execute({
+              sql: "UPDATE payments SET currency = ? WHERE order_id = ?",
+              args: [currency, orderId],
+            });
+          },
+          async restorePaymentCurrency(orderId: string) {
+            await migrationClient.execute({
+              sql: "UPDATE payments SET currency = 'VND' WHERE order_id = ?",
+              args: [orderId],
+            });
+          },
+          async failPublicationCreation(orderId: string) {
+            await migrationClient.execute(
+              `CREATE TRIGGER reject_test_publication_creation BEFORE INSERT ON publications
+               WHEN NEW.order_id = '${orderId}'
+               BEGIN SELECT RAISE(ABORT, 'forced publication creation failure'); END`,
+            );
+          },
+          async restorePublicationCreation() {
+            await migrationClient.execute("DROP TRIGGER reject_test_publication_creation");
+          },
+          async recoverFulfillments() {
+            return recoverPendingFulfillments({
+              DB: new TursoDatabaseAdapter(migrationClient),
+              STORAGE: storage,
+              ENVIRONMENT: "local",
+              APP_ORIGIN: "https://crushify.test",
+            });
+          },
           async failOrderPayment(orderId: string) {
             await migrationClient.execute(
               `CREATE TRIGGER reject_test_order_paid BEFORE UPDATE OF status ON orders
@@ -328,8 +517,9 @@ describe("Vercel API runtime adapter", () => {
           async restoreOrderPayment() {
             await migrationClient.execute("DROP TRIGGER reject_test_order_paid");
           },
-          expectedMode: "sepay-test",
-          label: "Vercel adapter + Turso local file + mock storage",
+          allTemplates: true,
+          expectedMode: "mock",
+          label: "Vercel adapter + local mock settlement",
         });
         const uploadDesign = await handler(requestWithOrigin("/designs", "https://crushify.test", {
           method: "POST",

@@ -51,9 +51,9 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 ## 7. Application security controls
 
 - Validate all JSON against allowlisted schemas, size limits and safe text rules; output encode by context. Do not insert customer text with `innerHTML`.
-- The existing templates have inline scripts/styles and external CDN scripts/fonts. Build a migration plan for CSP: extract or nonce inline code, pin dependencies, use SRI where supported, minimize third-party origins and test without breaking scenes. Do not claim a strict CSP is deployable until tested.
+- Per-page CSP is configured for the homepage, five templates and publication shell through Cloudflare `_headers`, Vercel `vercel.json`, and the publication Worker response. Policies use inline hashes and exact required font/Three.js sources; local Chrome checks passed with no CSP violations. Vercel Production route responses remain unverified because deployment SSO blocked unauthenticated requests, and the current uncommitted configuration has not been deployed.
 - Use dependency lock/pinning for backend; audit updates and scan for known vulnerabilities. No CDN `latest` references for production app dependencies.
-- Set HSTS (after HTTPS rollout), `X-Content-Type-Options`, appropriate frame restrictions, `Referrer-Policy`, and a carefully tested CSP. Published renderer may need controlled iframe policy.
+- Static pages and assets configure `X-Content-Type-Options`, frame restrictions, `Referrer-Policy`, Permissions Policy, and page-appropriate caching. Vercel's HTTPS edge supplied HSTS on the observed SSO redirects; do not add a competing HSTS rule without verifying the deployed HTTPS response. API responses retain their application-level `no-store` and security headers. Generic unmatched Vercel static errors and hosted page responses still require deployment-level verification.
 - Rate limit login, draft writes, upload/session creation, preview generation, inquiry, checkout and search. Add CAPTCHA only where risk warrants it.
 - Parameterized D1 statements, indexed queries, bounded pagination and safe error responses. No dynamic SQL from customer input.
 

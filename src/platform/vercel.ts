@@ -181,6 +181,37 @@ function validateDatabaseConfiguration(environment: VercelEnvironment): string |
   return null;
 }
 
+function localMockPaymentEnabled(environment: VercelEnvironment): boolean {
+  if (environment.PAYMENT_MODE !== "mock" ||
+      environment.LOCAL_TEST_MODE !== "true" ||
+      environment.ENVIRONMENT !== "local" ||
+      environment.VERCEL_ENV !== "development" ||
+      environment.DATABASE_PROVIDER !== "turso" ||
+      environment.STORAGE_PROVIDER !== "mock") {
+    return false;
+  }
+  try {
+    const databaseUrl = new URL(environment.TURSO_DATABASE_URL ?? "");
+    return databaseUrl.protocol === "file:" &&
+      !databaseUrl.host &&
+      !databaseUrl.username &&
+      !databaseUrl.password &&
+      !databaseUrl.search &&
+      !databaseUrl.hash;
+  } catch {
+    return false;
+  }
+}
+
+function runtimePaymentMode(environment: VercelEnvironment): Env["PAYMENT_MODE"] {
+  if (environment.VERCEL_ENV !== "development" ||
+      environment.LOCAL_TEST_MODE !== "true") {
+    return undefined;
+  }
+  if (environment.PAYMENT_MODE === "sepay-test") return "sepay-test";
+  return localMockPaymentEnabled(environment) ? "mock" : undefined;
+}
+
 function createStorage(
   environment: VercelEnvironment,
   dependencies: VercelRuntimeDependencies,
@@ -378,11 +409,7 @@ export function createVercelApiHandler(
           environment.VERCEL_ENV === "development" && appEnvironment === "local"
         ? "true"
         : undefined,
-      PAYMENT_MODE: environment.VERCEL_ENV === "development" &&
-          environment.LOCAL_TEST_MODE === "true" &&
-          (environment.PAYMENT_MODE === "mock" || environment.PAYMENT_MODE === "sepay-test")
-        ? environment.PAYMENT_MODE
-        : undefined,
+      PAYMENT_MODE: runtimePaymentMode(environment),
       SEPAY_WEBHOOK_SECRET: environment.VERCEL_ENV === "development" &&
           environment.LOCAL_TEST_MODE === "true" ? environment.SEPAY_WEBHOOK_SECRET : undefined,
       SEPAY_BANK_CODE: environment.VERCEL_ENV === "development" &&

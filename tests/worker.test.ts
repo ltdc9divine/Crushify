@@ -4,6 +4,8 @@ import { handleApiRequest } from "../src/index.ts";
 import { createEmailService, type EmailMessage } from "../src/auth.ts";
 import { validateUniverseDesign } from "../src/universe.ts";
 import { detectImage } from "../src/assets.ts";
+import worker from "../src/index.ts";
+import { PUBLICATION_SHELL_CSP } from "../src/security-headers.ts";
 
 const noBindings = { DB: undefined } as never;
 
@@ -66,6 +68,9 @@ describe("API foundation", () => {
     assert.equal(body.status, "ok");
     assert.equal(response.headers.get("x-request-id"), body.request_id);
     assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("x-frame-options"), "DENY");
+    assert.equal(response.headers.get("referrer-policy"), "no-referrer");
   });
 
   it("returns a structured 404 for unimplemented API routes", async () => {
@@ -78,6 +83,49 @@ describe("API foundation", () => {
     assert.equal(response.status, 404);
     assert.equal(body.error.code, "NOT_FOUND");
     assert.equal(response.headers.get("x-request-id"), body.request_id);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("x-frame-options"), "DENY");
+    assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  });
+
+  it("preserves security headers on dashboard, preview, and error responses", async () => {
+    const paths = [
+      ["/api/v1/customers/me", 401],
+      ["/api/v1/previews", 404],
+      ["/api/v1/unimplemented", 404],
+    ] as const;
+
+    for (const [path, status] of paths) {
+      const response = await handleApiRequest(
+        new Request(`https://crushify.test${path}`),
+        noBindings,
+      );
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(response.headers.get("x-frame-options"), "DENY");
+      assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+    }
+  });
+
+  it("adds a single restrictive policy to generated publication-shell responses", async () => {
+    const response = await worker.fetch(new Request("https://crushify.test/p/synthetic-slug"), {
+      ASSETS: {
+        fetch: async () => new Response("<!doctype html><title>Fixture</title>", {
+          headers: { "content-type": "text/html" },
+        }),
+      },
+    } as never);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-security-policy"), PUBLICATION_SHELL_CSP);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("x-frame-options"), "DENY");
+    assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(response.headers.get("permissions-policy"), "camera=(), microphone=(), geolocation=()");
+    assert.equal(response.headers.get("content-security-policy")?.split("default-src").length, 2);
   });
 
   it("rejects non-GET health requests", async () => {

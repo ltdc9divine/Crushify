@@ -7,6 +7,7 @@ import { recoverPendingFulfillments, runPublicationLifecycle } from "./publicati
 import { D1DatabaseAdapter } from "./database/d1.ts";
 import { createStorageFromEnvironment } from "./storage/provider.ts";
 import { apiError, jsonResponse } from "./http.ts";
+import { PUBLICATION_SHELL_CSP } from "./security-headers.ts";
 import type { Env } from "./types.ts";
 
 interface CloudflareEnv extends Omit<Env, "DB" | "ASSETS"> {
@@ -133,9 +134,11 @@ export default {
       const page = await env.ASSETS.fetch(new Request(pageUrl, { method: request.method }));
       const headers = new Headers(page.headers);
       headers.set("Cache-Control", "no-store");
-      headers.set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self'; script-src 'self'; style-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'");
+      headers.set("Content-Security-Policy", PUBLICATION_SHELL_CSP);
       headers.set("X-Content-Type-Options", "nosniff");
       headers.set("Referrer-Policy", "no-referrer");
+      headers.set("X-Frame-Options", "DENY");
+      headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
       return new Response(page.body, { status: page.status, headers });
     }
     return env.ASSETS.fetch(request);

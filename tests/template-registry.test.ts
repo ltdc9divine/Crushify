@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   assetReferences,
@@ -128,6 +129,13 @@ describe("publication template registry", () => {
     assert.equal(validateTemplateData("love-letter", 2, oldDraft).value, undefined);
     const publicData = publicTemplateData("love-letter", newDraft, (id) => `/approved/${id}`);
     assert.deepEqual(publicData.photos, [{ url: `/approved/${secondAsset}`, caption: "Kỷ niệm" }]);
+  });
+
+  it("escapes untrusted chapter and caption text before rendering in the our-memories editor", () => {
+    const source = readFileSync(new URL("../templates/our-memories/our-memories.js", import.meta.url), "utf8");
+    assert.match(source, /const escHtml=value=>/);
+    assert.match(source, /escHtml\(c\.title\)/);
+    assert.match(source, /escHtml\(p\.caption\|\|''\)/);
   });
 
   it("rejects unknown schemas and data fields instead of passing them to a renderer", () => {
