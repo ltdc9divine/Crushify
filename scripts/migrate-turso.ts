@@ -1,5 +1,6 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, readFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createClient } from "@libsql/client";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
 
@@ -21,6 +22,15 @@ async function loadMigrations(directory: string): Promise<SqlMigration[]> {
 async function main(): Promise<void> {
   const url = process.env.TURSO_DATABASE_URL;
   if (!url) throw new Error("TURSO_DATABASE_URL is required");
+
+  if (url.startsWith("file:")) {
+    const filePath = url.startsWith("file://")
+      ? fileURLToPath(url)
+      : isAbsolute(url.slice("file:".length))
+        ? url.slice("file:".length)
+        : resolve(process.cwd(), url.slice("file:".length));
+    await mkdir(dirname(filePath), { recursive: true });
+  }
 
   const client = createClient({
     url,
