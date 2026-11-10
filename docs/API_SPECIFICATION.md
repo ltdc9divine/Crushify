@@ -121,7 +121,9 @@ The following routes are implemented in the local Worker. Local integration test
 | `POST /customers/session/verify` | Public | Consume a hashed, expiring, one-time token and set session/CSRF cookies. |
 | `DELETE /customers/session` | Customer + CSRF | Revoke the current session. |
 | `GET /customers/me` | Customer | Return minimal account data and CSRF token. |
-| `POST /designs` | Customer + CSRF | Create a draft for a supported template/schema version; the Our Universe editor is the only server-backed creator. |
+| `GET /catalog` | Public | Return the five standard products, the centralized monthly/Lifetime price policy, and whether checkout is enabled. |
+| `GET /storage-plans` | Public | Return the centrally configured hosting duration prices and availability. |
+| `POST /designs` | Customer + CSRF | Create a draft for one of the five supported template/schema versions. |
 | `GET /designs/{designId}` | Owner | Read the private draft. Non-owners receive 404. |
 | `PUT /designs/{designId}` | Owner + CSRF | Validate and save the draft using `expected_revision`; stale writes return 409. |
 | `DELETE /designs/{designId}` | Owner + CSRF | Start the design deletion workflow and remove its private media. |
@@ -132,7 +134,7 @@ The following routes are implemented in the local Worker. Local integration test
 | `POST /assets/{assetId}/complete` | Owner + CSRF | Recheck stored object size, type, digest and dimensions before marking it ready. |
 | `GET /assets/{assetId}` | Owner | Read private media through the selected API runtime. |
 | `DELETE /assets/{assetId}` | Owner + CSRF | Delete unreferenced private media. |
-| `POST /orders` | Customer + CSRF + `Idempotency-Key` | Create a local test order from an owned Our Universe draft and an active server-side price; client amounts are rejected. |
+| `POST /orders` | Customer + CSRF + `Idempotency-Key` | Create a local test order from an owned draft and an available server-priced hosting duration; client amounts are rejected. |
 | `GET /orders` | Customer | List up to 50 own self-service orders. |
 | `GET /orders/{orderId}` / `GET /orders/{orderId}/status` | Owner | Read own order and payment status; ownership failures return 404. |
 | `POST /payments/sepay/webhook` | SePay HMAC-SHA256 | Verify raw-body signature and ±300-second timestamp, persist event, then process idempotently or mark for manual review. |
@@ -147,17 +149,22 @@ The following routes are implemented in the local Worker. Local integration test
 | `GET /publications/{slug}/assets/{assetId}` | Public bearer URL | Read a consented, publication-specific derivative. |
 | `GET /p/{slug}` | Public | Serve the recipient shell; Vercel includes a rewrite for this route. |
 
-`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Worker selects one private storage adapter; Vercel uses Cloudinary or local-test-only mock storage. Order routes are available only when `LOCAL_TEST_MODE=true`, the runtime is local, `PAYMENT_MODE=mock|sepay-test`, and a local webhook secret is configured. Publication mutations independently require `LOCAL_TEST_MODE=true` and an unset or `local` `ENVIRONMENT`; otherwise they fail closed with `PUBLICATION_DISABLED`. The price table starts empty, so order creation returns `PRICE_UNAVAILABLE` until a test price is explicitly inserted into a disposable local database. No live checkout, production prices, fulfillment, production entitlement, refund, custom-project payment, or admin reconciliation exists. See [SEPAY_SETUP.md](SEPAY_SETUP.md), [PUBLICATION_AND_DELIVERY.md](PUBLICATION_AND_DELIVERY.md), and [SECURITY_PLAN.md](SECURITY_PLAN.md).
+`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Worker selects one private storage adapter; Vercel uses Cloudinary or local-test-only mock storage. `src/product-catalog.ts` defines the approved policy for all five standard templates: 59,000 VND including the first hosting month, 10,000 VND per additional month, and 199,000 VND total for Lifetime. The catalog remains disabled by default (`STANDARD_CATALOG_ENABLED=false`), so estimates do not enable checkout. Only the local Worker can opt into policy-order tests with `LOCAL_TEST_PRICING_POLICY=true`; this flag is not forwarded by Vercel. The integration harness also retains a separate local fixture-price override for legacy payment contracts. Order/payment routes remain local-test only. Publication mutations independently require `LOCAL_TEST_MODE=true` and an unset or `local` `ENVIRONMENT`; otherwise they fail closed with `PUBLICATION_DISABLED`. No live checkout, production fulfillment, production entitlement, refund, custom-project payment, or admin reconciliation exists. See [SEPAY_SETUP.md](SEPAY_SETUP.md), [PUBLICATION_AND_DELIVERY.md](PUBLICATION_AND_DELIVERY.md), and [SECURITY_PLAN.md](SECURITY_PLAN.md).
 
 ### Implemented local order contract
 
 Create order with `POST /api/v1/orders`, an owner session, CSRF token, and `Idempotency-Key` header (16–128 ASCII letters/digits/period/underscore/colon/hyphen):
 
 ```json
-{ "design_id": "owned-draft-uuid" }
+{
+  "design_id": "owned-draft-uuid",
+  "duration_type": "monthly",
+  "hosting_months": 3,
+  "asset_consents": []
+}
 ```
 
-The server accepts no other body fields; it loads the active template/version and price, snapshots the current draft revision, uses VND integer amounts, and expires the order after 15 minutes. A retry with the same key and same design returns the same order; reuse for a different design returns 409. The server generates independent references: `order_reference` uses the `CRF` prefix and `payment.reference` uses `CRP`. Mock mode returns no bank instructions and marks the response `payment.mock_mode=true`. SePay Test mode requires explicit local Test mode bank settings and returns owner-scoped transfer details (`bank_code`, `bank_account`, optional `account_name`, exact `amount_minor`, payment `reference`, and `qr_url`); it never enables live processing. The browser checkout lives at `/checkout/?design_id=...` and is a local-test UI, not a purchase CTA.
+For Lifetime, send `"duration_type": "lifetime"` and omit `hosting_months` or set it to `null`. The legacy `storage_plan_id` form remains accepted for local fixture/renewal compatibility. The server accepts no price or currency fields, validates the term and standard template, and calculates integer VND amounts from the current centralized policy. Monthly totals are 59,000 + max(0, months - 1) × 10,000; Lifetime is exactly 199,000. Each order stores and returns an immutable pricing snapshot with template, duration, component amounts, currency, policy version, and calculation timestamp; older orders without that snapshot continue to use their persisted order/payment amounts and are not recalculated. Orders expire after 15 minutes. A retry with the same key and payload returns the same order; conflicting reuse returns 409. Since `STANDARD_CATALOG_ENABLED` remains false, normal requests return `PRICE_UNAVAILABLE` and create no order; the local-only policy test switch is not available through Vercel. The server generates independent references: `order_reference` uses the `CRF` prefix and `payment.reference` uses `CRP`. Mock mode returns no bank instructions and marks the response `payment.mock_mode=true`. SePay Test mode requires explicit local Test mode bank settings and returns owner-scoped transfer details (`bank_code`, `bank_account`, optional `account_name`, exact `amount_minor`, payment `reference`, and `qr_url`); it never enables live processing. The shared browser checkout at `/checkout/?design_id=...` displays policy estimates and remains unable to create orders while the catalog is disabled.
 
 Payment integrations implement the `PaymentProvider` contract for transfer instructions, webhook signature verification, parsing, and transaction normalization. The current SePay adapter is the only implementation; introducing the interface does not enable another provider or Live mode.
 
@@ -173,7 +180,7 @@ Cloudinary is selected only when `STORAGE_PROVIDER=cloudinary` and all three ser
 
 ### Vercel runtime adapter
 
-`api/[...path].ts` converts Node `IncomingMessage`/`ServerResponse` to Web `Request`/`Response` and calls the same `handleApiRequest` used by the Worker. It preserves multiple session/CSRF cookies, supports GET/POST/PUT/PATCH/DELETE/OPTIONS, rejects other methods, bounds JSON to 64 KiB and binary image upload bodies to 4 MiB, and applies a 30-second request-body read timeout. The Vercel runtime requires `DATABASE_PROVIDER=turso` with `TURSO_DATABASE_URL` and, for remote URLs, `TURSO_AUTH_TOKEN`; it rejects local `file:` databases outside Vercel Development. It requires `STORAGE_PROVIDER=cloudinary` and Cloudinary credentials except for `STORAGE_PROVIDER=mock`, which is available only in Vercel Development with `LOCAL_TEST_MODE=true`. The Turso connection is initialized on first API use and reused per warm function instance; migrations are never run on request. `APP_ORIGIN` must match exactly for credentialed CORS and CSRF; Preview may use the deployment-specific `VERCEL_URL` when no fixed origin is configured. No Vercel deployment or external credential test has run.
+`api/[...path].ts` converts Node `IncomingMessage`/`ServerResponse` to Web `Request`/`Response` and calls the same `handleApiRequest` used by the Worker. It preserves multiple session/CSRF cookies, supports GET/POST/PUT/PATCH/DELETE/OPTIONS, rejects other methods, bounds JSON to 64 KiB and binary image upload bodies to 4 MiB, and applies a 30-second request-body read timeout. Vercel Production uses `DATABASE_PROVIDER=turso`, `TURSO_DATABASE_URL`, and `TURSO_AUTH_TOKEN`; Preview requires `ENVIRONMENT=staging` and uses only `TURSO_STAGING_DATABASE_URL` and `TURSO_STAGING_AUTH_TOKEN`, without falling back to Production-style names. Preview Cloudinary configuration similarly uses only `CLOUDINARY_STAGING_*` values and an explicit separate-free-account confirmation; the currently available single cloud is not approved for staging. `STORAGE_PROVIDER=mock` is available only in Vercel Development with `LOCAL_TEST_MODE=true`; local API tests use in-memory storage and need no Cloudinary credentials. The Turso connection is initialized on first API use and reused per warm function instance; migrations are never run on request. `APP_ORIGIN` must match exactly for credentialed CORS and CSRF; Preview may use the deployment-specific `VERCEL_URL` when no fixed origin is configured. No Vercel deployment or external credential test has run.
 
 ### Database adapter compatibility
 

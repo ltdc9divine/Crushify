@@ -1,4 +1,9 @@
 const notice = document.querySelector("#notice");
+const checkoutPanel = document.querySelector("#checkout-panel");
+const checkoutForm = document.querySelector("#checkout-form");
+const durationTypeSelect = document.querySelector("#duration-type");
+const hostingMonthsInput = document.querySelector("#hosting-months");
+const durationNote = document.querySelector("#duration-note");
 const orderPanel = document.querySelector("#order-panel");
 const qrPanel = document.querySelector("#qr-panel");
 const qrImage = document.querySelector("#payment-qr");
@@ -8,16 +13,25 @@ const copyFeedback = document.querySelector("#copy-feedback");
 const params = new URLSearchParams(location.search);
 const designId = params.get("design_id");
 const initialOrderId = params.get("order_id");
+const orderStorageKey = designId ? `crushify-order:${designId}` : "";
+let csrfToken = "";
+let currentOrder;
 let pollTimer;
 let expiryTimer;
-let currentOrder;
+let design;
+let catalog;
 
 const statusLabels = {
-  AWAITING_PAYMENT: "Đang chờ thanh toán",
-  PAID: "Đã xác nhận",
-  EXPIRED: "Đã hết hạn",
-  CANCELLED: "Đã hủy",
-  MANUAL_REVIEW: "Đang được kiểm tra",
+  AWAITING_PAYMENT: "Đang chờ xác nhận thanh toán",
+  MANUAL_REVIEW: "Thanh toán đang được kiểm tra",
+  PAID: "Đã xác nhận thanh toán",
+  FULFILLING: "Đang xử lý món quà",
+  FULFILLED: "Đã hoàn tất",
+  FAILED: "Cần hỗ trợ",
+  EXPIRED: "Đơn hàng đã hết hạn",
+  CANCELLED: "Đơn hàng đã hủy",
+  REFUNDED: "Đã hoàn tiền",
+  REFUND_PENDING: "Đang xử lý hoàn tiền",
 };
 
 function showNotice(message, state = "info") {
@@ -26,30 +40,171 @@ function showNotice(message, state = "info") {
 }
 
 async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (csrfToken && options.method && options.method !== "GET") {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
   const response = await fetch(`/api/v1${path}`, {
     credentials: "same-origin",
     cache: "no-store",
     ...options,
+    headers,
   });
   const body = response.headers.get("content-type")?.includes("application/json")
     ? await response.json()
     : null;
-  if (!response.ok) {
-    throw new Error(body?.error?.message || "Không thể hoàn tất yêu cầu.");
-  }
+  if (!response.ok) throw new Error(body?.error?.message || "Không thể hoàn tất yêu cầu.");
   return body;
 }
 
-function formatAmount(amount, currency) {
+function formatAmount(amount, currency = "VND") {
+  if (!Number.isSafeInteger(amount) || amount < 0) return "Chưa có giá";
   return new Intl.NumberFormat("vi-VN", { style: "currency", currency }).format(amount);
+}
+
+function addConsentOptions(data) {
+  const fieldset = document.querySelector("#asset-consents");
+  const assets = new Set();
+  const visit = (value, key = "") => {
+    if (Array.isArray(value)) {
+      value.forEach((entry) => visit(entry));
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      if ((key === "asset_id" || key === "coverImage") &&
+          typeof value === "string" &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+        assets.add(value);
+      }
+      return;
+    }
+    for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
+  };
+  visit(data);
+  fieldset.hidden = assets.size === 0;
+  for (const [index, assetId] of [...assets].entries()) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.assetId = assetId;
+    const text = document.createElement("span");
+    text.textContent = `Cho phép hiển thị ảnh ${index + 1} trên website quà tặng công khai.`;
+    label.append(input, text);
+    fieldset.append(label);
+  }
+}
+
+function selectedConsents() {
+  return [...document.querySelectorAll("#asset-consents input:checked")].map((input) => ({
+    asset_id: input.dataset.assetId,
+    consent_version: "public-image-v1",
+  }));
+}
+
+function updatePrice() {
+  const policy = catalog?.pricing_policy;
+  const product = catalog?.products.find((item) => item.id === design.template_id);
+  const monthly = durationTypeSelect.value === "monthly";
+  const months = Number(hostingMonthsInput.value);
+  const validMonths = Number.isSafeInteger(months) && months >= 1;
+  hostingMonthsInput.disabled = !monthly;
+  hostingMonthsInput.required = monthly;
+  document.querySelector("#lifetime-policy-note").hidden = monthly;
+  document.querySelector("#hosting-charge-label").textContent = monthly
+    ? "Hosting phát sinh"
+    : "Giá gói trọn đời";
+
+  const basePrice = policy?.template_base_price_minor ?? product?.base_price_minor;
+  const includedMonths = policy?.included_hosting_months;
+  const monthlyRate = policy?.additional_month_price_minor;
+  const additionalMonths = monthly && validMonths && Number.isSafeInteger(includedMonths)
+    ? Math.max(0, months - includedMonths)
+    : null;
+  const hostingCharge = monthly && additionalMonths !== null && Number.isSafeInteger(monthlyRate)
+    ? additionalMonths * monthlyRate
+    : null;
+  const total = monthly && hostingCharge !== null && Number.isSafeInteger(basePrice)
+    ? basePrice + hostingCharge
+    : !monthly
+      ? policy?.lifetime_price_minor
+      : null;
+  const estimateValid = Number.isSafeInteger(total) && total > 0;
+  const checkoutEnabled = Boolean(policy?.catalog_enabled && estimateValid);
+  document.querySelector("#duration-price").textContent = monthly
+    ? hostingCharge === null ? "—" : formatAmount(hostingCharge)
+    : Number.isSafeInteger(policy?.lifetime_price_minor)
+      ? formatAmount(policy.lifetime_price_minor)
+      : "—";
+  document.querySelector("#included-months").textContent = monthly
+    ? Number.isSafeInteger(includedMonths) ? `${includedMonths} tháng` : "—"
+    : "Không giới hạn theo thời gian";
+  document.querySelector("#additional-months").textContent = monthly
+    ? additionalMonths === null ? "—" : String(additionalMonths)
+    : "Không áp dụng";
+  document.querySelector("#additional-month-rate").textContent = monthly
+    ? Number.isSafeInteger(monthlyRate) ? formatAmount(monthlyRate) : "—"
+    : "Không áp dụng";
+  document.querySelector("#order-total-preview").textContent = estimateValid
+    ? formatAmount(total)
+    : "Chưa thể tính";
+  const confirmed = document.querySelector("#terms-confirm").checked;
+  document.querySelector("#submit-order").disabled = !checkoutEnabled || !confirmed;
+  if (!estimateValid) {
+    durationNote.textContent = monthly
+      ? "Nhập số tháng hosting là số nguyên dương để xem giá."
+      : "Giá gói trọn đời hiện chưa được cấu hình.";
+    durationNote.dataset.state = "error";
+  } else if (!policy?.catalog_enabled) {
+    durationNote.textContent = "Đây là ước tính theo chính sách giá đã duyệt. Checkout hiện chưa được kích hoạt.";
+    durationNote.dataset.state = "error";
+  } else {
+    durationNote.textContent = "Tổng tiền sẽ được máy chủ tính lại khi tạo đơn.";
+    durationNote.dataset.state = "info";
+  }
+}
+
+function showCatalog(catalogData) {
+  catalog = catalogData;
+  const product = catalog.products.find((item) => item.id === design.template_id && item.available);
+  if (!product) throw new Error("Mẫu này hiện không được mở bán.");
+  document.querySelector("#design-template").textContent = product.title;
+  document.querySelector("#base-price").textContent =
+    `${formatAmount(product.base_price_minor)} · chưa gồm hosting`;
+  document.querySelector("#design-summary").textContent =
+    `Bản xem trước sử dụng phiên bản nội dung ${design.revision} đã lưu. Có thể quay lại trình chỉnh sửa trước khi tạo đơn.`;
+  addConsentOptions(design.data);
+  checkoutPanel.hidden = false;
+  updatePrice();
+}
+
+async function loadPublicationUrl(order) {
+  if (order.status !== "FULFILLED" || !order.design_id) return;
+  try {
+    const result = await api("/publications");
+    const website = result.websites?.find((item) =>
+      item.design_id === order.design_id && item.publication_status === "PUBLISHED" && item.public_url);
+    if (website) {
+      const link = document.querySelector("#publication-link");
+      link.href = website.public_url;
+      link.textContent = "Mở website quà tặng";
+      link.hidden = false;
+    }
+  } catch {
+    document.querySelector("#tracking-help").textContent =
+      "Đơn đã hoàn tất. Hãy xem mục Website của tôi hoặc liên hệ hỗ trợ để lấy đường dẫn.";
+    document.querySelector("#tracking-help").hidden = false;
+  }
 }
 
 function showOrder(order) {
   currentOrder = order;
+  checkoutPanel.hidden = true;
   orderPanel.hidden = false;
-  document.querySelector("#order-reference").textContent = order.order_reference;
+  document.querySelector("#order-reference").textContent = order.order_reference || "—";
   document.querySelector("#order-total").textContent = formatAmount(order.total_minor, order.currency);
-  document.querySelector("#order-status").textContent = statusLabels[order.status] || order.status;
+  document.querySelector("#order-status").textContent = statusLabels[order.status] || "Đang cập nhật";
+  document.querySelector("#fulfillment-status").textContent =
+    statusLabels[order.fulfillment_status] || order.fulfillment_status || "Chưa xử lý";
   const expiryLabel = document.querySelector("#order-expiry");
   expiryLabel.title = order.expires_at ? new Date(order.expires_at).toLocaleString("vi-VN") : "";
   expiryLabel.textContent = order.expires_at ? new Date(order.expires_at).toLocaleString("vi-VN") : "—";
@@ -82,17 +237,29 @@ function showOrder(order) {
   }
   mockNote.hidden = order.payment?.mock_mode !== true || order.status !== "AWAITING_PAYMENT";
 
-  if (order.status === "PAID") {
-    showNotice("Webhook hợp lệ đã xác nhận khoản thanh toán thử nghiệm.", "success");
+  const help = document.querySelector("#tracking-help");
+  const messages = {
+    AWAITING_PAYMENT: "Chỉ giao dịch được máy chủ xác minh mới cập nhật trạng thái. Không chuyển tiền thật trên bản thử nghiệm.",
+    MANUAL_REVIEW: "Có điểm cần kiểm tra. Không gửi thêm khoản thanh toán; liên hệ hỗ trợ nếu cần.",
+    PAID: "Thanh toán đã được xác minh. Món quà đang chờ xử lý.",
+    FULFILLING: "Thanh toán đã xác minh nhưng xuất bản đang chậm. Bạn không cần tạo đơn khác; liên hệ hỗ trợ nếu tình trạng kéo dài.",
+    FAILED: "Đơn cần được hỗ trợ. Không tạo thanh toán mới cho cùng đơn này.",
+    EXPIRED: "Đơn đã hết hạn. Không gửi thêm thanh toán cho đơn này.",
+    CANCELLED: "Đơn đã hủy.",
+    REFUNDED: "Đơn đã được hoàn tiền.",
+    REFUND_PENDING: "Yêu cầu hoàn tiền đang được xử lý.",
+  };
+  help.textContent = messages[order.status] || "";
+  help.hidden = !help.textContent;
+  void loadPublicationUrl(order);
+
+  if (order.status === "FULFILLED" || order.status === "EXPIRED" ||
+      order.status === "CANCELLED" || order.status === "REFUNDED" ||
+      order.status === "FAILED" || order.status === "MANUAL_REVIEW") {
     stopPolling();
-  } else if (order.status === "MANUAL_REVIEW") {
-    showNotice("Giao dịch có điểm chưa khớp và đã được lưu để kiểm tra thủ công.", "error");
-    stopPolling();
-  } else if (order.status === "EXPIRED" || order.status === "CANCELLED") {
-    showNotice("Đơn hàng đã hết hiệu lực. Không gửi thêm giao dịch cho đơn này.", "error");
-    stopPolling();
+    showNotice(statusLabels[order.status] || "Đơn hàng đã được cập nhật.", "success");
   } else {
-    showNotice("Đang chờ webhook xác minh. Mã QR, nếu có, chỉ dùng trong SePay Test mode.");
+    showNotice(statusLabels[order.status] || "Đang cập nhật trạng thái đơn hàng.");
   }
   updateCountdown();
 }
@@ -130,10 +297,9 @@ function updateCountdown() {
     return;
   }
   const seconds = Math.floor(remaining / 1000);
-  const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
-  const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+  const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
   const remainder = String(seconds % 60).padStart(2, "0");
-  document.querySelector("#order-expiry").textContent = `${hours}:${minutes}:${remainder}`;
+  document.querySelector("#order-expiry").textContent = `${minutes}:${remainder}`;
 }
 
 function stopPolling() {
@@ -146,45 +312,93 @@ async function pollOrder(orderId) {
   showOrder(order);
 }
 
-async function startCheckout() {
-  if (!designId && !initialOrderId) {
-    showNotice("Thiếu design_id hoặc order_id. Không có đơn hàng nào được tạo.", "error");
+async function startTracking(orderId) {
+  await pollOrder(orderId);
+  pollTimer = window.setInterval(() => {
+    pollOrder(orderId).catch((error) => showNotice(error.message, "error"));
+  }, 3000);
+  expiryTimer = window.setInterval(updateCountdown, 1000);
+}
+
+async function createOrder(event) {
+  event.preventDefault();
+  const submit = document.querySelector("#submit-order");
+  const policy = catalog?.pricing_policy;
+  const monthly = durationTypeSelect.value === "monthly";
+  const months = Number(hostingMonthsInput.value);
+  if (!design || !policy?.catalog_enabled ||
+      (monthly && (!Number.isSafeInteger(months) || months < 1))) {
+    showNotice("Checkout chưa được kích hoạt hoặc thời hạn hosting không hợp lệ. Chưa tạo đơn.", "error");
     return;
   }
-
+  if (!document.querySelector("#terms-confirm").checked) return;
+  submit.disabled = true;
+  submit.textContent = "Đang tạo đơn…";
   try {
-    const account = await api("/customers/me");
-    if (!account.csrf_token) throw new Error("Phiên đăng nhập chưa sẵn sàng.");
-
-    let orderId = initialOrderId;
-    if (!orderId) {
-      const storageKey = `crushify-order-key:${designId}`;
-      let idempotencyKey = localStorage.getItem(storageKey);
-      if (!idempotencyKey) {
-        idempotencyKey = `checkout-${crypto.randomUUID()}`;
-        localStorage.setItem(storageKey, idempotencyKey);
-      }
-      const order = await api("/orders", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": account.csrf_token,
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({ design_id: designId }),
-      });
-      orderId = order.order_id;
-      showOrder(order);
-    } else {
-      await pollOrder(orderId);
-    }
-
+    const idempotencyKey = `checkout-${crypto.randomUUID()}`;
+    const order = await api("/orders", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: JSON.stringify({
+        design_id: designId,
+        duration_type: monthly ? "monthly" : "lifetime",
+        hosting_months: monthly ? months : null,
+        asset_consents: selectedConsents(),
+      }),
+    });
+    if (orderStorageKey) sessionStorage.setItem(orderStorageKey, order.order_id);
+    showOrder(order);
     pollTimer = window.setInterval(() => {
-      pollOrder(orderId).catch((error) => showNotice(error.message, "error"));
+      pollOrder(order.order_id).catch((error) => showNotice(error.message, "error"));
     }, 3000);
     expiryTimer = window.setInterval(updateCountdown, 1000);
   } catch (error) {
-    showNotice(error instanceof Error ? error.message : "Không thể tải thông tin thanh toán.", "error");
+    showNotice(error instanceof Error ? error.message : "Không thể tạo đơn hàng.", "error");
+    submit.disabled = false;
+  } finally {
+    submit.textContent = "Tạo đơn hàng";
+  }
+}
+
+async function startCheckout() {
+  if (!designId && !initialOrderId) {
+    showNotice("Thiếu mã thiết kế hoặc đơn hàng. Không có đơn nào được tạo.", "error");
+    return;
+  }
+  try {
+    const account = await api("/customers/me");
+    csrfToken = account.csrf_token || "";
+    if (!csrfToken) throw new Error("Phiên đăng nhập chưa sẵn sàng.");
+    if (initialOrderId) {
+      await startTracking(initialOrderId);
+      return;
+    }
+    const savedOrderId = sessionStorage.getItem(orderStorageKey);
+    if (savedOrderId) {
+      try {
+        await startTracking(savedOrderId);
+        return;
+      } catch {
+        sessionStorage.removeItem(orderStorageKey);
+      }
+    }
+    const [savedDesign, products] = await Promise.all([
+      api(`/designs/${encodeURIComponent(designId)}`),
+      api("/catalog"),
+    ]);
+    design = savedDesign;
+    catalog = products;
+    showCatalog(products);
+    checkoutForm.addEventListener("submit", createOrder);
+    durationTypeSelect.addEventListener("change", updatePrice);
+    hostingMonthsInput.addEventListener("input", updatePrice);
+    document.querySelector("#terms-confirm").addEventListener("change", updatePrice);
+    showNotice("Bản nháp đã được lưu. Xem lại giá và lựa chọn hosting trước khi tiếp tục.");
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : "Không thể tải thông tin đặt hàng.", "error");
   }
 }
 

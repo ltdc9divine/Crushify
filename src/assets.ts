@@ -101,15 +101,18 @@ async function createUpload(
     return apiError(requestId, 413, "PAYLOAD_TOO_LARGE", `Image must be ${Math.floor(maxBytes / (1024 * 1024))} MB or smaller`);
   }
   const design = await env.DB.prepare(
-    "SELECT id FROM designs WHERE id = ? AND customer_id = ? AND status = 'DRAFT'",
-  ).bind(designId, required.session!.customerId).first<{ id: string }>();
+    "SELECT id, template_id FROM designs WHERE id = ? AND customer_id = ? AND status = 'DRAFT'",
+  ).bind(designId, required.session!.customerId).first<{ id: string; template_id: string }>();
   if (!design) return apiError(requestId, 404, "NOT_FOUND", "Design not found");
   const count = await env.DB.prepare(
     `SELECT COUNT(*) AS count FROM assets
      WHERE design_id = ? AND customer_id = ?
        AND status IN ('PENDING','QUARANTINED','READY')`,
   ).bind(designId, required.session!.customerId).first<{ count: number }>();
-  if ((count?.count ?? 0) >= 6) return apiError(requestId, 409, "PHOTO_LIMIT", "Design already has six photos");
+  const maxAssets = design.template_id === "our-memories" ? 13 : 6;
+  if ((count?.count ?? 0) >= maxAssets) {
+    return apiError(requestId, 409, "PHOTO_LIMIT", `Design already has ${maxAssets} photos`);
+  }
 
   const id = safeId();
   const key = `private/${randomToken(32)}-${mediaType === "image/png" ? "png" : "jpg"}`;

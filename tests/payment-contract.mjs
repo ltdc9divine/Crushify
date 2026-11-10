@@ -35,12 +35,16 @@ export async function runPaymentContract({
   deactivateTemplatePrice,
   inspectEntitlement,
   inspectOrderArtifacts,
+  inspectOrderPricingSnapshot,
+  tamperOrderPricingSnapshot,
+  restoreOrderPricingSnapshot,
   setPaymentCurrency,
   restorePaymentCurrency,
   failPublicationCreation,
   restorePublicationCreation,
   recoverFulfillments,
   allTemplates = false,
+  testStandardPricing = false,
   expectedMode = "sepay-test",
   label,
 }) {
@@ -88,6 +92,9 @@ export async function runPaymentContract({
   const created = await createRequest();
   assert.equal(created.response.status, 201, `${label}: create test order`);
   assert.equal(created.body.total_minor, TEST_TOTAL_VND, `${label}: server-side price snapshot`);
+  if (inspectOrderPricingSnapshot) {
+    await inspectOrderPricingSnapshot(created.body.order_id);
+  }
   assert.equal(created.body.currency, "VND");
   assert.equal(created.body.status, "AWAITING_PAYMENT");
   assert.equal(created.body.payment.status, "PENDING");
@@ -117,6 +124,93 @@ export async function runPaymentContract({
   assert.match(created.body.payment.reference, /^CRP[A-F0-9]{16}$/);
   assert.notEqual(created.body.order_reference, created.body.payment.reference,
     `${label}: order and payment references are independent`);
+
+  if (testStandardPricing) {
+    const termCases = [
+      [1, 59_000],
+      [2, 69_000],
+      [3, 79_000],
+      [6, 109_000],
+      [12, 169_000],
+    ];
+    for (const [months, total] of termCases) {
+      const result = await request("/orders", owner, {
+        method: "POST",
+        mutating: true,
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": `policy-${months}-${randomUUID()}`,
+        },
+        body: JSON.stringify({
+          design_id: designId,
+          duration_type: "monthly",
+          hosting_months: months,
+          asset_consents: [],
+        }),
+      });
+      assert.equal(result.response.status, 201, `${label}: create ${months}-month policy order`);
+      assert.equal(result.body.total_minor, total, `${label}: calculate ${months}-month policy price`);
+      assert.equal(result.body.pricing_snapshot.total_minor, total);
+      assert.equal(result.body.pricing_snapshot.hosting_months, months);
+      assert.equal(result.body.pricing_snapshot.pricing_version, "standard-v1");
+      const reloaded = await request(`/orders/${result.body.order_id}/status`, owner);
+      assert.deepEqual(reloaded.body.pricing_snapshot, result.body.pricing_snapshot,
+        `${label}: persisted pricing snapshot is returned unchanged`);
+    }
+
+    const lifetime = await request("/orders", owner, {
+      method: "POST",
+      mutating: true,
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `policy-lifetime-${randomUUID()}`,
+      },
+      body: JSON.stringify({
+        design_id: designId,
+        duration_type: "lifetime",
+        hosting_months: null,
+        asset_consents: [],
+      }),
+    });
+    assert.equal(lifetime.response.status, 201, `${label}: create lifetime policy order`);
+    assert.equal(lifetime.body.total_minor, 199_000, `${label}: lifetime is a single 199000 VND package`);
+    assert.equal(lifetime.body.pricing_snapshot.duration_type, "lifetime");
+    assert.equal(lifetime.body.pricing_snapshot.lifetime_price_minor, 199_000);
+    assert.equal(lifetime.body.pricing_snapshot.hosting_months, null);
+
+    for (const hostingMonths of [0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const invalid = await request("/orders", owner, {
+        method: "POST",
+        mutating: true,
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": `invalid-months-${randomUUID()}`,
+        },
+        body: JSON.stringify({
+          design_id: designId,
+          duration_type: "monthly",
+          hosting_months: hostingMonths,
+        }),
+      });
+      assert.equal(invalid.response.status, 400, `${label}: reject invalid month count ${hostingMonths}`);
+    }
+
+    const modifiedPrice = await request("/orders", owner, {
+      method: "POST",
+      mutating: true,
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `modified-total-${randomUUID()}`,
+      },
+      body: JSON.stringify({
+        design_id: designId,
+        duration_type: "monthly",
+        hosting_months: 3,
+        total_minor: 1,
+      }),
+    });
+    assert.equal(modifiedPrice.response.status, 400, `${label}: client cannot supply a total`);
+  }
 
   const retried = await createRequest();
   assert.equal(retried.response.status, 200, `${label}: idempotent retry`);
@@ -303,6 +397,41 @@ export async function runPaymentContract({
       });
       assert.equal(saved.response.status, 200, `${label}: customize ${templateId}`);
       assert.equal(saved.body.revision, 2);
+      const reloaded = await request(`/designs/${createdDesign.body.design_id}`, owner);
+      assert.equal(reloaded.response.status, 200, `${label}: reload ${templateId}`);
+      assert.equal(reloaded.body.revision, 2);
+      const markerFrom = (value) => templateId === "love-letter" ? value.msg
+        : templateId === "our-memories" ? value.story
+          : templateId === "say-yes" ? value.question
+            : value.message;
+      assert.equal(markerFrom(reloaded.body.data), marker, `${label}: persist ${templateId} customization`);
+
+      const staleRevision = await request(`/designs/${createdDesign.body.design_id}`, owner, {
+        method: "PUT",
+        mutating: true,
+        json: {
+          schema_version: createdDesign.body.schema_version,
+          expected_revision: 1,
+          data: reloaded.body.data,
+        },
+      });
+      assert.equal(staleRevision.response.status, 409, `${label}: reject stale ${templateId} revision`);
+      if (otherOwner) {
+        const crossOwnerRead = await request(`/designs/${createdDesign.body.design_id}`, otherOwner);
+        assert.equal(crossOwnerRead.response.status, 404, `${label}: protect ${templateId} design ownership`);
+        const crossOwnerUpdate = await request(`/designs/${createdDesign.body.design_id}`, otherOwner, {
+          method: "PUT",
+          mutating: true,
+          json: {
+            schema_version: createdDesign.body.schema_version,
+            expected_revision: 2,
+            data: reloaded.body.data,
+          },
+        });
+        assert.equal(crossOwnerUpdate.response.status, 404,
+          `${label}: reject cross-owner ${templateId} updates`);
+      }
+
       const preview = await request(`/designs/${createdDesign.body.design_id}/preview`, owner, {
         method: "POST",
         mutating: true,
@@ -311,6 +440,25 @@ export async function runPaymentContract({
       const previewData = await request("/previews", null, { token: preview.body.token });
       assert.equal(previewData.response.status, 200);
       assert.equal(previewData.body.template_id, templateId);
+      assert.equal(markerFrom(previewData.body.data), marker, `${label}: preview saved ${templateId} data`);
+
+      if (testStandardPricing) {
+        const policyOrder = await request("/orders", owner, {
+          method: "POST",
+          mutating: true,
+          headers: { "Idempotency-Key": `policy-${templateId}-${randomUUID()}` },
+          json: {
+            design_id: createdDesign.body.design_id,
+            duration_type: "monthly",
+            hosting_months: 3,
+          },
+        });
+        assert.equal(policyOrder.response.status, 201,
+          `${label}: central pricing accepts standard product ${templateId}`);
+        assert.equal(policyOrder.body.total_minor, 79_000,
+          `${label}: central 3-month total is consistent for ${templateId}`);
+        assert.equal(policyOrder.body.pricing_snapshot.template_id, templateId);
+      }
 
       const order = await request("/orders", owner, {
         method: "POST",
@@ -482,6 +630,32 @@ export async function runPaymentContract({
     assert.equal(mismatchEvent.actual_amount_minor, mismatchOrder.body.total_minor - 1);
     assert.equal(mismatchEvent.provider_transaction_id, mismatchTransactionId);
     assert.ok(mismatchEvent.processing_attempts >= 1);
+  }
+  if (tamperOrderPricingSnapshot && restoreOrderPricingSnapshot) {
+    const snapshotOrder = await createRequest(`snapshot-mismatch-${randomUUID()}`);
+    assert.equal(snapshotOrder.response.status, 201);
+    const originalMetadata = await tamperOrderPricingSnapshot(snapshotOrder.body.order_id);
+    const snapshotTransactionId = String(Number(`${Date.now()}`.slice(-8)) + 7);
+    const snapshotPayload = JSON.stringify({
+      id: snapshotTransactionId,
+      accountNumber: receivingAccount,
+      code: snapshotOrder.body.payment.reference,
+      transferType: "in",
+      transferAmount: snapshotOrder.body.total_minor,
+    });
+    const snapshotMismatch = await request("/payments/sepay/webhook", null, {
+      method: "POST",
+      headers: signedHeaders(webhookSecret, snapshotPayload),
+      body: snapshotPayload,
+    });
+    assert.equal(snapshotMismatch.response.status, 200);
+    const unverified = await request(`/orders/${snapshotOrder.body.order_id}/status`, owner);
+    assert.notEqual(unverified.body.status, "PAID",
+      `${label}: settlement is rejected when payment and saved price snapshot differ`);
+    if (inspectWebhookEvent) {
+      assert.equal((await inspectWebhookEvent(snapshotTransactionId)).outcome, "MANUAL_REVIEW");
+    }
+    await restoreOrderPricingSnapshot(snapshotOrder.body.order_id, originalMetadata);
   }
   if (setPaymentCurrency && restorePaymentCurrency) {
     const currencyOrder = await createRequest(`currency-${randomUUID()}`);

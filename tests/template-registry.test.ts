@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
@@ -136,6 +137,54 @@ describe("publication template registry", () => {
     assert.match(source, /const escHtml=value=>/);
     assert.match(source, /escHtml\(c\.title\)/);
     assert.match(source, /escHtml\(p\.caption\|\|''\)/);
+  });
+
+  it("provides accessible names for dynamically generated photo and chapter controls", () => {
+    const universe = readFileSync(new URL("../templates/our-universe/index.html", import.meta.url), "utf8");
+    const memories = readFileSync(new URL("../templates/our-memories/our-memories.js", import.meta.url), "utf8");
+    const proposal = readFileSync(new URL("../templates/say-yes/say-yes.js", import.meta.url), "utf8");
+    assert.match(universe, /cap\.setAttribute\('aria-label',`Chú thích ảnh \$\{i\+1\}`\)/);
+    assert.match(memories, /aria-label="Tiêu đề kỷ niệm \$\{i\+1\}"/);
+    assert.match(memories, /aria-label="Chú thích ảnh \$\{i\+1\}"/);
+    assert.match(memories, /aria-label="Chương cho ảnh \$\{i\+1\}"/);
+    assert.match(proposal, /aria-label="Chú thích ảnh \$\{i\+1\}"/);
+  });
+
+  it("uses keyboard-operable photo pickers and restores focus after photo-list updates", () => {
+    const loveLetterHtml = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    const memoriesHtml = readFileSync(new URL("../templates/our-memories/index.html", import.meta.url), "utf8");
+    const proposalHtml = readFileSync(new URL("../templates/say-yes/index.html", import.meta.url), "utf8");
+    const memories = readFileSync(new URL("../templates/our-memories/our-memories.js", import.meta.url), "utf8");
+    const proposal = readFileSync(new URL("../templates/say-yes/say-yes.js", import.meta.url), "utf8");
+    for (const html of [loveLetterHtml, memoriesHtml, proposalHtml]) {
+      assert.match(html, /<button id="pick-photos"[^>]*type="button"/);
+    }
+    for (const source of [loveLetterHtml, memories, proposal]) {
+      assert.match(source, /\$\('#pick-photos'\)\.onclick=\(\)=>\$\('#up'\)\.click\(\)/);
+    }
+    assert.ok(memories.includes('[data-a="cov"]`)?.focus()'));
+    assert.ok(memories.includes('[data-a="ch"]`)?.focus()'));
+    assert.ok(proposal.includes('data-i="${focusIndex}"] button`)?.focus()'));
+  });
+
+  it("rerenders loaded Our Memories images without triggering another design save", () => {
+    const memories = readFileSync(new URL("../templates/our-memories/our-memories.js", import.meta.url), "utf8");
+    assert.match(memories, /const renderSoon=\(\)=>\{clearTimeout\(tm\);tm=setTimeout\(apply,220\)\}/);
+    assert.match(memories, /const soon=\(\)=>\{window\.dispatchEvent\(new Event\('crushify:changed'\)\);renderSoon\(\)\}/);
+    assert.match(memories, /i\.onload=\(\)=>\{i\.ok=1;renderSoon\(\)\}/);
+    assert.match(memories, /document\.fonts\.ready\.then\(renderSoon\)/);
+  });
+
+  it("keeps the Our Universe inline script hash synchronized with its CSP", () => {
+    const source = readFileSync(new URL("../templates/our-universe/index.html", import.meta.url), "utf8");
+    const script = [...source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)]
+      .find(([, attributes]) => !/\bsrc\s*=/.test(attributes ?? ""));
+    const policy = source.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/i);
+    assert.ok(script, "expected an inline application script");
+    assert.ok(policy, "expected a page Content Security Policy");
+    const body = (script[2] ?? "").replace(/\r\n?/g, "\n");
+    const hash = createHash("sha256").update(body).digest("base64");
+    assert.ok(policy[1]?.includes(`'sha256-${hash}'`), "CSP must authorize the exact inline script");
   });
 
   it("rejects unknown schemas and data fields instead of passing them to a renderer", () => {

@@ -129,7 +129,13 @@ async function paidOrderForOwner(
        AND p.status = 'SUCCEEDED' AND p.review_required = 0
        AND p.provider_payment_id IS NOT NULL AND p.provider_payment_id <> ''
        AND p.succeeded_at IS NOT NULL AND p.amount_minor = o.total_minor
-       AND p.currency = o.currency` ,
+       AND p.currency = o.currency
+       AND NOT EXISTS (
+         SELECT 1 FROM order_items pricing_item
+         WHERE pricing_item.order_id = o.id AND pricing_item.item_type = 'ADD_ON'
+           AND json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') IS NOT NULL
+           AND CAST(json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER) <> o.total_minor
+       )` ,
   ).bind(orderId, customerId).first<EligibleOrder>();
 }
 
@@ -388,6 +394,10 @@ export async function runPublicationLifecycle(
   const expiring = await env.DB.prepare(
     `SELECT id FROM publications
      WHERE status = 'PUBLISHED' AND expires_at IS NOT NULL AND expires_at <= ?
+       AND NOT EXISTS (
+         SELECT 1 FROM storage_entitlements entitlement
+         WHERE entitlement.publication_id = publications.id AND entitlement.status = 'LIFETIME'
+       )
      ORDER BY expires_at LIMIT ?`,
   ).bind(now, limit).all<{ id: string }>();
   for (const { id } of expiring.results) {
@@ -411,6 +421,10 @@ export async function runPublicationLifecycle(
     `SELECT id, design_id FROM publications
      WHERE status IN ('EXPIRED','REVOKED') AND retention_delete_after_at IS NOT NULL
        AND retention_delete_after_at <= ?
+       AND NOT EXISTS (
+         SELECT 1 FROM storage_entitlements entitlement
+         WHERE entitlement.publication_id = publications.id AND entitlement.status = 'LIFETIME'
+       )
        AND NOT EXISTS (
          SELECT 1 FROM orders o
          WHERE o.design_id = publications.design_id
@@ -637,6 +651,12 @@ async function publish(
            AND payment.provider_payment_id <> '' AND payment.succeeded_at IS NOT NULL
            AND payment.review_required = 0 AND payment.amount_minor = o.total_minor
            AND payment.currency = o.currency
+           AND NOT EXISTS (
+             SELECT 1 FROM order_items pricing_item
+             WHERE pricing_item.order_id = o.id AND pricing_item.item_type = 'ADD_ON'
+               AND json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') IS NOT NULL
+               AND CAST(json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER) <> o.total_minor
+           )
        )`,
   ).bind(now, now, publicationId, expectedLifecycle, now, customerId).run();
   if (result.meta.changes !== 1) return apiError(requestId, 409, "CONFLICT", "Publication state changed; reload before publishing");
@@ -1383,6 +1403,12 @@ async function publicPublication(
        AND payment.provider_payment_id <> '' AND payment.succeeded_at IS NOT NULL
        AND payment.review_required = 0 AND payment.amount_minor = o.total_minor
        AND payment.currency = o.currency
+       AND NOT EXISTS (
+         SELECT 1 FROM order_items pricing_item
+         WHERE pricing_item.order_id = o.id AND pricing_item.item_type = 'ADD_ON'
+           AND json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') IS NOT NULL
+           AND CAST(json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER) <> o.total_minor
+       )
      JOIN payment_webhook_events e ON e.provider = payment.provider
        AND e.event_id = payment.provider_payment_id AND e.outcome = 'PROCESSED'
      JOIN templates t ON t.id = p.template_id AND t.status = 'ACTIVE'
@@ -1466,6 +1492,12 @@ async function publicAsset(
        AND payment.provider_payment_id <> '' AND payment.succeeded_at IS NOT NULL
        AND payment.review_required = 0 AND payment.amount_minor = o.total_minor
        AND payment.currency = o.currency
+       AND NOT EXISTS (
+         SELECT 1 FROM order_items pricing_item
+         WHERE pricing_item.order_id = o.id AND pricing_item.item_type = 'ADD_ON'
+           AND json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') IS NOT NULL
+           AND CAST(json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER) <> o.total_minor
+       )
      JOIN payment_webhook_events e ON e.provider = payment.provider
        AND e.event_id = payment.provider_payment_id AND e.outcome = 'PROCESSED'
      JOIN templates t ON t.id = p.template_id AND t.status = 'ACTIVE'

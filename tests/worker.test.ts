@@ -89,6 +89,29 @@ describe("API foundation", () => {
     assert.equal(response.headers.get("referrer-policy"), "no-referrer");
   });
 
+  it("exposes the approved product base price while clearly disabling unpriced hosting", async () => {
+    const response = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/catalog"),
+      noBindings,
+    );
+    const body = await response.json() as {
+      products: Array<{ id: string; base_price_minor: number; currency: string }>;
+      storage_durations: Array<{ id: string; amount_minor: number | null; enabled: boolean }>;
+    };
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.products.map((product) => product.id).sort(), [
+      "distance-means-nothing", "love-letter", "our-memories", "our-universe", "say-yes",
+    ]);
+    assert.ok(body.products.every((product) =>
+      product.base_price_minor === 59_000 && product.currency === "VND"));
+    assert.deepEqual(body.storage_durations.map((plan) => plan.id), [
+      "1-month", "3-months", "6-months", "12-months", "lifetime",
+    ]);
+    assert.ok(body.storage_durations.every((plan) =>
+      plan.amount_minor === null && plan.enabled === false));
+  });
+
   it("preserves security headers on dashboard, preview, and error responses", async () => {
     const paths = [
       ["/api/v1/customers/me", 401],

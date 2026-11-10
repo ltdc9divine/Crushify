@@ -5,8 +5,17 @@ export class StagingConfigurationError extends Error {}
 const expectedDatabase = "crushify-staging";
 const expectedGroup = "crushify-staging-sg";
 const expectedRegion = "Singapore";
-const expectedCloudinaryCloud = "hgtcizux";
+const previouslyAssumedCloudinaryTestCloud = "hgtcizux";
+const stagingCloudinaryConfirmation = "I_CONFIRM_SEPARATE_FREE_CLOUD";
 const stagingDatabaseHostname = /^crushify-staging-[a-z0-9-]+\.turso\.io$/i;
+
+export function assertTursoMigrationConfirmation(environment: Environment): void {
+  if (environment.TURSO_MIGRATE_CONFIRM !== "I_CONFIRM_APPLY_STAGING_MIGRATIONS") {
+    throw new StagingConfigurationError(
+      "Staging migrations require explicit TURSO_MIGRATE_CONFIRM confirmation",
+    );
+  }
+}
 
 function assertStagingEnvironment(environment: Environment): void {
   if (environment.CRUSHIFY_STAGING_PROFILE !== "local" ||
@@ -60,12 +69,14 @@ export function assertCloudinaryStagingConfiguration(
 ): { cloudName: string; apiKey: string; apiSecret: string } {
   assertStagingEnvironment(environment);
   if (environment.STORAGE_PROVIDER !== "cloudinary" ||
-      environment.CLOUDINARY_STAGING_CLOUD_NAME !== expectedCloudinaryCloud ||
+      !environment.CLOUDINARY_STAGING_CLOUD_NAME?.trim() ||
+      environment.CLOUDINARY_STAGING_CLOUD_NAME === previouslyAssumedCloudinaryTestCloud ||
+      environment.CLOUDINARY_STAGING_ISOLATED_ACCOUNT !== stagingCloudinaryConfirmation ||
       environment.CLOUDINARY_SMOKE_TEST !== "I_CONFIRM_SYNTHETIC_DATA" ||
       !environment.CLOUDINARY_STAGING_API_KEY?.trim() ||
       !environment.CLOUDINARY_STAGING_API_SECRET?.trim()) {
     throw new StagingConfigurationError(
-      "Cloudinary smoke test requires the confirmed Test cloud and explicit synthetic-data opt-in",
+      "Cloudinary staging requires a separately confirmed free cloud and explicit synthetic-data opt-in",
     );
   }
 

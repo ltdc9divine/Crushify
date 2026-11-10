@@ -10,3 +10,8 @@ html{overflow-x:clip}
 .template-card[data-href] .template-art{transition:transform .25s,border-color .25s}
 .template-card[data-href]:hover .template-art,.template-card[data-href]:focus-within .template-art{transform:translateY(-4px);border-color:rgba(242,140,171,.55)}
 a.round-arrow{display:grid;place-items:center}
+.template-order-link{display:inline-flex;align-items:center;gap:8px;margin-top:12px;color:#f2a4bb;font-size:11px;font-weight:700}
+.template-order-link:hover{color:#fff}
+.template-order-link span{font-size:14px}
+.pricing-grid-single{grid-template-columns:minmax(0,480px);justify-content:center}
+.duration-unavailable{padding:10px 12px;border-left:2px solid var(--pink);background:rgba(242,140,171,.08);color:#e8c7d2;font-size:12px;line-height:1.6}

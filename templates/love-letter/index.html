@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-9jCMe+ApcxPlMtrngmUWxXUvnu0FqFc2TkTuaS3GKes='; style-src 'self' https://fonts.googleapis.com 'sha256-1t+C2WsKcJT0zJVn1nw7vaIm5Do8q35eVbG0bRjBWzA='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-JXQnCK9inGFRClv+Pkc6pwKDPRGOqdanm3+EUv/5/AM='; style-src 'self' https://fonts.googleapis.com 'sha256-1t+C2WsKcJT0zJVn1nw7vaIm5Do8q35eVbG0bRjBWzA='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
 <meta name="referrer" content="no-referrer">
 <title>Crushify · Lá thư tình 3D</title>
 <link rel="stylesheet" href="/shared/publication-bootstrap.css">
@@ -51,7 +51,7 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 <textarea id="f-msg" maxlength="500" rows="5" placeholder="Lời nhắn của bạn…" aria-label="Lời nhắn"></textarea><small id="cnt"></small>
 <input id="f-sec" placeholder="Lời nhắn bí mật trong trái tim pha lê" maxlength="120" aria-label="Lời nhắn bí mật" style="margin-top:8px">
 <h3>2 · Kỷ niệm</h3><div id="thumbs"></div>
-<label class="btn">＋ Thêm ảnh (tối đa 4)<input id="up" type="file" accept="image/*" multiple hidden></label>
+<button id="pick-photos" class="btn" type="button">＋ Thêm ảnh (tối đa 4)</button><input id="up" type="file" accept="image/*" multiple hidden>
 <h3>3 · Chủ đề</h3><div id="themes"></div>
 <h3>4 · Nhịp chuyển động</h3>
 <select id="f-spd" aria-label="Nhịp chuyển động"><option value="1">Điện ảnh (chậm, đầy đủ)</option><option value="2">Nhanh</option></select>
@@ -75,6 +75,7 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 <div id="lb" hidden><img alt="Ảnh kỷ niệm"></div>
 
 <script src="/shared/publication-bootstrap.js"></script>
+<script src="/shared/customer-editor-data-url.js"></script>
 <script src="/shared/customer-editor.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -301,6 +302,7 @@ const inp=()=>{Object.keys(F).forEach(k=>D[k]=F[k].value);$('#cnt').textContent=
 Object.values(F).forEach(e=>e.addEventListener('input',inp));
 Object.entries(TH).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.style.borderColor=t.ui;b.onclick=()=>applyTheme(k);$('#themes').appendChild(b)});
 $('#up').onchange=e=>{[...e.target.files].slice(0,4).forEach(f=>{const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=c.height=512;const s=Math.min(im.width,im.height);c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,512,512);up.push(c);D.photos=[];if(up.length>4)up.shift();PH.length=0;syncPh();URL.revokeObjectURL(im.src)};im.src=URL.createObjectURL(f)});e.target.value=''};
+$('#pick-photos').onclick=()=>$('#up').click();
 $('#open').onclick=()=>S==='sealed'?openL():closeL();
 $('#b-reset').onclick=()=>setCam(S==='read'||S==='open'?readCam():CAMS.home);
 $('#b-zin').onclick=()=>{gl.r*=.8;lim()};$('#b-zout').onclick=()=>{gl.r*=1.25;lim()};

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  assertTursoMigrationConfirmation,
   assertCloudinaryStagingConfiguration,
   assertTursoStagingConfiguration,
 } from "../scripts/staging-config.ts";
@@ -20,13 +21,30 @@ const validCloudinaryEnvironment = {
   CRUSHIFY_STAGING_PROFILE: "local",
   ENVIRONMENT: "staging",
   STORAGE_PROVIDER: "cloudinary",
-  CLOUDINARY_STAGING_CLOUD_NAME: "hgtcizux",
+  CLOUDINARY_STAGING_CLOUD_NAME: "crushify-staging-free",
   CLOUDINARY_STAGING_API_KEY: "synthetic-cloudinary-key",
   CLOUDINARY_STAGING_API_SECRET: "synthetic-cloudinary-secret",
+  CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
   CLOUDINARY_SMOKE_TEST: "I_CONFIRM_SYNTHETIC_DATA",
 };
 
 describe("staging script environment guards", () => {
+  it("requires a separate explicit confirmation before applying migrations", () => {
+    assert.throws(
+      () => assertTursoMigrationConfirmation({}),
+      /explicit TURSO_MIGRATE_CONFIRM confirmation/,
+    );
+    assert.throws(
+      () => assertTursoMigrationConfirmation({
+        TURSO_MIGRATE_CONFIRM: "I_CONFIRM_DATA",
+      }),
+      /explicit TURSO_MIGRATE_CONFIRM confirmation/,
+    );
+    assert.doesNotThrow(() => assertTursoMigrationConfirmation({
+      TURSO_MIGRATE_CONFIRM: "I_CONFIRM_APPLY_STAGING_MIGRATIONS",
+    }));
+  });
+
   it("rejects production deployments for migrations and Turso smoke tests", () => {
     for (const requireOptIn of [false, true]) {
       assert.throws(
@@ -132,10 +150,11 @@ describe("staging script environment guards", () => {
     );
   });
 
-  it("requires the Test cloud, Cloudinary storage, and explicit synthetic-data opt-in", () => {
+  it("requires a separate free cloud, Cloudinary storage, and explicit synthetic-data opt-in", () => {
     for (const override of [
       { STORAGE_PROVIDER: "mock" },
-      { CLOUDINARY_STAGING_CLOUD_NAME: "production-cloud" },
+      { CLOUDINARY_STAGING_CLOUD_NAME: "hgtcizux" },
+      { CLOUDINARY_STAGING_ISOLATED_ACCOUNT: undefined },
       { CLOUDINARY_SMOKE_TEST: undefined },
       { CLOUDINARY_STAGING_API_KEY: undefined },
       { CLOUDINARY_STAGING_API_SECRET: undefined },
@@ -145,7 +164,7 @@ describe("staging script environment guards", () => {
           ...validCloudinaryEnvironment,
           ...override,
         }),
-        /Cloudinary smoke test requires/,
+        /Cloudinary staging requires/,
       );
     }
   });
@@ -161,7 +180,7 @@ describe("staging script environment guards", () => {
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.doesNotMatch(error.message, /synthetic-cloudinary-secret/);
-        return /Cloudinary smoke test requires/.test(error.message);
+        return /Cloudinary staging requires/.test(error.message);
       },
     );
   });
@@ -175,7 +194,7 @@ describe("staging script environment guards", () => {
         CLOUDINARY_API_KEY: validCloudinaryEnvironment.CLOUDINARY_STAGING_API_KEY,
         CLOUDINARY_API_SECRET: validCloudinaryEnvironment.CLOUDINARY_STAGING_API_SECRET,
       }),
-      /Cloudinary smoke test requires/,
+      /Cloudinary staging requires/,
     );
   });
 });

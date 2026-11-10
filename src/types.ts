@@ -20,6 +20,8 @@ export interface Env {
   CRON_SECRET?: string;
   APP_ORIGIN?: string;
   LOCAL_TEST_MODE?: string;
+  LOCAL_TEST_CATALOG_OVERRIDE?: string;
+  LOCAL_TEST_PRICING_POLICY?: string;
   PAYMENT_MODE?: "mock" | "sepay-test";
   SEPAY_WEBHOOK_SECRET?: string;
   SEPAY_BANK_CODE?: string;

@@ -68,7 +68,14 @@
       try {
         window.CRUSHIFY_CUSTOMER_PREVIEW = true;
         window.CRUSHIFY_PREVIEW_TOKEN = token;
-        window.CRUSHIFY_PUBLICATION_DATA = await resolve(preview.data);
+        const data = await resolve(preview.data);
+        if (templateId === "our-memories" &&
+            typeof preview.data.coverImage === "string" &&
+            preview.data.coverImage.startsWith("/api/v1/previews/assets/")) {
+          const cover = await resolve({ url: preview.data.coverImage });
+          data.coverImage = cover.url;
+        }
+        window.CRUSHIFY_PUBLICATION_DATA = data;
         if (templateId === "our-memories") window.MEMORIES_DATA = window.CRUSHIFY_PUBLICATION_DATA;
         if (templateId === "say-yes") window.SAYYES_DATA = window.CRUSHIFY_PUBLICATION_DATA;
         return window.CRUSHIFY_PUBLICATION_DATA;

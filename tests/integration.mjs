@@ -39,6 +39,10 @@ const child = spawn(
     "--var",
     "LOCAL_TEST_MODE:true",
     "--var",
+    "LOCAL_TEST_CATALOG_OVERRIDE:true",
+    "--var",
+    "LOCAL_TEST_PRICING_POLICY:true",
+    "--var",
     "PAYMENT_MODE:sepay-test",
     "--var",
     `SEPAY_WEBHOOK_SECRET:${webhookSecret}`,
@@ -156,6 +160,18 @@ async function json(path, session, options = {}) {
   return { response, body };
 }
 
+async function paymentContractRequest(path, session, options = {}) {
+  const { json: jsonBody, token, ...requestOptions } = options;
+  const headers = new Headers(requestOptions.headers || {});
+  if (jsonBody !== undefined) headers.set("Content-Type", "application/json");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return json(path, session, {
+    ...requestOptions,
+    headers,
+    ...(jsonBody !== undefined ? { body: JSON.stringify(jsonBody) } : {}),
+  });
+}
+
 async function signIn(email) {
   const start = logs.length;
   const requested = await json("/customers/session", null, {
@@ -177,7 +193,24 @@ async function signIn(email) {
   const setCookies = verified.response.headers.getSetCookie();
   const cookies = setCookies.map((value) => value.split(";", 1)[0]);
   const csrf = cookies.find((value) => value.startsWith("crushify_csrf="))?.split("=", 2)[1];
-  assert.ok(cookies.some((value) => value.startsWith("crushify_session=")));
+  const sessionCookie = setCookies.find((value) => value.startsWith("crushify_session="));
+  const csrfCookie = setCookies.find((value) => value.startsWith("crushify_csrf="));
+  assert.ok(sessionCookie, `${email}: session cookie`);
+  assert.ok(csrfCookie, `${email}: CSRF cookie`);
+  const sessionAttributes = sessionCookie.slice(sessionCookie.indexOf(";") + 1);
+  const csrfAttributes = csrfCookie.slice(csrfCookie.indexOf(";") + 1);
+  assert.ok(/(?:^|;)\s*HttpOnly(?:;|$)/i.test(sessionAttributes), "local session cookie is HttpOnly");
+  assert.ok(/(?:^|;)\s*SameSite=Lax(?:;|$)/i.test(sessionAttributes), "local session cookie uses SameSite=Lax");
+  assert.ok(/(?:^|;)\s*Path=\/api\/v1(?:;|$)/i.test(sessionAttributes), "local session cookie has a narrow API path");
+  assert.ok(/(?:^|;)\s*Max-Age=1209600(?:;|$)/i.test(sessionAttributes), "local session cookie has a 14-day lifetime");
+  assert.ok(!/(?:^|;)\s*Secure(?:;|$)/i.test(sessionAttributes), "local HTTP session cookie omits Secure");
+  assert.ok(!/(?:^|;)\s*Domain=|(?:^|;)\s*Expires=/i.test(sessionAttributes), "local session cookie has no Domain or Expires attribute");
+  assert.ok(!/(?:^|;)\s*HttpOnly(?:;|$)/i.test(csrfAttributes), "CSRF cookie is readable by the client");
+  assert.ok(/(?:^|;)\s*SameSite=Lax(?:;|$)/i.test(csrfAttributes), "local CSRF cookie uses SameSite=Lax");
+  assert.ok(/(?:^|;)\s*Path=\/api\/v1(?:;|$)/i.test(csrfAttributes), "local CSRF cookie has a narrow API path");
+  assert.ok(/(?:^|;)\s*Max-Age=1209600(?:;|$)/i.test(csrfAttributes), "local CSRF cookie has a 14-day lifetime");
+  assert.ok(!/(?:^|;)\s*Secure(?:;|$)/i.test(csrfAttributes), "local HTTP CSRF cookie omits Secure");
+  assert.ok(!/(?:^|;)\s*Domain=|(?:^|;)\s*Expires=/i.test(csrfAttributes), "local CSRF cookie has no Domain or Expires attribute");
   assert.ok(csrf);
   const session = { cookies, csrf };
   const me = await json("/customers/me", session);
@@ -318,6 +351,81 @@ try {
 
   const ownerEmail = `phase2-${crypto.randomUUID()}@example.test`;
   const first = await signIn(ownerEmail);
+  const csrfRequest = (csrfToken) => fetch(origin + "/api/v1/designs", {
+    method: "POST",
+    headers: {
+      Cookie: first.cookies.join("; "),
+      Origin: origin,
+      "Content-Type": "application/json",
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+    },
+    body: JSON.stringify({ template_id: "our-universe", schema_version: 1 }),
+  });
+  assert.equal((await csrfRequest(null)).status, 403, "missing CSRF header is rejected");
+  assert.equal((await csrfRequest("synthetic-mismatched-csrf-token")).status, 403,
+    "mismatched CSRF header is rejected");
+
+  const invalidReturnPaths = [
+    "https://evil.example",
+    "//evil.example",
+    "\\\\evil.example",
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "vbscript:alert(1)",
+    "file:///synthetic",
+    "/%2f%2fevil.example",
+    "/%252e%252e%252f",
+  ];
+  for (const [index, returnTo] of invalidReturnPaths.entries()) {
+    const invalidReturn = await json("/customers/session", null, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: `redirect-check-${index}-${crypto.randomUUID()}@example.test`,
+        return_to: returnTo,
+      }),
+    });
+    assert.equal(invalidReturn.response.status, 400, `unsafe return path ${index} is rejected`);
+  }
+
+  const expiredMagicStart = logs.length;
+  const expiredMagicEmail = `expired-magic-${crypto.randomUUID()}@example.test`;
+  const expiredMagicRequest = await json("/customers/session", null, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: expiredMagicEmail }),
+  });
+  assert.equal(expiredMagicRequest.response.status, 202);
+  const expiredMagicToken = await waitForMagicToken(expiredMagicStart);
+  const expiredMagicHash = createHash("sha256").update(expiredMagicToken).digest("hex");
+  executeLocalD1(
+    `UPDATE login_tokens SET expires_at = '2000-01-01T00:00:00.000Z' ` +
+    `WHERE token_hash = ${sqlText(expiredMagicHash)}`,
+  );
+  const expiredMagicVerify = await json("/customers/session/verify", null, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: expiredMagicToken }),
+  });
+  assert.equal(expiredMagicVerify.response.status, 401, "expired magic link is rejected");
+
+  const expiringSession = await signIn(`expired-session-${crypto.randomUUID()}@example.test`);
+  const rawSessionCookie = expiringSession.cookies.find((value) =>
+    value.startsWith("crushify_session="),
+  );
+  assert.ok(rawSessionCookie, "synthetic session cookie exists");
+  const rawSession = rawSessionCookie.slice("crushify_session=".length);
+  const sessionHash = createHash("sha256").update(rawSession).digest("hex");
+  executeLocalD1(
+    `UPDATE customer_sessions SET expires_at = '2000-01-01T00:00:00.000Z' ` +
+    `WHERE token_hash = ${sqlText(sessionHash)}`,
+  );
+  assert.equal(
+    (await json("/customers/me", expiringSession)).response.status,
+    401,
+    "expired session is rejected",
+  );
+
   const unauthenticated = await json("/designs", null, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -350,16 +458,24 @@ try {
   });
   assert.equal(paymentDesign.response.status, 201);
   await runPaymentContract({
-    request: json,
+    request: paymentContractRequest,
     async seedPrice(amount) {
-      executeLocalD1(
-        `INSERT INTO template_prices (
-          id, template_id, schema_version, currency, amount_minor, is_active, created_at, updated_at
-        ) VALUES (
-          'payment-test-price', 'our-universe', 1, 'VND', ${amount}, 1,
-          '${new Date().toISOString()}', '${new Date().toISOString()}'
-        )`,
-      );
+      for (const [templateId, schemaVersion] of [
+        ["our-universe", 1],
+        ["love-letter", 2],
+        ["our-memories", 1],
+        ["say-yes", 1],
+        ["distance-means-nothing", 1],
+      ]) {
+        executeLocalD1(
+          `INSERT INTO template_prices (
+            id, template_id, schema_version, currency, amount_minor, is_active, created_at, updated_at
+          ) VALUES (
+            'payment-test-price-${templateId}', '${templateId}', ${schemaVersion}, 'VND', ${amount}, 1,
+            '${new Date().toISOString()}', '${new Date().toISOString()}'
+          )`,
+        );
+      }
       for (const [planId, priceId] of [
         ["1-month", "payment-test-storage-1"],
         ["3-months", "payment-test-storage-3"],
@@ -376,6 +492,49 @@ try {
           )`,
         );
       }
+    },
+    inspectOrderPricingSnapshot(orderId) {
+      const readSnapshot = () => queryLocalD1(
+        `SELECT item_type, unit_amount_minor, line_total_minor, metadata_json
+         FROM order_items WHERE order_id = '${orderId}' ORDER BY item_type`,
+      );
+      const before = readSnapshot();
+      const templateRow = queryLocalD1(
+        "SELECT id, amount_minor FROM template_prices WHERE template_id = 'our-universe' AND is_active = 1",
+      )[0];
+      const storageRow = queryLocalD1(
+        "SELECT id, amount_minor FROM storage_plan_prices WHERE storage_plan_id = '1-month' AND is_active = 1",
+      )[0];
+      assert.ok(templateRow?.id && storageRow?.id);
+      try {
+        executeLocalD1(`UPDATE template_prices SET amount_minor = ${templateRow.amount_minor + 1} WHERE id = '${templateRow.id}'`);
+        executeLocalD1(`UPDATE storage_plan_prices SET amount_minor = ${storageRow.amount_minor + 1} WHERE id = '${storageRow.id}'`);
+        assert.deepEqual(readSnapshot(), before, "saved order price snapshots do not change with catalog updates");
+      } finally {
+        executeLocalD1(`UPDATE template_prices SET amount_minor = ${templateRow.amount_minor} WHERE id = '${templateRow.id}'`);
+        executeLocalD1(`UPDATE storage_plan_prices SET amount_minor = ${storageRow.amount_minor} WHERE id = '${storageRow.id}'`);
+      }
+    },
+    tamperOrderPricingSnapshot(orderId) {
+      const row = queryLocalD1(
+        `SELECT metadata_json FROM order_items
+         WHERE order_id = '${orderId}' AND item_type = 'ADD_ON'`,
+      )[0];
+      assert.ok(row?.metadata_json);
+      const original = row.metadata_json;
+      const metadata = JSON.parse(original);
+      metadata.pricing_snapshot.total_minor += 1;
+      executeLocalD1(
+        `UPDATE order_items SET metadata_json = ${sqlText(JSON.stringify(metadata))}
+         WHERE order_id = '${orderId}' AND item_type = 'ADD_ON'`,
+      );
+      return original;
+    },
+    restoreOrderPricingSnapshot(orderId, metadata) {
+      executeLocalD1(
+        `UPDATE order_items SET metadata_json = ${sqlText(metadata)}
+         WHERE order_id = '${orderId}' AND item_type = 'ADD_ON'`,
+      );
     },
     owner: first,
     otherOwner: await signIn(`phase2-payment-other-${crypto.randomUUID()}@example.test`),
@@ -445,6 +604,8 @@ try {
       executeLocalD1("DROP TRIGGER d1_reject_test_order_paid");
     },
     expectedMode: "sepay-test",
+    testStandardPricing: true,
+    allTemplates: true,
     label: "Cloudflare Worker + local D1/R2",
   });
 
@@ -976,6 +1137,21 @@ try {
   assert.equal(unchangedAfterRollback.body.revision, 1);
   assert.notEqual(unchangedAfterRollback.body.data.sender, "Should roll back");
   executeLocalD1("DROP TRIGGER d1_contract_reject_revision");
+
+  let verificationRateLimited = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const verification = await json("/customers/session/verify", null, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: `synthetic-invalid-token-${attempt}` }),
+    });
+    if (verification.response.status === 429) {
+      verificationRateLimited = true;
+      break;
+    }
+    assert.equal(verification.response.status, 401, "invalid magic link is rejected before rate limit");
+  }
+  assert.ok(verificationRateLimited, "verification endpoint enforces its local rate limit");
 
   await stopWorker();
   executeLocalD1(

@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import {
+  assertTursoMigrationConfirmation,
   assertTursoStagingConfiguration,
   StagingConfigurationError,
 } from "./staging-config.ts";
@@ -9,6 +10,7 @@ import {
   applyMigrations,
   migrationChecksum,
   type SqlMigration,
+  verifyMigrationSchema,
 } from "../src/database/migrations.ts";
 
 async function loadMigrations(): Promise<SqlMigration[]> {
@@ -73,6 +75,7 @@ async function main(): Promise<void> {
   if (mode !== "--preflight" && mode !== "--migrate") {
     throw new Error("Use --preflight or --migrate");
   }
+  if (mode === "--migrate") assertTursoMigrationConfirmation(process.env);
   const target = assertTursoStagingConfiguration(process.env);
   const migrations = await loadMigrations();
   if (migrations.length === 0) throw new Error("No database migrations were found");
@@ -85,6 +88,7 @@ async function main(): Promise<void> {
   });
   try {
     const applied = await verifyMigrationState(client, migrations);
+    await verifyMigrationSchema(client, migrations.slice(0, applied.length));
     if (mode === "--preflight") {
       console.info(
         "Staging target confirmed: crushify-staging, crushify-staging-sg, Singapore; " +
@@ -94,6 +98,8 @@ async function main(): Promise<void> {
       return;
     }
     const newlyApplied = await applyMigrations(client, migrations);
+    const appliedAfterMigration = await verifyMigrationState(client, migrations);
+    await verifyMigrationSchema(client, migrations.slice(0, appliedAfterMigration.length));
     console.info(
       newlyApplied.length
         ? `Applied staging Turso migrations: ${newlyApplied.join(", ")}`

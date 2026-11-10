@@ -41,6 +41,12 @@
   cursor: wait;
 }
 
+.crushify-customer-tools [data-action="checkout"] {
+  border-color: rgba(233, 74, 156, .8);
+  background: rgba(233, 74, 156, .18);
+  font-weight: 700;
+}
+
 .crushify-customer-status {
   min-height: 1.4em;
   margin: 8px 0 0;

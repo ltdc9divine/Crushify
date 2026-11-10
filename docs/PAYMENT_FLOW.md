@@ -1,13 +1,13 @@
 # Payment and Entitlement Flow
 
-**Status:** local-only order, SePay webhook verification, and paid-order-gated publication prototypes. Synthetic local tests run against D1 and Turso/libSQL; no provider account has been connected, no real transaction was made, and no live checkout or publication is enabled.
+**Status:** shared draft/preview and order-status UI for all five standard templates; order/payment, SePay webhook verification, and paid-order-gated publication remain local-only prototypes. No provider account has been connected, no real transaction was made, and no live checkout or publication is enabled.
 **Provider:** SePay Test mode is the only future provider path considered here. Production/live mode is deliberately disabled in both runtimes.
 
 ## 1. Authority model
 
 - Browser may request a checkout for a catalog SKU/design revision; it cannot set price, currency, discount amount, entitlement, `PAID`, or fulfillment state.
-- The server loads an active `template_prices` row; the browser cannot submit a price or currency. The table is empty until a local test price is explicitly inserted.
-- The server creates a pending order and payment attempt from an owned Our Universe draft, with the current design revision snapshotted. Order creation is idempotent and expires after 15 minutes.
+- `src/product-catalog.ts` is the authoritative standard catalog: 59,000 VND includes the first month, additional months cost 10,000 VND each, and Lifetime is a single 199,000 VND total package. `STANDARD_CATALOG_ENABLED` remains `false`; policy estimates do not enable checkout. Browser-supplied prices are rejected.
+- The server accepts a positive integer month count or Lifetime, recalculates the total, and stores the complete pricing-policy snapshot with the order items. Historical orders without this snapshot continue to use their persisted totals and are never repriced.
 - Order references (`CRF...`) and payment references (`CRP...`) are separate random values. Only the payment reference is included in transfer instructions and matched against a webhook.
 - In `mock` mode, no QR or bank instructions are emitted. In `sepay-test` mode, an owner-scoped QR and transfer details are returned only from explicit local SePay Test mode bank settings.
 - Only a valid HMAC-signed webhook with fresh timestamp, unique transaction, exact payment reference, incoming transfer, receiving account and exact amount can mark a pending payment/order successful. There is no admin reconciliation endpoint.
@@ -29,21 +29,21 @@ Failure, mismatch, cancellation or expiry never grants entitlement. Mismatch/lat
 
 The publication API rechecks order/design/customer consistency, `SELF_SERVICE` and `PAID` order state, successful payment state, processed matching webhook evidence, amount/currency equality, the purchased template/schema version, and active renderer before publishing and on recipient reads. Publication mutations require `LOCAL_TEST_MODE=true` and `ENVIRONMENT` unset or `local`; a disabled runtime returns `PUBLICATION_DISABLED`.
 
-Integration tests seed artificial paid order/payment/webhook rows directly in disposable local D1. No test uses a real transfer or provider. The existing order-creation/checkout prototype is still limited to Our Universe; the price catalog is empty, the four other template editors are not server-backed, and no customer can purchase or publish on a deployed service.
+Each template has a server-validated draft/preview adapter in the shared customer editor, and the same checkout UI can review drafts and track an authenticated order. Checkout displays monthly/Lifetime policy estimates and remains unable to create an order while the catalog flag is false. The Wrangler integration harness uses disposable local D1 and a local-only policy switch for central pricing tests, plus a separate fixture-pricing override for legacy payment/fulfillment contracts; no test uses a real transfer or provider. The local policy switch is not forwarded by Vercel and does not enable any deployed service.
 
 ## 3. Local order creation
 
 1. Require local runtime, `LOCAL_TEST_MODE=true`, `PAYMENT_MODE=mock|sepay-test`, a local webhook secret, customer session and CSRF.
-2. Require an owned DRAFT Our Universe design and active template/version.
-3. Load the active server-side VND template price; no active price currently exists. Do not populate production prices from homepage copy or assumptions.
-4. Insert order, item and pending payment through the shared database batch. Client fields besides `design_id` are rejected. The item snapshots template and design revision.
+2. Require an owned DRAFT design for one of the five standard templates and an active template/version.
+3. Load the price policy and catalog-enabled state. Monthly total is 59,000 + max(0, months - 1) × 10,000 VND; Lifetime is exactly 199,000 VND, not the base price plus a separate Lifetime charge.
+4. The server validates the chosen term, recalculates the amount, and writes the order, line items and pending payment through the shared database batch. Client price fields are rejected. The immutable snapshot records template, duration type/months, included and additional months, monthly rate, hosting charge or Lifetime price, total, currency, policy version and calculation time.
 5. Return the separate order/payment references, amount, 15-minute expiry and owner-scoped bank instructions only when explicitly configured for SePay Test mode.
 
-`GET /checkout/?design_id=...` is a local-only experimental view. It requires an existing login and an explicitly activated local test price. It polls only the owner-scoped order status. It does not publish or create an entitlement.
+`GET /checkout/?design_id=...` is a shared checkout and status view. It requires the existing authenticated customer session, displays a dynamic month input, itemized estimate and Lifetime disclaimer. The submit button remains disabled while the catalog flag is false. Order status remains owner-scoped. The view does not publish or create an entitlement itself.
 
 ### Storage renewal
 
-Renewal orders snapshot the selected server-priced storage plan and do not require an active template price; their payment currency comes from the VND storage catalog. A renewal before expiry extends from the current expiry using calendar-month arithmetic. A renewal after expiry but before the retention deadline starts at the confirmed payment time, then republishes the same publication with its original slug. Lifetime entitlements have no expiry and cannot be renewed. Renewal fulfillment uses lifecycle compare-and-swap and order idempotency so a stale concurrent attempt is retryable without losing an extension or duplicating entitlement history.
+Renewal orders snapshot the selected server-priced storage plan and do not require an active template price; their payment currency comes from the VND storage catalog. A renewal before expiry extends from the current expiry using calendar-month arithmetic. A renewal after expiry but before the retention deadline starts at the confirmed payment time, then republishes the same publication with its original slug. Lifetime entitlements have `status=LIFETIME` and `expires_at=NULL`, cannot be renewed, and are explicitly excluded from scheduled expiration and retention cleanup while that entitlement remains active. A `NULL` expiration alone is not treated as proof of Lifetime. Renewal fulfillment uses lifecycle compare-and-swap and order idempotency so a stale concurrent attempt is retryable without losing an extension or duplicating entitlement history.
 
 ## 4. Webhook and idempotency
 

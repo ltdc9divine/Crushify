@@ -151,6 +151,13 @@
 
     const actions = document.createElement("div");
     actions.className = "actions";
+    if (row.order_id) {
+      const track = document.createElement("a");
+      track.className = "button";
+      track.href = `/checkout/?order_id=${encodeURIComponent(row.order_id)}`;
+      track.textContent = "Theo dõi đơn hàng";
+      actions.append(track);
+    }
     const edit = document.createElement("a");
     edit.className = "button";
     edit.href = `/templates/${encodeURIComponent(row.template_id)}/index.html?design=${encodeURIComponent(row.design_id)}`;

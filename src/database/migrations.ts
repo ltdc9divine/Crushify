@@ -109,3 +109,26 @@ export async function applyMigrations(
   }
   return newlyApplied;
 }
+
+export async function verifyMigrationSchema(
+  client: Client,
+  migrations: SqlMigration[],
+): Promise<void> {
+  const expected = new Set<string>();
+  const declaration = /CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))/gi;
+  for (const migration of migrations) {
+    for (const match of migration.sql.matchAll(declaration)) {
+      const name = match[2] ?? match[3] ?? match[4] ?? match[5];
+      if (name) expected.add(`${match[1].toLowerCase()}:${name}`);
+    }
+  }
+
+  const result = await client.execute(
+    "SELECT type, name FROM sqlite_master " +
+    "WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'",
+  );
+  const actual = new Set(result.rows.map((row) => `${String(row.type)}:${String(row.name)}`));
+  if (expected.size !== actual.size || [...expected].some((object) => !actual.has(object))) {
+    throw new Error("Database tables and indexes do not match the applied migrations");
+  }
+}

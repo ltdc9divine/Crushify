@@ -11,21 +11,31 @@ import type { Env } from "../types.ts";
 export const VERCEL_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
 const allowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const allowedHeaders = new Set(["authorization", "content-type", "idempotency-key", "x-csrf-token"]);
+const stagingTursoHostname = /^crushify-staging(?:-[a-z0-9-]+)?\.turso\.io$/i;
+const previouslyAssumedCloudinaryTestCloud = "hgtcizux";
+const stagingCloudinaryConfirmation = "I_CONFIRM_SEPARATE_FREE_CLOUD";
 
 export interface VercelEnvironment {
   DATABASE_PROVIDER?: string;
   TURSO_DATABASE_URL?: string;
   TURSO_AUTH_TOKEN?: string;
+  TURSO_STAGING_DATABASE_URL?: string;
+  TURSO_STAGING_AUTH_TOKEN?: string;
   ENVIRONMENT?: string;
   STORAGE_PROVIDER?: string;
   CLOUDINARY_CLOUD_NAME?: string;
   CLOUDINARY_API_KEY?: string;
   CLOUDINARY_API_SECRET?: string;
+  CLOUDINARY_STAGING_CLOUD_NAME?: string;
+  CLOUDINARY_STAGING_API_KEY?: string;
+  CLOUDINARY_STAGING_API_SECRET?: string;
+  CLOUDINARY_STAGING_ISOLATED_ACCOUNT?: string;
   MAIL_PROVIDER?: string;
   MAIL_API_KEY?: string;
   MAIL_FROM_EMAIL?: string;
   APP_ORIGIN?: string;
   LOCAL_TEST_MODE?: string;
+  LOCAL_TEST_CATALOG_OVERRIDE?: string;
   VERCEL_ENV?: string;
   VERCEL_URL?: string;
   VERCEL_BRANCH_URL?: string;
@@ -98,8 +108,7 @@ function originFromEnvironment(environment: VercelEnvironment): string | null {
 }
 
 function runtimeEnvironment(environment: VercelEnvironment): Env["ENVIRONMENT"] {
-  if (environment.ENVIRONMENT === "staging" &&
-      (environment.VERCEL_ENV === "preview" || environment.VERCEL_ENV === "production")) {
+  if (environment.ENVIRONMENT === "staging" && environment.VERCEL_ENV === "preview") {
     return "staging";
   }
   if (environment.ENVIRONMENT === "local" && environment.VERCEL_ENV === "development") {
@@ -114,13 +123,35 @@ function runtimeEnvironment(environment: VercelEnvironment): Env["ENVIRONMENT"] 
 }
 
 function validateEnvironmentOverride(environment: VercelEnvironment): boolean {
-  if (environment.ENVIRONMENT === undefined) return true;
-  if (environment.ENVIRONMENT === "staging") {
-    return environment.VERCEL_ENV === "preview" || environment.VERCEL_ENV === "production";
+  if (environment.VERCEL_ENV === "preview") {
+    return environment.ENVIRONMENT === "staging";
   }
+  if (environment.ENVIRONMENT === undefined) return true;
+  if (environment.ENVIRONMENT === "staging") return false;
   if (environment.ENVIRONMENT === "production") return environment.VERCEL_ENV === "production";
   if (environment.ENVIRONMENT === "local") return environment.VERCEL_ENV === "development";
   return false;
+}
+
+function validateCredentialScope(environment: VercelEnvironment): boolean {
+  const previewHasProductionCredentials = environment.VERCEL_ENV === "preview" &&
+    [
+      environment.TURSO_DATABASE_URL,
+      environment.TURSO_AUTH_TOKEN,
+      environment.CLOUDINARY_CLOUD_NAME,
+      environment.CLOUDINARY_API_KEY,
+      environment.CLOUDINARY_API_SECRET,
+    ].some((value) => value !== undefined);
+  const productionHasStagingCredentials = environment.VERCEL_ENV === "production" &&
+    [
+      environment.TURSO_STAGING_DATABASE_URL,
+      environment.TURSO_STAGING_AUTH_TOKEN,
+      environment.CLOUDINARY_STAGING_CLOUD_NAME,
+      environment.CLOUDINARY_STAGING_API_KEY,
+      environment.CLOUDINARY_STAGING_API_SECRET,
+      environment.CLOUDINARY_STAGING_ISOLATED_ACCOUNT,
+    ].some((value) => value !== undefined);
+  return !previewHasProductionCredentials && !productionHasStagingCredentials;
 }
 
 function corsHeaders(origin: string): Headers {
@@ -148,9 +179,28 @@ function withCors(response: Response, request: Request, allowedOrigin: string | 
   });
 }
 
+function stagingRuntime(environment: VercelEnvironment): boolean {
+  return runtimeEnvironment(environment) === "staging";
+}
+
+function databaseCredentials(environment: VercelEnvironment): {
+  url?: string;
+  authToken?: string;
+} {
+  return stagingRuntime(environment)
+    ? {
+        url: environment.TURSO_STAGING_DATABASE_URL,
+        authToken: environment.TURSO_STAGING_AUTH_TOKEN,
+      }
+    : {
+        url: environment.TURSO_DATABASE_URL,
+        authToken: environment.TURSO_AUTH_TOKEN,
+      };
+}
+
 function validateDatabaseConfiguration(environment: VercelEnvironment): string | null {
   if (environment.DATABASE_PROVIDER !== "turso") return "DATABASE_CONFIGURATION_ERROR";
-  const url = environment.TURSO_DATABASE_URL;
+  const { url, authToken } = databaseCredentials(environment);
   if (!url) return "DATABASE_CONFIGURATION_ERROR";
   let protocol: string;
   let parsedUrl: URL;
@@ -166,19 +216,39 @@ function validateDatabaseConfiguration(environment: VercelEnvironment): string |
   if (protocol === "file:" && environment.VERCEL_ENV !== "development") {
     return "DATABASE_CONFIGURATION_ERROR";
   }
-  if (protocol !== "file:" && !environment.TURSO_AUTH_TOKEN?.trim()) {
+  if (protocol !== "file:" && !authToken?.trim()) {
     return "DATABASE_CONFIGURATION_ERROR";
   }
   if (protocol !== "file:" && protocol !== "libsql:" && protocol !== "https:") {
     return "DATABASE_CONFIGURATION_ERROR";
   }
-  if (environment.ENVIRONMENT === "staging") {
-    const hostname = parsedUrl.hostname;
-    if (protocol === "file:" || !/^crushify-staging(?:-[a-z0-9-]+)?\.turso\.io$/i.test(hostname)) {
-      return "DATABASE_CONFIGURATION_ERROR";
-    }
+  const isStagingDatabase = stagingTursoHostname.test(parsedUrl.hostname);
+  if (runtimeEnvironment(environment) === "staging" &&
+      (protocol === "file:" || !isStagingDatabase)) {
+    return "DATABASE_CONFIGURATION_ERROR";
+  }
+  if (runtimeEnvironment(environment) === "production" && isStagingDatabase) {
+    return "DATABASE_CONFIGURATION_ERROR";
   }
   return null;
+}
+
+function cloudinaryConfiguration(environment: VercelEnvironment): {
+  cloudName?: string;
+  apiKey?: string;
+  apiSecret?: string;
+} {
+  return stagingRuntime(environment)
+    ? {
+        cloudName: environment.CLOUDINARY_STAGING_CLOUD_NAME,
+        apiKey: environment.CLOUDINARY_STAGING_API_KEY,
+        apiSecret: environment.CLOUDINARY_STAGING_API_SECRET,
+      }
+    : {
+        cloudName: environment.CLOUDINARY_CLOUD_NAME,
+        apiKey: environment.CLOUDINARY_API_KEY,
+        apiSecret: environment.CLOUDINARY_API_SECRET,
+      };
 }
 
 function localMockPaymentEnabled(environment: VercelEnvironment): boolean {
@@ -217,11 +287,11 @@ function createStorage(
   dependencies: VercelRuntimeDependencies,
 ): Storage {
   if (environment.STORAGE_PROVIDER === "cloudinary") {
-    const cloudName = environment.CLOUDINARY_CLOUD_NAME;
-    const apiKey = environment.CLOUDINARY_API_KEY;
-    const apiSecret = environment.CLOUDINARY_API_SECRET;
+    const { cloudName, apiKey, apiSecret } = cloudinaryConfiguration(environment);
     if (!cloudName || !apiKey || !apiSecret ||
-        (environment.ENVIRONMENT === "staging" && cloudName !== "hgtcizux")) {
+        (stagingRuntime(environment) &&
+          (cloudName === previouslyAssumedCloudinaryTestCloud ||
+           environment.CLOUDINARY_STAGING_ISOLATED_ACCOUNT !== stagingCloudinaryConfirmation))) {
       throw new TypeError("Cloudinary configuration is incomplete");
     }
     return dependencies.createCloudinaryStorage
@@ -229,8 +299,9 @@ function createStorage(
       : new CloudinaryStorageAdapter({ cloudName, apiKey, apiSecret });
   }
   if (environment.STORAGE_PROVIDER === "mock" &&
-      environment.LOCAL_TEST_MODE === "true" &&
-      environment.VERCEL_ENV === "development") {
+      ((environment.LOCAL_TEST_MODE === "true" &&
+        environment.VERCEL_ENV === "development") ||
+       (stagingRuntime(environment) && environment.VERCEL_ENV === "preview"))) {
     return (dependencies.createMockStorage ?? (() => new MemoryStorageAdapter()))();
   }
   throw new TypeError("Storage provider is not configured for this runtime");
@@ -272,8 +343,14 @@ export function createVercelApiHandler(
   let databasePromise: Promise<DatabaseConnection> | undefined;
   let storage: Storage | undefined;
 
-  const connectDatabase = dependencies.connectDatabase ?? (async (config: VercelEnvironment) =>
-    connectDatabaseFromEnvironment(config));
+  const connectDatabase = dependencies.connectDatabase ?? (async (config: VercelEnvironment) => {
+    const { url, authToken } = databaseCredentials(config);
+    return connectDatabaseFromEnvironment({
+      ...config,
+      TURSO_DATABASE_URL: url,
+      TURSO_AUTH_TOKEN: authToken,
+    });
+  });
 
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
@@ -287,9 +364,11 @@ export function createVercelApiHandler(
       )) {
         return apiError(requestId(), 401, "UNAUTHENTICATED", "Scheduled request is not authorized");
       }
-      if (environment.ENVIRONMENT !== "staging" ||
-          !["preview", "production"].includes(environment.VERCEL_ENV ?? "")) {
+      if (environment.ENVIRONMENT !== "staging" || environment.VERCEL_ENV !== "preview") {
         return apiError(requestId(), 404, "NOT_FOUND", "Route not found");
+      }
+      if (!validateCredentialScope(environment)) {
+        return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Credentials do not match the Vercel deployment environment");
       }
       const databaseError = validateDatabaseConfiguration(environment);
       if (databaseError) {
@@ -350,6 +429,9 @@ export function createVercelApiHandler(
     if (!validateEnvironmentOverride(environment)) {
       return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Application environment does not match the Vercel deployment");
     }
+    if (!validateCredentialScope(environment)) {
+      return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Credentials do not match the Vercel deployment environment");
+    }
 
     const databaseError = validateDatabaseConfiguration(environment);
     if (databaseError) {
@@ -392,20 +474,27 @@ export function createVercelApiHandler(
 
     const appEnvironment = runtimeEnvironment(environment);
     const appOrigin = origin ?? undefined;
+    const { cloudName, apiKey, apiSecret } = cloudinaryConfiguration(environment);
     const appEnv: Env = {
       DB: connection.database,
       STORAGE: storage,
       DATABASE_PROVIDER: "turso",
       STORAGE_PROVIDER: environment.STORAGE_PROVIDER === "cloudinary" ? "cloudinary" : undefined,
-      CLOUDINARY_CLOUD_NAME: environment.CLOUDINARY_CLOUD_NAME,
-      CLOUDINARY_API_KEY: environment.CLOUDINARY_API_KEY,
-      CLOUDINARY_API_SECRET: environment.CLOUDINARY_API_SECRET,
+      CLOUDINARY_CLOUD_NAME: cloudName,
+      CLOUDINARY_API_KEY: apiKey,
+      CLOUDINARY_API_SECRET: apiSecret,
       ENVIRONMENT: appEnvironment,
-      MAIL_PROVIDER: environment.MAIL_PROVIDER === "resend" ? "resend" : undefined,
-      MAIL_API_KEY: environment.MAIL_API_KEY,
-      MAIL_FROM_EMAIL: environment.MAIL_FROM_EMAIL,
+      MAIL_PROVIDER: environment.VERCEL_ENV === "production" &&
+          environment.MAIL_PROVIDER === "resend" ? "resend" : undefined,
+      MAIL_API_KEY: environment.VERCEL_ENV === "production" ? environment.MAIL_API_KEY : undefined,
+      MAIL_FROM_EMAIL: environment.VERCEL_ENV === "production" ? environment.MAIL_FROM_EMAIL : undefined,
       APP_ORIGIN: appOrigin,
       LOCAL_TEST_MODE: environment.LOCAL_TEST_MODE === "true" &&
+          environment.VERCEL_ENV === "development" && appEnvironment === "local"
+        ? "true"
+        : undefined,
+      LOCAL_TEST_CATALOG_OVERRIDE: environment.LOCAL_TEST_CATALOG_OVERRIDE === "true" &&
+          environment.LOCAL_TEST_MODE === "true" &&
           environment.VERCEL_ENV === "development" && appEnvironment === "local"
         ? "true"
         : undefined,

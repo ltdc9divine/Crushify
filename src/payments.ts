@@ -12,6 +12,19 @@ import {
 import type { NormalizedPaymentTransaction } from "./payments/provider.ts";
 import { assetReferences, type TemplateData } from "./template-registry.ts";
 import { handleFulfillmentForOrder } from "./publications.ts";
+import {
+  CatalogPriceUnavailableError,
+  publicProductCatalog,
+  standardProduct,
+  standardPriceSnapshot,
+  standardPriceSnapshotForTerm,
+  standardStoragePlanForTerm,
+  storageDuration,
+  STANDARD_CATALOG_ENABLED,
+  STORAGE_DURATIONS,
+  type StandardHostingTerm,
+  type StandardPriceSnapshot,
+} from "./product-catalog.ts";
 import type { Env } from "./types.ts";
 
 const ORDER_LIFETIME_MINUTES = 15;
@@ -38,6 +51,7 @@ interface OrderRow {
   storage_plan_title: string;
   storage_duration_months: number | null;
   storage_lifetime: number;
+  pricing_snapshot_json: string | null;
   fulfillment_status: string | null;
 }
 
@@ -56,6 +70,7 @@ interface PaymentRow {
   payment_reference: string;
   provider_payment_id: string | null;
   expires_at: string | null;
+  snapshot_total_minor: number | null;
 }
 
 interface WebhookReviewDetails {
@@ -89,6 +104,26 @@ function paymentModeError(
     return apiError(requestId, 503, "PAYMENT_CONFIGURATION_ERROR", "SePay Test mode bank settings are incomplete");
   }
   return null;
+}
+
+function localApprovedPricingEnabled(env: Env): boolean {
+  return env.ENVIRONMENT === "local" &&
+    env.LOCAL_TEST_MODE === "true" &&
+    env.LOCAL_TEST_PRICING_POLICY === "true";
+}
+
+function isStandardPricingEnabled(env: Env): boolean {
+  return STANDARD_CATALOG_ENABLED || localApprovedPricingEnabled(env);
+}
+
+function termFromPlan(planId: string): StandardHostingTerm | null {
+  const plan = storageDuration(planId);
+  if (!plan) return null;
+  return plan.lifetime
+    ? { type: "lifetime" }
+    : plan.durationMonths === null
+      ? null
+      : { type: "monthly", months: plan.durationMonths };
 }
 
 function paymentInstructions(env: Env, amount: number, reference: string) {
@@ -131,6 +166,9 @@ function responseOrder(row: OrderRow, env: Env) {
       duration_months: row.storage_duration_months,
       lifetime: Boolean(row.storage_lifetime),
     },
+    pricing_snapshot: row.pricing_snapshot_json
+      ? JSON.parse(row.pricing_snapshot_json) as StandardPriceSnapshot
+      : null,
     fulfillment_status: row.fulfillment_status,
     payment: {
       provider: PAYMENT_PROVIDER,
@@ -168,6 +206,7 @@ async function loadOrder(
             json_extract(storage_item.metadata_json, '$.title') AS storage_plan_title,
             json_extract(storage_item.metadata_json, '$.duration_months') AS storage_duration_months,
             json_extract(storage_item.metadata_json, '$.lifetime') AS storage_lifetime,
+            json_extract(storage_item.metadata_json, '$.pricing_snapshot') AS pricing_snapshot_json,
             fj.status AS fulfillment_status
      FROM orders o
      JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
@@ -236,16 +275,50 @@ async function createOrder(
   }
   const body = parsed.value as Record<string, unknown>;
   if (Object.keys(body).some((key) =>
-    !["design_id", "storage_plan_id", "asset_consents", "renewal_publication_id"].includes(key)) ||
+    !["design_id", "storage_plan_id", "duration_type", "hosting_months",
+      "asset_consents", "renewal_publication_id"].includes(key)) ||
       typeof body.design_id !== "string" || !/^[0-9a-f-]{36}$/i.test(body.design_id) ||
-      typeof body.storage_plan_id !== "string" ||
-      !["1-month", "3-months", "6-months", "12-months", "lifetime"].includes(body.storage_plan_id) ||
+      (body.storage_plan_id !== undefined &&
+        (typeof body.storage_plan_id !== "string" ||
+          !["1-month", "3-months", "6-months", "12-months", "lifetime"].includes(body.storage_plan_id))) ||
+      (body.duration_type !== undefined &&
+        body.duration_type !== "monthly" && body.duration_type !== "lifetime") ||
+      ((body.storage_plan_id === undefined) === (body.duration_type === undefined)) ||
+      (body.duration_type === "monthly" &&
+        (!Number.isSafeInteger(body.hosting_months) || (body.hosting_months as number) < 1)) ||
+      (body.duration_type === "lifetime" &&
+        body.hosting_months !== undefined && body.hosting_months !== null) ||
+      (body.duration_type === undefined && body.hosting_months !== undefined) ||
       (body.asset_consents !== undefined && !Array.isArray(body.asset_consents)) ||
       (body.renewal_publication_id !== undefined &&
         (typeof body.renewal_publication_id !== "string" ||
           !/^[0-9a-f-]{36}$/i.test(body.renewal_publication_id)))) {
-    return apiError(requestId, 400, "VALIDATION_ERROR", "Expected design_id, storage_plan_id and optional asset_consents");
+    return apiError(requestId, 400, "VALIDATION_ERROR",
+      "Expected design_id and either storage_plan_id or a valid duration_type and hosting_months");
   }
+  const legacyPlanRequest = typeof body.storage_plan_id === "string";
+  const term: StandardHostingTerm | null = legacyPlanRequest
+    ? termFromPlan(body.storage_plan_id as string)
+    : body.duration_type === "lifetime"
+      ? { type: "lifetime" }
+      : { type: "monthly", months: body.hosting_months as number };
+  if (!term) {
+    return apiError(requestId, 400, "VALIDATION_ERROR", "Invalid storage plan");
+  }
+  const requestedPlan = legacyPlanRequest
+    ? storageDuration(body.storage_plan_id as string)
+    : standardStoragePlanForTerm(term);
+  if (!requestedPlan) {
+    return apiError(requestId, 400, "VALIDATION_ERROR", "Invalid storage plan");
+  }
+  const localPolicyPricing = !legacyPlanRequest && localApprovedPricingEnabled(env);
+  if (!legacyPlanRequest && !isStandardPricingEnabled(env)) {
+    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Standard hosting pricing is not enabled");
+  }
+  const localFixturePricing = env.ENVIRONMENT === "local" &&
+    env.LOCAL_TEST_MODE === "true" &&
+    env.LOCAL_TEST_CATALOG_OVERRIDE === "true" &&
+    legacyPlanRequest;
   const consentList = (body.asset_consents ?? []) as unknown[];
   if (consentList.some((item) => !item || typeof item !== "object" || Array.isArray(item) ||
       Object.keys(item).length !== 2 ||
@@ -301,7 +374,9 @@ async function createOrder(
   }
   const fingerprint = await sha256(JSON.stringify({
     design_id: body.design_id,
-    storage_plan_id: body.storage_plan_id,
+    storage_plan_id: requestedPlan.id,
+    duration_type: term.type,
+    hosting_months: term.type === "monthly" ? term.months : null,
     renewal_publication_id: renewalPublicationId,
     asset_consents: [...consentIds].sort(),
   }));
@@ -318,6 +393,30 @@ async function createOrder(
     return jsonResponse(responseOrder(row, env), 200, requestId);
   }
 
+  if (localPolicyPricing && requestedPlan.id.startsWith("custom-") && term.type === "monthly") {
+    const ownedDesign = await env.DB.prepare(
+      `SELECT template_id FROM designs
+       WHERE id = ? AND customer_id = ? AND status = 'DRAFT'`,
+    ).bind(body.design_id, ownerId).first<{ template_id: string }>();
+    if (!ownedDesign) return apiError(requestId, 404, "NOT_FOUND", "Design not found");
+    if (!standardProduct(ownedDesign.template_id)) {
+      return apiError(requestId, 422, "PRICE_UNAVAILABLE", "This product is not in the standard catalog");
+    }
+    const createdAt = nowIso();
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO storage_plans (
+         id, title, duration_months, is_lifetime, status, created_at, updated_at
+       ) VALUES (?, ?, ?, 0, 'ACTIVE', ?, ?)`,
+    ).bind(requestedPlan.id, requestedPlan.title, term.type === "monthly" ? term.months : null,
+      createdAt, createdAt).run();
+    const storedPlan = await env.DB.prepare(
+      "SELECT duration_months, is_lifetime FROM storage_plans WHERE id = ?",
+    ).bind(requestedPlan.id).first<{ duration_months: number | null; is_lifetime: number }>();
+    if (!storedPlan || storedPlan.duration_months !== term.months || storedPlan.is_lifetime !== 0) {
+      return apiError(requestId, 409, "STORAGE_PLAN_CONFLICT", "The requested storage plan is inconsistent");
+    }
+  }
+
   const design = await env.DB.prepare(
     `SELECT d.id, d.template_id, d.schema_version, d.revision, d.data_json,
             t.title, t.status AS template_status, v.status AS version_status,
@@ -330,10 +429,10 @@ async function createOrder(
      LEFT JOIN template_prices pr ON pr.template_id = d.template_id
        AND pr.schema_version = d.schema_version AND pr.is_active = 1
      JOIN storage_plans sp ON sp.id = ? AND sp.status = 'ACTIVE'
-     JOIN storage_plan_prices spp ON spp.storage_plan_id = sp.id AND spp.is_active = 1
+     LEFT JOIN storage_plan_prices spp ON spp.storage_plan_id = sp.id AND spp.is_active = 1
      WHERE d.id = ? AND d.customer_id = ? AND d.status = 'DRAFT'
        AND t.status = 'ACTIVE' AND v.status = 'ACTIVE'`,
-  ).bind(body.storage_plan_id, body.design_id, ownerId).first<{
+  ).bind(requestedPlan.id, body.design_id, ownerId).first<{
     id: string;
     template_id: string;
     schema_version: number;
@@ -348,8 +447,8 @@ async function createOrder(
     storage_plan_title: string;
     duration_months: number | null;
     is_lifetime: number;
-    storage_amount_minor: number;
-    storage_currency: string;
+    storage_amount_minor: number | null;
+    storage_currency: string | null;
   }>();
   if (!design) {
     const ownedDesign = await env.DB.prepare(
@@ -359,17 +458,98 @@ async function createOrder(
       ? apiError(requestId, 422, "PRICE_UNAVAILABLE", "This template has no active server-side price")
       : apiError(requestId, 404, "NOT_FOUND", "Design not found");
   }
-  if ((!renewalPublicationId &&
-      (!Number.isSafeInteger(design.amount_minor) || (design.amount_minor ?? 0) <= 0 ||
-        design.currency !== "VND")) ||
-      !Number.isSafeInteger(design.storage_amount_minor) ||
-      design.storage_amount_minor <= 0 || design.storage_currency !== "VND") {
-    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Template or storage plan has no active server-side price");
+  const product = standardProduct(design.template_id);
+  const duration = requestedPlan;
+  if (!product || !duration || !product.available) {
+    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "This product or hosting duration is unavailable");
   }
-  const templateAmount = renewalPublicationId ? 0 : design.amount_minor;
-  if (!Number.isSafeInteger(templateAmount) || (templateAmount as number) < 0 ||
-      (!renewalPublicationId && ((templateAmount as number) <= 0 || design.currency !== "VND"))) {
-    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "This template has no active server-side price");
+  const standardPolicyPricing = !localFixturePricing && !renewalPublicationId &&
+    isStandardPricingEnabled(env);
+  if (!localFixturePricing && !isStandardPricingEnabled(env)) {
+    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Hosting duration pricing has not been approved");
+  }
+  const templateAmount = renewalPublicationId
+    ? 0
+    : localFixturePricing
+      ? design.amount_minor
+      : product.basePriceMinor;
+  const policySnapshot = standardPolicyPricing
+    ? standardPriceSnapshotForTerm(design.template_id, term)
+    : null;
+  const storageAmount = localFixturePricing
+    ? design.storage_amount_minor
+    : policySnapshot
+      ? policySnapshot.total_minor - (templateAmount ?? 0)
+      : duration.amountMinor;
+  const storageCurrency = localFixturePricing ? design.storage_currency : duration.currency;
+  if ((!renewalPublicationId && (!Number.isSafeInteger(templateAmount) ||
+      (templateAmount ?? 0) <= 0 || (localFixturePricing && design.currency !== "VND"))) ||
+      !Number.isSafeInteger(storageAmount) || (storageAmount ?? -1) < 0 ||
+      storageCurrency !== "VND") {
+    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Product or hosting duration has no valid server-side price");
+  }
+  const resolvedTemplateAmount = templateAmount ?? 0;
+  let authoritativeTotal: number;
+  let pricingSnapshot: StandardPriceSnapshot | {
+    template_id: string;
+    storage_plan_id: string;
+    duration_type: "monthly" | "lifetime";
+    template_base_price_minor: number;
+    hosting_months: number | null;
+    included_hosting_months: number | null;
+    additional_hosting_months: number | null;
+    additional_monthly_price_minor: number;
+    hosting_charge_minor: number | null;
+    lifetime_price_minor: number | null;
+    total_minor: number;
+    currency: string;
+    pricing_version: string;
+    calculated_at: string;
+  };
+  try {
+    if (localFixturePricing) {
+      authoritativeTotal = (templateAmount as number) + (storageAmount as number);
+      pricingSnapshot = {
+        template_id: design.template_id as StandardPriceSnapshot["template_id"],
+        storage_plan_id: duration.id,
+        duration_type: term.type,
+        template_base_price_minor: resolvedTemplateAmount,
+        hosting_months: term.type === "monthly" ? term.months : null,
+        included_hosting_months: term.type === "monthly" ? 1 : null,
+        additional_hosting_months: term.type === "monthly" ? Math.max(0, term.months - 1) : null,
+        additional_monthly_price_minor: 0,
+        hosting_charge_minor: term.type === "monthly" ? storageAmount as number : null,
+        lifetime_price_minor: term.type === "lifetime" ? authoritativeTotal : null,
+        total_minor: authoritativeTotal,
+        currency: "VND",
+        pricing_version: "local-fixture",
+        calculated_at: nowIso(),
+      };
+    } else if (renewalPublicationId) {
+      authoritativeTotal = duration.amountMinor!;
+      pricingSnapshot = {
+        template_id: design.template_id as StandardPriceSnapshot["template_id"],
+        storage_plan_id: duration.id,
+        duration_type: term.type,
+        template_base_price_minor: 0,
+        hosting_months: term.type === "monthly" ? term.months : null,
+        included_hosting_months: null,
+        additional_hosting_months: term.type === "monthly" ? term.months : null,
+        additional_monthly_price_minor: duration.amountMinor!,
+        hosting_charge_minor: duration.amountMinor!,
+        lifetime_price_minor: null,
+        total_minor: authoritativeTotal,
+        currency: "VND",
+        pricing_version: "legacy-renewal",
+        calculated_at: nowIso(),
+      };
+    } else {
+      pricingSnapshot = policySnapshot ?? standardPriceSnapshot(design.template_id, design.storage_plan_id);
+      authoritativeTotal = pricingSnapshot.total_minor;
+    }
+  } catch (error) {
+    if (!(error instanceof CatalogPriceUnavailableError)) throw error;
+    return apiError(requestId, 422, "PRICE_UNAVAILABLE", error.message);
   }
   const data = JSON.parse(design.data_json) as TemplateData;
   const availableAssetIds = new Set(assetReferences(design.template_id, data));
@@ -383,7 +563,7 @@ async function createOrder(
   const paymentReference = createPaymentReference();
   const now = nowIso();
   const expiresAt = new Date(Date.now() + ORDER_LIFETIME_MINUTES * 60_000).toISOString();
-  const amount = (templateAmount as number) + design.storage_amount_minor;
+  const amount = authoritativeTotal;
   if (!Number.isSafeInteger(amount)) {
     return apiError(requestId, 503, "CATALOG_CONFIGURATION_ERROR", "Order total is invalid");
   }
@@ -404,12 +584,11 @@ async function createOrder(
          LEFT JOIN template_prices pr ON pr.template_id = d.template_id
            AND pr.schema_version = d.schema_version AND pr.is_active = 1
          JOIN storage_plans sp ON sp.id = ? AND sp.status = 'ACTIVE'
-         JOIN storage_plan_prices spp ON spp.storage_plan_id = sp.id AND spp.is_active = 1
+         LEFT JOIN storage_plan_prices spp ON spp.storage_plan_id = sp.id AND spp.is_active = 1
          WHERE d.id = ? AND d.customer_id = ? AND d.status = 'DRAFT'
            AND d.revision = ? AND d.template_id = ? AND d.schema_version = ?
-           AND ((? = 1 AND ? IS NOT NULL) OR (? = 0 AND pr.amount_minor = ? AND pr.currency = ?))
-           AND spp.amount_minor = ?
-           AND spp.currency = ?
+           AND (? = 1 OR pr.amount_minor = ? AND pr.currency = ?)
+           AND (? = 1 OR spp.amount_minor = ? AND spp.currency = ?)
            AND (? IS NULL OR EXISTS (
              SELECT 1 FROM publications renewal
              WHERE renewal.id = ? AND renewal.design_id = d.id
@@ -420,9 +599,10 @@ async function createOrder(
     ).bind(orderId, ownerId, "VND", amount, amount, design.id, renewalPublicationId,
       idempotencyKey, now, now, expiresAt, orderReference, design.revision, fingerprint,
       design.storage_plan_id, design.id, ownerId, design.revision, design.template_id,
-      design.schema_version, renewalPublicationId ? 1 : 0, renewalPublicationId,
-      renewalPublicationId ? 1 : 0, templateAmount, renewalPublicationId ? "VND" : design.currency,
-      design.storage_amount_minor, design.storage_currency, renewalPublicationId, renewalPublicationId, now),
+      design.schema_version, !localFixturePricing || Boolean(renewalPublicationId) ? 1 : 0,
+      templateAmount, "VND",
+      !localFixturePricing ? 1 : 0, storageAmount, "VND",
+      renewalPublicationId, renewalPublicationId, now),
     env.DB.prepare(
       `INSERT INTO order_items (
          id, order_id, item_type, reference_id, description_snapshot, quantity,
@@ -431,7 +611,14 @@ async function createOrder(
        SELECT ?, ?, 'TEMPLATE_LICENSE', ?, ?, 1, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM orders WHERE id = ?)`,
     ).bind(safeId(), orderId, design.template_id, design.title, templateAmount, templateAmount,
-      JSON.stringify({ schema_version: design.schema_version }), now, orderId),
+      JSON.stringify({
+        schema_version: design.schema_version,
+        pricing_snapshot: {
+          ...pricingSnapshot,
+          template_id: design.template_id,
+          storage_plan_id: design.storage_plan_id,
+        },
+      }), now, orderId),
     env.DB.prepare(
       `INSERT INTO order_items (
          id, order_id, item_type, reference_id, description_snapshot, quantity,
@@ -440,15 +627,16 @@ async function createOrder(
        SELECT ?, ?, 'ADD_ON', ?, ?, 1, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM orders WHERE id = ?)`,
     ).bind(safeId(), orderId, design.storage_plan_id, design.storage_plan_title,
-      design.storage_amount_minor, design.storage_amount_minor,
+      storageAmount, storageAmount,
       JSON.stringify({
         kind: "STORAGE_PLAN",
         storage_plan_id: design.storage_plan_id,
         title: design.storage_plan_title,
         duration_months: design.duration_months,
         lifetime: Boolean(design.is_lifetime),
-        amount_minor: design.storage_amount_minor,
-        currency: design.storage_currency,
+        amount_minor: storageAmount,
+        currency: storageCurrency,
+        pricing_snapshot: pricingSnapshot,
         asset_consents: assetConsents,
       }), now, orderId),
     env.DB.prepare(
@@ -507,6 +695,32 @@ async function listOrders(
 }
 
 async function listStoragePlans(env: Env, requestId: string): Promise<Response> {
+  if (localApprovedPricingEnabled(env)) {
+    const catalog = publicProductCatalog({ catalogEnabled: true });
+    return jsonResponse({
+      plans: catalog.storage_durations.map((plan) => ({
+        ...plan,
+        available: plan.enabled && plan.price_configured,
+      })),
+    }, 200, requestId, { "Cache-Control": "no-store" });
+  }
+  const localFixturePricing = env.ENVIRONMENT === "local" &&
+    env.LOCAL_TEST_MODE === "true" &&
+    env.LOCAL_TEST_CATALOG_OVERRIDE === "true";
+  if (!localFixturePricing) {
+    return jsonResponse({
+      plans: STORAGE_DURATIONS.map((plan) => ({
+        id: plan.id,
+        title: plan.title,
+        duration_months: plan.durationMonths,
+        lifetime: plan.lifetime,
+        amount_minor: plan.amountMinor,
+        currency: plan.currency,
+        available: plan.enabled && plan.amountMinor !== null,
+        price_configured: plan.amountMinor !== null && plan.enabled,
+      })),
+    }, 200, requestId, { "Cache-Control": "no-store" });
+  }
   const rows = await env.DB.prepare(
     `SELECT p.id, p.title, p.duration_months, p.is_lifetime,
             price.amount_minor, price.currency
@@ -533,6 +747,7 @@ async function listStoragePlans(env: Env, requestId: string): Promise<Response> 
       amount_minor: plan.amount_minor,
       currency: plan.currency,
       available: plan.amount_minor !== null && plan.currency === "VND",
+      price_configured: plan.amount_minor !== null && plan.currency === "VND",
     })),
   }, 200, requestId, { "Cache-Control": "no-store" });
 }
@@ -553,7 +768,9 @@ function webhookMismatch(
   }
   if (payment.currency !== "VND" ||
       payment.order_currency !== payment.currency ||
-      payment.order_total_minor !== payment.amount_minor) {
+      payment.order_total_minor !== payment.amount_minor ||
+      (payment.snapshot_total_minor !== null &&
+        payment.snapshot_total_minor !== payment.order_total_minor)) {
     return "Payment amount or currency does not match the order";
   }
   if (transaction.amountMinor !== payment.amount_minor) {
@@ -639,7 +856,9 @@ async function processWebhookEvent(
               o.total_minor AS order_total_minor, o.currency AS order_currency,
               o.payment_review_required, p.status AS payment_status,
               p.review_required, p.amount_minor, p.currency, p.payment_reference,
-              p.provider_payment_id, o.expires_at
+              p.provider_payment_id, o.expires_at,
+              (SELECT CAST(json_extract(i.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER)
+               FROM order_items i WHERE i.order_id = o.id AND i.item_type = 'ADD_ON') AS snapshot_total_minor
        FROM payments p JOIN orders o ON o.id = p.order_id
        WHERE p.provider = ? AND p.payment_reference = ?`,
     ).bind(PAYMENT_PROVIDER, transaction.paymentReference).first<PaymentRow>()
@@ -760,7 +979,9 @@ async function reviewWebhookCollision(
               o.total_minor AS order_total_minor, o.currency AS order_currency,
               o.payment_review_required, p.status AS payment_status,
               p.review_required, p.amount_minor, p.currency, p.payment_reference,
-              p.provider_payment_id, o.expires_at
+              p.provider_payment_id, o.expires_at,
+              (SELECT CAST(json_extract(i.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER)
+               FROM order_items i WHERE i.order_id = o.id AND i.item_type = 'ADD_ON') AS snapshot_total_minor
        FROM payments p JOIN orders o ON o.id = p.order_id
        WHERE p.provider = ? AND p.payment_reference = ?`,
     ).bind(PAYMENT_PROVIDER, transaction.paymentReference).first<PaymentRow>()
@@ -871,6 +1092,15 @@ export async function handlePaymentRoutes(
   path: string,
   requestId: string,
 ): Promise<Response | null> {
+  if (path === "/api/v1/catalog") {
+    if (request.method !== "GET") return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");
+    return jsonResponse(
+      publicProductCatalog({ catalogEnabled: isStandardPricingEnabled(env) }),
+      200,
+      requestId,
+      { "Cache-Control": "no-store" },
+    );
+  }
   if (path === "/api/v1/storage-plans") {
     if (request.method !== "GET") return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");
     return listStoragePlans(env, requestId);

@@ -1,5 +1,7 @@
 # Crushify staging deployment
 
+> **Legacy Cloudflare plan:** this document describes a previous D1/R2 staging design and is not the Phase 7D deployment target. Do not run its Wrangler, D1, R2, secret, or deploy commands. Use [VERCEL_STAGING.md](./VERCEL_STAGING.md) for the current Vercel Preview/Turso/Cloudinary preparation.
+
 ## Isolation and current status
 
 - Wrangler is authenticated to the intended Cloudflare account.

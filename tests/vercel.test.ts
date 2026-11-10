@@ -9,7 +9,11 @@ import { PassThrough } from "node:stream";
 import { createClient } from "@libsql/client";
 import { describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
-import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
+import {
+  applyMigrations,
+  type SqlMigration,
+  verifyMigrationSchema,
+} from "../src/database/migrations.ts";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { connectDatabaseFromEnvironment } from "../src/database/provider.ts";
 import type { Database } from "../src/database.ts";
@@ -107,12 +111,14 @@ describe("Vercel API runtime adapter", () => {
     const preview = createVercelApiHandler({
       ...local,
       DATABASE_PROVIDER: "turso",
-      TURSO_DATABASE_URL: "libsql://crushify-staging.turso.io",
-      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
       STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_CLOUD_NAME: "hgtcizux",
-      CLOUDINARY_API_KEY: "synthetic-test-only",
-      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-staging-free",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-test-only",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-test-only",
+      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      TURSO_DATABASE_URL: undefined,
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
     }, dependencies);
@@ -126,7 +132,7 @@ describe("Vercel API runtime adapter", () => {
       TURSO_DATABASE_URL: "https://production.invalid",
       TURSO_AUTH_TOKEN: "synthetic-test-only",
       STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_CLOUD_NAME: "production-cloud",
       CLOUDINARY_API_KEY: "synthetic-test-only",
       CLOUDINARY_API_SECRET: "synthetic-test-only",
       ENVIRONMENT: "production",
@@ -147,11 +153,264 @@ describe("Vercel API runtime adapter", () => {
     assert.equal((await nonLocalResponse.json() as { error: { code: string } }).error.code,
       "RUNTIME_CONFIGURATION_ERROR");
 
+    const stagingInProduction = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-staging.example.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      ENVIRONMENT: "staging",
+      APP_ORIGIN: "https://crushify.test",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    }, dependencies);
+    const stagingInProductionResponse = await stagingInProduction(
+      new Request("https://crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(stagingInProductionResponse.status, 500);
+    assert.equal((await stagingInProductionResponse.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR");
+
+    const implicitPreviewEnvironment = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "https://production.invalid",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "production-cloud",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      APP_ORIGIN: "https://preview.crushify.test",
+      VERCEL_ENV: "preview",
+    }, dependencies);
+    const implicitPreviewResponse = await implicitPreviewEnvironment(
+      new Request("https://preview.crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(implicitPreviewResponse.status, 500);
+    assert.equal((await implicitPreviewResponse.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR");
+
+    const productionDatabaseInPreview = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-production.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-staging-free",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-test-only",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-test-only",
+      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      ENVIRONMENT: "staging",
+      APP_ORIGIN: "https://preview.crushify.test",
+      VERCEL_ENV: "preview",
+    }, dependencies);
+    const productionDatabasePreviewResponse = await productionDatabaseInPreview(
+      new Request("https://preview.crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(productionDatabasePreviewResponse.status, 500);
+    assert.equal((await productionDatabasePreviewResponse.json() as { error: { code: string } }).error.code,
+      "DATABASE_CONFIGURATION_ERROR");
+
+    const genericCredentialsInPreview = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-staging.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "crushify-staging-free",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      APP_ORIGIN: "https://preview.crushify.test",
+      ENVIRONMENT: "staging",
+      VERCEL_ENV: "preview",
+    }, dependencies);
+    const genericCredentialsResponse = await genericCredentialsInPreview(
+      new Request("https://preview.crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(genericCredentialsResponse.status, 500);
+    assert.equal((await genericCredentialsResponse.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR");
+
+    const genericCloudinaryCredentialsInPreview = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "crushify-staging-free",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      APP_ORIGIN: "https://preview.crushify.test",
+      ENVIRONMENT: "staging",
+      VERCEL_ENV: "preview",
+    }, dependencies);
+    const genericCloudinaryResponse = await genericCloudinaryCredentialsInPreview(
+      new Request("https://preview.crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(genericCloudinaryResponse.status, 500);
+    assert.equal((await genericCloudinaryResponse.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR");
+
+    const productionWithStagingCredentials = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "https://production.invalid",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "production-cloud",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      CLOUDINARY_STAGING_CLOUD_NAME: "separate-staging-cloud",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-test-only",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-test-only",
+      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      ENVIRONMENT: "production",
+      APP_ORIGIN: "https://crushify.test",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    }, dependencies);
+    const productionWithStagingCredentialsResponse = await productionWithStagingCredentials(
+      new Request("https://crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(productionWithStagingCredentialsResponse.status, 500);
+    assert.equal(
+      (await productionWithStagingCredentialsResponse.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR",
+    );
+
+    const productionCloudInPreview = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_STAGING_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-test-only",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-test-only",
+      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      ENVIRONMENT: "staging",
+      APP_ORIGIN: "https://preview.crushify.test",
+      VERCEL_ENV: "preview",
+    }, dependencies);
+    const productionCloudPreviewResponse = await productionCloudInPreview(
+      new Request("https://preview.crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(productionCloudPreviewResponse.status, 500);
+    assert.equal((await productionCloudPreviewResponse.json() as { error: { code: string } }).error.code,
+      "STORAGE_CONFIGURATION_ERROR");
+
+    const stagingDatabaseInProduction = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-staging-example.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "production-cloud",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      ENVIRONMENT: "production",
+      APP_ORIGIN: "https://crushify.test",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    }, dependencies);
+    const stagingDatabaseResponse = await stagingDatabaseInProduction(
+      new Request("https://crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(stagingDatabaseResponse.status, 500);
+    assert.equal((await stagingDatabaseResponse.json() as { error: { code: string } }).error.code,
+      "DATABASE_CONFIGURATION_ERROR");
+
+    const stagingCloudInProduction = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "https://production.invalid",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      ENVIRONMENT: "production",
+      APP_ORIGIN: "https://crushify.test",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    }, {
+      async connectDatabase() {
+        throw new Error("Synthetic database connection failure");
+      },
+      createCloudinaryStorage: () => new MemoryStorageAdapter(),
+    });
+    const stagingCloudResponse = await stagingCloudInProduction(
+      new Request("https://crushify.test/api/v1/customers/me"),
+    );
+    assert.equal(stagingCloudResponse.status, 503);
+    assert.equal((await stagingCloudResponse.json() as { error: { code: string } }).error.code,
+      "DEPENDENCY_UNAVAILABLE");
+
+    const stagingCronInProduction = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-staging-example.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_API_KEY: "synthetic-test-only",
+      CLOUDINARY_API_SECRET: "synthetic-test-only",
+      ENVIRONMENT: "staging",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+      CRON_SECRET: "synthetic-cron-secret-with-sufficient-length",
+    }, dependencies);
+    const stagingCronResponse = await stagingCronInProduction(
+      new Request("https://crushify.test/api/cron/publication-lifecycle", {
+        headers: { Authorization: "Bearer synthetic-cron-secret-with-sufficient-length" },
+      }),
+    );
+    assert.equal(stagingCronResponse.status, 404);
+
     const noPrivilegedRoute = createVercelApiHandler(local, dependencies);
     const absentRoute = await noPrivilegedRoute(
       new Request("https://crushify.test/api/v1/payments/mock/settle"),
     );
     assert.equal(absentRoute.status, 404);
+  });
+
+  it("allows mock storage on Preview and never configures outbound mail there", async () => {
+    let mockStorageCreated = false;
+    let cloudinaryStorageCreated = false;
+    const database: Database = {
+      prepare() {
+        throw new Error("Unknown API route must not use the database");
+      },
+      async batch() {
+        throw new Error("Unknown API route must not use the database");
+      },
+    };
+    const handler = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
+      STORAGE_PROVIDER: "mock",
+      ENVIRONMENT: "staging",
+      MAIL_PROVIDER: "resend",
+      MAIL_API_KEY: "synthetic-mail-key",
+      MAIL_FROM_EMAIL: "test@example.invalid",
+      APP_ORIGIN: "https://preview.crushify.test",
+      VERCEL_ENV: "preview",
+    }, {
+      async connectDatabase() {
+        return { database, close: () => undefined };
+      },
+      createMockStorage() {
+        mockStorageCreated = true;
+        return new MemoryStorageAdapter();
+      },
+      createCloudinaryStorage() {
+        cloudinaryStorageCreated = true;
+        throw new Error("Preview must not initialize Cloudinary");
+      },
+    });
+
+    const response = await handler(
+      new Request("https://preview.crushify.test/api/v1/nonexistent"),
+    );
+    assert.equal(response.status, 404);
+    assert.equal(mockStorageCreated, true);
+    assert.equal(cloudinaryStorageCreated, false);
   });
 
   it("uses the stable project production origin when configured and rejects mismatched APP_ORIGIN", async () => {
@@ -161,7 +420,7 @@ describe("Vercel API runtime adapter", () => {
       TURSO_DATABASE_URL: "https://example.turso.io",
       TURSO_AUTH_TOKEN: "secret-token",
       STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_CLOUD_NAME: "production-cloud",
       CLOUDINARY_API_KEY: "key",
       CLOUDINARY_API_SECRET: "secret",
       APP_ORIGIN: `https://${productionHost}`,
@@ -177,7 +436,7 @@ describe("Vercel API runtime adapter", () => {
       TURSO_DATABASE_URL: "https://example.turso.io",
       TURSO_AUTH_TOKEN: "secret-token",
       STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_CLOUD_NAME: "hgtcizux",
+      CLOUDINARY_CLOUD_NAME: "production-cloud",
       CLOUDINARY_API_KEY: "key",
       CLOUDINARY_API_SECRET: "secret",
       APP_ORIGIN: "https://attacker.example",
@@ -207,6 +466,7 @@ describe("Vercel API runtime adapter", () => {
       TURSO_DATABASE_URL: databaseUrl,
       STORAGE_PROVIDER: "mock",
       LOCAL_TEST_MODE: "true",
+      LOCAL_TEST_CATALOG_OVERRIDE: "true",
       ENVIRONMENT: "local",
       PAYMENT_MODE: "mock",
       SEPAY_WEBHOOK_SECRET: webhookSecret,
@@ -226,7 +486,16 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4, 5, 6, 7, 8]);
+      const migrations = await loadMigrations();
+      assert.deepEqual(await applyMigrations(migrationClient, migrations), [1, 2, 3, 4, 5, 6, 7, 8]);
+      await verifyMigrationSchema(migrationClient, migrations);
+      await migrationClient.execute("CREATE TABLE staging_schema_unexpected (id TEXT PRIMARY KEY)");
+      await assert.rejects(
+        verifyMigrationSchema(migrationClient, migrations),
+        /tables and indexes do not match the applied migrations/,
+      );
+      await migrationClient.execute("DROP TABLE staging_schema_unexpected");
+      await verifyMigrationSchema(migrationClient, migrations);
       const live = await handler(requestWithOrigin("/health/live", "https://crushify.test"));
       assert.equal(live.status, 200);
       const ready = await handler(requestWithOrigin("/health/ready", "https://crushify.test"));

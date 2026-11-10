@@ -44,9 +44,12 @@
   }
 
   async function uploadAsset(designId, source, csrf) {
-    const response = await fetch(source, { credentials: "same-origin" });
-    if (!response.ok) throw new Error("Không đọc được ảnh trong trình chỉnh sửa.");
-    const blob = await response.blob();
+    let blob = window.crushifyDataImageBlob(source);
+    if (!blob) {
+      const response = await fetch(source, { credentials: "same-origin" });
+      if (!response.ok) throw new Error("Không đọc được ảnh trong trình chỉnh sửa.");
+      blob = await response.blob();
+    }
     const mediaType = blob.type.toLowerCase();
     if (!["image/jpeg", "image/png"].includes(mediaType) || blob.size < 1) {
       throw new Error("Ảnh phải là PNG hoặc JPEG hợp lệ.");
@@ -88,6 +91,7 @@
       <div class="crushify-customer-actions" hidden>
         <button type="button" data-action="save">Lưu ngay</button>
         <button type="button" data-action="preview">Xem trước riêng tư</button>
+        <button type="button" data-action="checkout">Tiếp tục đặt hàng</button>
         <a href="/account/websites/">Website của tôi</a>
         <button type="button" data-action="signout">Đăng xuất</button>
       </div>
@@ -235,6 +239,9 @@
             method: "POST",
           }, csrf);
           location.href = preview.url;
+        } else if (button.dataset.action === "checkout") {
+          if (!await save()) return;
+          location.href = `/checkout/?design_id=${encodeURIComponent(designId)}`;
         } else if (button.dataset.action === "signout") {
           await api("/customers/session", { method: "DELETE" }, csrf);
           location.replace(location.pathname);

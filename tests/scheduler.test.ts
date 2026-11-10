@@ -80,14 +80,15 @@ describe("Vercel scheduled publication lifecycle", () => {
     let connections = 0;
     const environment = {
       DATABASE_PROVIDER: "turso",
-      TURSO_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
-      TURSO_AUTH_TOKEN: "synthetic-token",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-token",
       STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_CLOUD_NAME: "hgtcizux",
-      CLOUDINARY_API_KEY: "synthetic-api-key",
-      CLOUDINARY_API_SECRET: "synthetic-api-secret",
+      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-staging-free",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-api-key",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-api-secret",
+      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
       ENVIRONMENT: "staging",
-      VERCEL_ENV: "production",
+      VERCEL_ENV: "preview",
       APP_ORIGIN: "https://crushify-staging.vercel.app",
       CRON_SECRET: secret,
     };
@@ -118,6 +119,30 @@ describe("Vercel scheduled publication lifecycle", () => {
       });
       assert.equal(connections, 1);
 
+      const previewWithProductionCredentials = createVercelApiHandler({
+        ...environment,
+        TURSO_DATABASE_URL: "libsql://crushify-production.example.turso.io",
+        TURSO_AUTH_TOKEN: "synthetic-production-token",
+        CLOUDINARY_CLOUD_NAME: "production-cloud",
+        CLOUDINARY_API_KEY: "synthetic-production-key",
+        CLOUDINARY_API_SECRET: "synthetic-production-secret",
+      }, {
+        async connectDatabase() {
+          connections++;
+          return { database, close: () => undefined };
+        },
+      });
+      const rejectedProductionCredentials = await previewWithProductionCredentials(new Request(
+        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
+        { headers: { Authorization: "Bearer " + secret } },
+      ));
+      assert.equal(rejectedProductionCredentials.status, 500);
+      assert.equal(
+        (await rejectedProductionCredentials.json() as { error: { code: string } }).error.code,
+        "RUNTIME_CONFIGURATION_ERROR",
+      );
+      assert.equal(connections, 1);
+
       const wrongEnvironment = createVercelApiHandler({
         ...environment,
         ENVIRONMENT: "production",
@@ -132,6 +157,22 @@ describe("Vercel scheduled publication lifecycle", () => {
         { headers: { Authorization: `Bearer ${secret}` } },
       ));
       assert.equal(hidden.status, 404);
+      assert.equal(connections, 1);
+
+      const stagingInProduction = createVercelApiHandler({
+        ...environment,
+        VERCEL_ENV: "production",
+      }, {
+        async connectDatabase() {
+          connections++;
+          return { database, close: () => undefined };
+        },
+      });
+      const productionHidden = await stagingInProduction(new Request(
+        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
+        { headers: { Authorization: "Bearer local-test-cron-secret-32-characters" } },
+      ));
+      assert.equal(productionHidden.status, 404);
       assert.equal(connections, 1);
     } finally {
       client.close();

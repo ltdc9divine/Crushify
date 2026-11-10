@@ -80,6 +80,64 @@ export async function runDatabaseContract({
   const designId = created.body.design_id;
   assert.equal(created.body.revision, 1);
 
+  const memories = await request("/designs", owner, {
+    method: "POST",
+    mutating: true,
+    json: { template_id: "our-memories", schema_version: 1 },
+  });
+  assert.equal(memories.response.status, 201, `${label}: create memories design`);
+  for (let index = 0; index < 13; index++) {
+    const grant = await request("/assets/upload-url", owner, {
+      method: "POST",
+      mutating: true,
+      json: {
+        design_id: memories.body.design_id,
+        media_type: "image/png",
+        size: 1,
+      },
+    });
+    assert.equal(grant.response.status, 201, `${label}: memories asset ${index + 1} of 13`);
+  }
+  const tooManyMemoriesAssets = await request("/assets/upload-url", owner, {
+    method: "POST",
+    mutating: true,
+    json: {
+      design_id: memories.body.design_id,
+      media_type: "image/png",
+      size: 1,
+    },
+  });
+  assert.equal(tooManyMemoriesAssets.response.status, 409, `${label}: reject memories asset 14`);
+
+  const tooManyStandardAssets = await request("/designs", owner, {
+    method: "POST",
+    mutating: true,
+    json: { template_id: "our-universe", schema_version: 1 },
+  });
+  assert.equal(tooManyStandardAssets.response.status, 201, `${label}: create standard design for photo limit`);
+  for (let index = 0; index < 6; index++) {
+    const grant = await request("/assets/upload-url", owner, {
+      method: "POST",
+      mutating: true,
+      json: {
+        design_id: tooManyStandardAssets.body.design_id,
+        media_type: "image/png",
+        size: 1,
+      },
+    });
+    assert.equal(grant.response.status, 201, `${label}: standard asset ${index + 1} of 6`);
+  }
+  const tooManyStandardAssetsResult = await request("/assets/upload-url", owner, {
+    method: "POST",
+    mutating: true,
+    json: {
+      design_id: tooManyStandardAssets.body.design_id,
+      media_type: "image/png",
+      size: 1,
+    },
+  });
+  assert.equal(tooManyStandardAssetsResult.response.status, 409, `${label}: reject standard asset 7`);
+
   const firstRead = await request(`/designs/${designId}`, owner);
   assert.equal(firstRead.response.status, 200, `${label}: read design`);
   assert.equal(firstRead.body.data.sender, created.body.data.sender);

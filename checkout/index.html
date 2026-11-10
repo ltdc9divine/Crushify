@@ -6,7 +6,7 @@
   <meta name="robots" content="noindex, nofollow">
   <meta name="theme-color" content="#140d1b">
   <link rel="icon" href="data:,">
-  <title>Thanh toán thử nghiệm | Crushify</title>
+  <title>Đặt hàng | Crushify</title>
   <link rel="stylesheet" href="./checkout.css">
   <script src="./checkout.js" defer></script>
 </head>
@@ -14,11 +14,48 @@
   <main class="checkout-shell">
     <a class="brand" href="/">Crushify</a>
     <section class="checkout-card" aria-labelledby="page-title">
-      <p class="environment-badge">BẢN THỬ NGHIỆM · KHÔNG CHUYỂN TIỀN THẬT</p>
+      <p class="environment-badge">CRUSHIFY · THÔNG TIN ĐẶT HÀNG</p>
       <h1 id="page-title">Hoàn tất món quà</h1>
-      <p class="intro">Đơn hàng chỉ được xác nhận sau khi máy chủ kiểm tra webhook hợp lệ.</p>
+      <p class="intro">Xem lại thiết kế và thời hạn hosting trước khi tạo đơn. Giá được xác định phía máy chủ.</p>
 
       <div id="notice" class="notice" role="status" aria-live="polite">Đang kiểm tra phiên đăng nhập…</div>
+
+      <section id="checkout-panel" class="checkout-panel" hidden aria-labelledby="summary-title">
+        <h2 id="summary-title">Tóm tắt món quà</h2>
+        <dl class="order-details">
+          <div><dt>Mẫu</dt><dd id="design-template">—</dd></div>
+          <div><dt>Giá mẫu (gói tháng)</dt><dd id="base-price">—</dd></div>
+          <div><dt id="hosting-charge-label">Hosting phát sinh</dt><dd id="duration-price">Chọn thời hạn</dd></div>
+          <div><dt>Tháng hosting được bao gồm</dt><dd id="included-months">—</dd></div>
+          <div><dt>Tháng hosting phát sinh</dt><dd id="additional-months">—</dd></div>
+          <div><dt>Giá mỗi tháng phát sinh</dt><dd id="additional-month-rate">—</dd></div>
+          <div><dt>Tổng dự kiến</dt><dd id="order-total-preview">—</dd></div>
+        </dl>
+        <p id="design-summary" class="design-summary"></p>
+        <form id="checkout-form">
+          <label class="field-label" for="duration-type">Gói hosting</label>
+          <select id="duration-type" name="duration_type" required>
+            <option value="monthly">Hosting theo tháng</option>
+            <option value="lifetime">Gói trọn đời</option>
+          </select>
+          <label class="field-label" for="hosting-months">Số tháng hosting</label>
+          <input id="hosting-months" name="hosting_months" type="number" min="1" step="1" inputmode="numeric" value="1" required>
+          <p id="duration-note" class="duration-note"></p>
+          <p id="lifetime-policy-note" class="policy-note" hidden>
+            Lifetime là giá trọn gói, không cộng thêm giá mẫu. Gói này không cam kết website tồn tại nếu nền tảng hoặc nhà cung cấp ngừng hoạt động; không bao gồm bảo trì, chỉnh sửa hay thiết kế mới.
+          </p>
+          <fieldset id="asset-consents" class="asset-consents" hidden>
+            <legend>Ảnh trên website quà tặng</legend>
+            <p>Chỉ ảnh bạn chọn mới được phép hiển thị công khai trên trang quà tặng.</p>
+          </fieldset>
+          <label class="terms-check">
+            <input id="terms-confirm" type="checkbox">
+            <span>Tôi đã kiểm tra nội dung và thời hạn hosting đã chọn.</span>
+          </label>
+          <p class="policy-note">Thông tin chính sách hủy/hoàn tiền chưa được công bố. Không chuyển tiền thật; tính năng thanh toán Production chưa bật.</p>
+          <button id="submit-order" class="submit-order" type="submit" disabled>Tạo đơn hàng</button>
+        </form>
+      </section>
 
       <section id="order-panel" class="order-panel" hidden aria-label="Thông tin đơn hàng">
         <dl class="order-details">
@@ -26,7 +63,10 @@
           <div><dt>Tổng tiền</dt><dd id="order-total">—</dd></div>
           <div><dt>Trạng thái</dt><dd id="order-status">—</dd></div>
           <div><dt>Thời hạn</dt><dd id="order-expiry">—</dd></div>
+          <div><dt>Xử lý đơn</dt><dd id="fulfillment-status">—</dd></div>
         </dl>
+        <p id="tracking-help" class="tracking-help" hidden></p>
+        <a id="publication-link" class="publication-link" hidden></a>
         <div id="qr-panel" class="qr-panel" hidden>
           <img id="payment-qr" alt="Mã QR thanh toán thử nghiệm SePay">
           <p id="qr-error" class="qr-error" role="status" aria-live="polite" hidden>
@@ -55,7 +95,7 @@
           Chế độ mock không tạo mã QR hoặc giao dịch ngân hàng. Webhook kiểm thử được xác minh phía máy chủ.
         </p>
       </section>
-      <p class="footer-note">Thanh toán và xuất bản trực tiếp chưa được bật. Không có URL quà tặng nào được tạo ở bước này.</p>
+      <p class="footer-note">Chưa có thanh toán hoặc xuất bản Production. <a href="/account/websites/">Xem thiết kế và đơn hàng của bạn</a> · <a href="mailto:hello@crushify.love">Liên hệ hỗ trợ</a>.</p>
     </section>
   </main>
 </body>

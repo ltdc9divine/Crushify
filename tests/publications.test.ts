@@ -232,6 +232,12 @@ describe("publication expiration lifecycle", () => {
       ]);
       const future = await createFixture(client, { expiresAt: "2099-01-31T12:00:00.001Z" });
       const lifetime = await createFixture(client, { expiresAt: null, lifetime: true });
+      const retainedLifetime = await createFixture(client, {
+        expiresAt: null,
+        lifetime: true,
+        status: "EXPIRED",
+        retentionUntil: new Date(NOW.getTime() - 1).toISOString(),
+      });
       const env = {
         DB: adapter,
         STORAGE: storage,
@@ -268,6 +274,19 @@ describe("publication expiration lifecycle", () => {
         args: [future.publicationId, lifetime.publicationId],
       });
       assert.deepEqual(unchanged.rows.map((row) => row.status), ["PUBLISHED", "PUBLISHED"]);
+      const retained = await client.execute({
+        sql: `SELECT p.status, p.snapshot_json, p.retention_delete_after_at, e.status AS entitlement_status
+              FROM publications p
+              JOIN storage_entitlements e ON e.publication_id = p.id
+              WHERE p.id = ?`,
+        args: [retainedLifetime.publicationId],
+      });
+      assert.equal(retained.rows[0]?.status, "EXPIRED");
+      assert.equal(retained.rows[0]?.entitlement_status, "LIFETIME");
+      assert.notEqual(retained.rows[0]?.snapshot_json, "{}",
+        "retention cleanup must not erase a lifetime entitlement");
+      assert.equal(retained.rows[0]?.retention_delete_after_at,
+        new Date(NOW.getTime() - 1).toISOString());
       const lifetimeEntitlement = await client.execute({
         sql: "SELECT status, expires_at FROM storage_entitlements WHERE publication_id = ?",
         args: [lifetime.publicationId],
