@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-JXQnCK9inGFRClv+Pkc6pwKDPRGOqdanm3+EUv/5/AM='; style-src 'self' https://fonts.googleapis.com 'sha256-1t+C2WsKcJT0zJVn1nw7vaIm5Do8q35eVbG0bRjBWzA='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-8eC9MVQWY6wZqaKRnkceVzTpIL5ynuzWkoLi/cBi6O0='; style-src 'self' https://fonts.googleapis.com 'sha256-zAMWdQSxRI0jm1+X4w/C64HFjgAXlgpqRssb4ayFiaY='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
 <meta name="referrer" content="no-referrer">
 <title>Crushify · Lá thư tình 3D</title>
 <link rel="stylesheet" href="/shared/publication-bootstrap.css">
@@ -16,7 +16,7 @@ html,body{height:100%;margin:0;background:#0a0207;color:var(--t);font:14px/1.45 
 #app.rc{grid-template-columns:1fr}#app.rc #panel{display:none}
 #panel{overflow:auto;padding:18px 18px 28px;background:var(--pn);backdrop-filter:blur(14px);border-right:1px solid rgba(255,255,255,.1);z-index:2}
 h1{font:500 34px "Playfair Display",Georgia,serif;margin:0}.sub{margin:2px 0 14px;color:var(--m);font:italic 15px "Playfair Display",serif}
-h3{margin:18px 0 8px;font-size:14px;color:var(--b);font-weight:600}
+h2{margin:18px 0 8px;font-size:14px;color:var(--b);font-weight:600}
 input,textarea,select{width:100%;margin:0 0 8px;padding:11px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.28);color:var(--t);font:inherit}
 textarea{resize:vertical}input:focus-visible,textarea:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid var(--a);outline-offset:2px}
 .row{display:flex;gap:8px}small{color:var(--m)}
@@ -26,6 +26,12 @@ button:hover,.btn:hover{border-color:var(--a)}
 button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled{opacity:.5;cursor:default}
 #thumbs{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}#thumbs img{width:56px;height:56px;border-radius:10px;object-fit:cover;cursor:pointer;border:1px solid rgba(255,255,255,.2)}
 #themes{display:flex;flex-wrap:wrap;gap:8px}
+:root[data-theme=rose]{--a:#ff4fa3;--b:#ff9ccb;--pn:rgba(40,8,26,.82)}
+:root[data-theme=mid]{--a:#ff2a45;--b:#ff8095;--pn:rgba(22,3,8,.86)}
+:root[data-theme=lav]{--a:#b892ff;--b:#9fc4ff;--pn:rgba(22,12,52,.82)}
+:root[data-theme=ivory]{--a:#e6c27a;--b:#ffe3a8;--pn:rgba(36,26,12,.84)}
+#themes [data-k=rose]{border-color:#ff4fa3}#themes [data-k=mid]{border-color:#ff2a45}
+#themes [data-k=lav]{border-color:#b892ff}#themes [data-k=ivory]{border-color:#e6c27a}
 #stage{position:relative;min-width:0;min-height:0;overflow:hidden}
 #cv{width:100%;height:100%;display:block;touch-action:none}
 #fb{position:absolute;inset:0;overflow:auto;padding:8vmin;font:18px/1.7 "Playfair Display",Georgia,serif;text-align:center;background:radial-gradient(circle,#3a1230,#0a0207)}
@@ -45,15 +51,15 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 <div id="app">
 <aside id="panel">
 <h1>Lá thư tình</h1><p class="sub">Một lá thư từ trái tim, chỉ dành cho người ấy ♥</p>
-<h3>1 · Câu chuyện</h3>
+<h2>1 · Câu chuyện</h2>
 <div class="row"><input id="f-from" placeholder="Tên của bạn" maxlength="30" aria-label="Tên của bạn"><input id="f-to" placeholder="Tên người nhận" maxlength="30" aria-label="Tên người nhận"></div>
 <input id="f-title" placeholder="Tiêu đề (tuỳ chọn)" maxlength="60" aria-label="Tiêu đề">
 <textarea id="f-msg" maxlength="500" rows="5" placeholder="Lời nhắn của bạn…" aria-label="Lời nhắn"></textarea><small id="cnt"></small>
 <input id="f-sec" placeholder="Lời nhắn bí mật trong trái tim pha lê" maxlength="120" aria-label="Lời nhắn bí mật" style="margin-top:8px">
-<h3>2 · Kỷ niệm</h3><div id="thumbs"></div>
+<h2>2 · Kỷ niệm</h2><div id="thumbs"></div>
 <button id="pick-photos" class="btn" type="button">＋ Thêm ảnh (tối đa 4)</button><input id="up" type="file" accept="image/*" multiple hidden>
-<h3>3 · Chủ đề</h3><div id="themes"></div>
-<h3>4 · Nhịp chuyển động</h3>
+<h2>3 · Chủ đề</h2><div id="themes"></div>
+<h2>4 · Nhịp chuyển động</h2>
 <select id="f-spd" aria-label="Nhịp chuyển động"><option value="1">Điện ảnh (chậm, đầy đủ)</option><option value="2">Nhanh</option></select>
 <div class="row" style="margin-top:14px"><button id="b-pv" class="pri">Xem như người nhận</button><button id="b-copy">Sao chép liên kết</button></div>
 </aside>
@@ -91,7 +97,7 @@ const D={from:'Anh',to:'Em',title:'Gửi người mình thương nhất…',msg:
 try{const d=Q.get('d');if(d)Object.assign(D,JSON.parse(decodeURIComponent(escape(atob(d)))))}catch(e){}
 if(publicationData)Object.assign(D,publicationData);
 let rc=Q.get('mode')==='recipient'||Q.has('preview');const app=$('#app');
-function setRc(v){rc=v;app.classList.toggle('rc',v);$('#exit').hidden=!(v&&Q.get('mode')!=='recipient')}
+function setRc(v){const was=rc;rc=v;app.classList.toggle('rc',v);const exit=$('#exit');exit.hidden=!(v&&Q.get('mode')!=='recipient');if(v&&!exit.hidden)exit.focus();else if(!v&&was)$('#b-pv').focus()}
 function fb(m){$('#cv').hidden=true;const f=$('#fb');f.hidden=false;f.innerHTML='';const h=document.createElement('h2'),p=document.createElement('p'),s=document.createElement('p'),n=document.createElement('small');h.textContent=D.title||('Gửi '+D.to);p.textContent=D.msg;s.textContent=(D.from||'')+' ♥';n.textContent=m;f.append(h,p,s,n)}
 let toastT;function toast(m,ms=4500){const t=$('#toast');t.textContent=m;t.classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('on'),ms)}
 function ld(u){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=u;s.onload=ok;s.onerror=no;document.head.appendChild(s)})}
@@ -217,7 +223,7 @@ cg.add(cbase,dome,heart,hg,hr);hits.push(dome,heart);
 
 /* ---------- Theme: đổi cả cảnh 3D lẫn UI ---------- */
 function applyTheme(k){window.dispatchEvent(new Event('crushify:changed'));const t=TH[k]||TH.rose;D.theme=k;cur=t;scene.background=C(t.bg);scene.fog.color=C(t.fog);
-const st=document.documentElement.style;st.setProperty('--a',t.ui);st.setProperty('--b',t.ui2);st.setProperty('--pn',t.pn);
+document.documentElement.dataset.theme=TH[k]?k:'rose';
 l1.color.set(t.a);l2.color.set(t.c);l3.color.set(t.b);inL.color.set(t.a);pmat.color.set(t.plat);
 neonM.forEach((m,i)=>m.color.set(i%2?t.b:t.a));floor.material.color.set(t.a);
 orbs.forEach((o,i)=>{o.ring.material.color.set([t.a,t.c,t.b][i]);o.head.material.color.set([t.b,t.a,t.c][i])});
@@ -300,7 +306,7 @@ const F={from:$('#f-from'),to:$('#f-to'),title:$('#f-title'),msg:$('#f-msg'),sec
 Object.keys(F).forEach(k=>{F[k].value=D[k]||''});
 const inp=()=>{Object.keys(F).forEach(k=>D[k]=F[k].value);$('#cnt').textContent=D.msg.length+' / 500';lay();draw(lp);drawTag();window.dispatchEvent(new Event('crushify:changed'))};
 Object.values(F).forEach(e=>e.addEventListener('input',inp));
-Object.entries(TH).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.style.borderColor=t.ui;b.onclick=()=>applyTheme(k);$('#themes').appendChild(b)});
+Object.entries(TH).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.onclick=()=>applyTheme(k);$('#themes').appendChild(b)});
 $('#up').onchange=e=>{[...e.target.files].slice(0,4).forEach(f=>{const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=c.height=512;const s=Math.min(im.width,im.height);c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,512,512);up.push(c);D.photos=[];if(up.length>4)up.shift();PH.length=0;syncPh();URL.revokeObjectURL(im.src)};im.src=URL.createObjectURL(f)});e.target.value=''};
 $('#pick-photos').onclick=()=>$('#up').click();
 $('#open').onclick=()=>S==='sealed'?openL():closeL();

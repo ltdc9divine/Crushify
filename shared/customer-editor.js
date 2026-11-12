@@ -81,7 +81,7 @@
     const box = document.createElement("section");
     box.className = "crushify-customer-tools";
     box.innerHTML = `
-      <h3>Crushify · Lưu thiết kế riêng</h3>
+      <p class="crushify-customer-tools-title">Crushify · Lưu thiết kế riêng</p>
       <form class="crushify-customer-login">
         <label>Email nhận liên kết đăng nhập
           <input type="email" name="email" autocomplete="email" maxlength="254" required>

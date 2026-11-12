@@ -61,13 +61,14 @@ $$('#tools button').forEach(b=>b.onclick=()=>act[b.dataset.a](b));$('#back').onc
 if(!document.fullscreenEnabled&&!document.webkitFullscreenEnabled)$('[data-a=full]').hidden=true;
 addEventListener('keydown',e=>{if(e.key==='Escape'){panel.hidden=true;$('#final').hidden=true}});
 // ---------- mode / tabs / share ----------
-function setView(v){document.body.classList.toggle('view',v);scene?.resize()}
+function setView(v){document.body.classList.toggle('view',v);document.body.classList.toggle('view-preview',v);scene?.resize();if(v)$('#backEdit').focus();else $('#viewAs').focus()}
 $('#viewAs').onclick=()=>{setView(true);scene?.start();history.replaceState(null,'','#preview')};
+$('#backEdit').onclick=()=>{setView(false);history.replaceState(null,'',location.pathname+location.search)};
 $('#copyLink').onclick=async e=>{const d={...S,memories:[]},u=location.href.split('#')[0]+'#v='+b64e(d);try{await navigator.clipboard.writeText(u);e.target.textContent='Đã sao chép liên kết'}catch{prompt('Sao chép liên kết này',u)}setTimeout(()=>e.target.textContent='Sao chép liên kết người nhận',2000)};
 const mobileTabs=matchMedia('(max-width:800px)');let mobileTabChosen=false;
 const selectMobileTab=stage=>{$$('#tabs button').forEach(b=>{const selected=b.dataset.t===(stage?'stage':'editor');b.classList.toggle('on',selected);b.setAttribute('aria-pressed',String(selected))});document.body.classList.toggle('tab-stage',stage);scene?.resize()};
 $$('#tabs button').forEach(b=>b.onclick=()=>{mobileTabChosen=true;selectMobileTab(b.dataset.t==='stage')});
-if(recipient||location.hash==='#preview')document.body.classList.add('view');
+if(recipient||location.hash==='#preview'){document.body.classList.add('view');if(!recipient)document.body.classList.add('view-preview')}
 if(mobileTabs.matches&&!document.body.classList.contains('view'))selectMobileTab(true);
 mobileTabs.addEventListener('change',event=>{if(event.matches&&!mobileTabChosen&&!document.body.classList.contains('view'))selectMobileTab(true)});
 addEventListener('resize',()=>{if(mobileTabs.matches&&!mobileTabChosen&&!document.body.classList.contains('view'))selectMobileTab(true)});

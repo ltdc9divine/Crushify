@@ -7,9 +7,10 @@
   font: 14px/1.45 system-ui, sans-serif;
 }
 
-.crushify-customer-tools h3 {
+.crushify-customer-tools-title {
   margin: 0 0 8px;
   font-size: 15px;
+  font-weight: 700;
 }
 
 .crushify-customer-tools input {

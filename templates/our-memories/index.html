@@ -15,7 +15,7 @@
 <body>
 <div id="tabs"><button data-v="ed">Chỉnh sửa</button><button data-v="pv">Xem trước</button></div>
 <aside id="editor">
-  <h2>Kỷ niệm đôi mình <small>Tạo album</small></h2>
+  <p class="editor-title">Kỷ niệm đôi mình <small>Tạo album</small></p>
   <details open><summary>Thông tin cặp đôi</summary>
     <label>Tên bạn<input data-k="sender"></label>
     <label>Tên người ấy<input data-k="receiver"></label>
@@ -32,7 +32,7 @@
   </details>
   <details><summary>Chương kỷ niệm</summary><div id="chs"></div></details>
   <details open><summary>Ảnh <span id="cnt"></span></summary>
-    <p class="hint">Kéo thả để đổi thứ tự. Số = chương, ★ = ảnh bìa.</p>
+    <p class="hint">Kéo thả hoặc dùng nút lên/xuống để đổi thứ tự. Số = chương, ★ = ảnh bìa.</p>
     <div id="phs"></div>
     <button id="pick-photos" class="btn" type="button">Tải ảnh lên (tối đa 12)</button><input id="up" type="file" accept="image/*" multiple hidden>
   </details>

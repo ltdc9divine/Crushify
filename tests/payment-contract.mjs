@@ -98,6 +98,29 @@ export async function runPaymentContract({
   assert.equal(created.body.currency, "VND");
   assert.equal(created.body.status, "AWAITING_PAYMENT");
   assert.equal(created.body.payment.status, "PENDING");
+  const previewCapability = await request(`/designs/${designId}/preview`, owner, {
+    method: "POST",
+    mutating: true,
+  });
+  assert.equal(previewCapability.response.status, 201,
+    `${label}: create shareable preview capability for order isolation checks`);
+  const previewOrderStatus = await request(`/orders/${created.body.order_id}/status`, null, {
+    token: previewCapability.body.token,
+  });
+  assert.equal(previewOrderStatus.response.status, 401,
+    `${label}: preview capability cannot read order/payment status`);
+  const previewOrderDetails = await request(`/orders/${created.body.order_id}`, null, {
+    token: previewCapability.body.token,
+  });
+  assert.equal(previewOrderDetails.response.status, 401,
+    `${label}: preview capability cannot read order/payment details`);
+  if (otherOwner) {
+    const sharedPreviewOrder = await request(`/orders/${created.body.order_id}/status`, otherOwner, {
+      token: previewCapability.body.token,
+    });
+    assert.equal(sharedPreviewOrder.response.status, 404,
+      `${label}: sharing a preview does not grant another customer access to its order`);
+  }
   assert.deepEqual(created.body.storage_plan, {
     id: "1-month",
     title: "1 tháng",

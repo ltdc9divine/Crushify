@@ -150,12 +150,21 @@ describe("publication template registry", () => {
     assert.match(proposal, /aria-label="Chú thích ảnh \$\{i\+1\}"/);
   });
 
+  it("keeps the customer toolbar label out of the page heading hierarchy", () => {
+    const editor = readFileSync(new URL("../shared/customer-editor.js", import.meta.url), "utf8");
+    const styles = readFileSync(new URL("../shared/customer-editor.css", import.meta.url), "utf8");
+    assert.match(editor, /<p class="crushify-customer-tools-title">Crushify · Lưu thiết kế riêng<\/p>/);
+    assert.match(styles, /\.crushify-customer-tools-title\s*\{/);
+    assert.doesNotMatch(editor, /<h[1-6]>Crushify · Lưu thiết kế riêng<\/h[1-6]>/);
+  });
+
   it("uses keyboard-operable photo pickers and restores focus after photo-list updates", () => {
     const loveLetterHtml = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
     const memoriesHtml = readFileSync(new URL("../templates/our-memories/index.html", import.meta.url), "utf8");
     const proposalHtml = readFileSync(new URL("../templates/say-yes/index.html", import.meta.url), "utf8");
     const memories = readFileSync(new URL("../templates/our-memories/our-memories.js", import.meta.url), "utf8");
     const proposal = readFileSync(new URL("../templates/say-yes/say-yes.js", import.meta.url), "utf8");
+    const universe = readFileSync(new URL("../templates/our-universe/index.html", import.meta.url), "utf8");
     for (const html of [loveLetterHtml, memoriesHtml, proposalHtml]) {
       assert.match(html, /<button id="pick-photos"[^>]*type="button"/);
     }
@@ -164,7 +173,66 @@ describe("publication template registry", () => {
     }
     assert.ok(memories.includes('[data-a="cov"]`)?.focus()'));
     assert.ok(memories.includes('[data-a="ch"]`)?.focus()'));
-    assert.ok(proposal.includes('data-i="${focusIndex}"] button`)?.focus()'));
+    assert.ok(proposal.includes('data-i="${focusIndex}"] [data-a="del"]`)?.focus()'));
+    assert.match(memories, /data-a="up" aria-label="Di chuyển ảnh \$\{i\+1\} lên"/);
+    assert.match(memories, /data-a="down" aria-label="Di chuyển ảnh \$\{i\+1\} xuống"/);
+    assert.match(memories, /function movePhoto\(index,direction\)/);
+    assert.match(proposal, /data-a="up" aria-label="Di chuyển ảnh \$\{i\+1\} lên"/);
+    assert.match(proposal, /data-a="down" aria-label="Di chuyển ảnh \$\{i\+1\} xuống"/);
+    assert.match(proposal, /function reorderPhoto\(index,direction\)/);
+    assert.match(universe, /`Di chuyển ảnh \$\{i\+1\} lên`/);
+    assert.match(universe, /`Di chuyển ảnh \$\{i\+1\} xuống`/);
+  });
+
+  it("moves focus into recipient preview and restores it to the editor", () => {
+    const universe = readFileSync(new URL("../templates/our-universe/index.html", import.meta.url), "utf8");
+    const loveLetter = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    const memories = readFileSync(new URL("../templates/our-memories/our-memories.js", import.meta.url), "utf8");
+    const proposal = readFileSync(new URL("../templates/say-yes/say-yes.js", import.meta.url), "utf8");
+    const distance = readFileSync(new URL("../templates/distance-means-nothing/app.js", import.meta.url), "utf8");
+    const distanceStyles = readFileSync(new URL("../templates/distance-means-nothing/distance.css", import.meta.url), "utf8");
+    for (const source of [universe, loveLetter]) {
+      assert.match(source, /if\(v&&!exit\.hidden\)exit\.focus\(\)/);
+      assert.match(source, /else if\(!v&&was\)\$\('#b-pv'\)\.focus\(\)/);
+    }
+    assert.match(memories, /document\.body\.classList\.add\('recipient'\);\$\('#backEdit'\)\.focus\(\)/);
+    assert.match(memories, /document\.body\.classList\.remove\('recipient'\);\$\('#asRecipient'\)\.focus\(\)/);
+    assert.match(proposal, /document\.body\.classList\.add\('recipient','pv'\);replay\(\);\$\('#backEdit'\)\.focus\(\)/);
+    assert.match(proposal, /document\.body\.classList\.remove\('recipient'\);\$\('#asRecipient'\)\.focus\(\)/);
+    assert.match(distance, /if\(v\)\$\('#backEdit'\)\.focus\(\);else \$\('#viewAs'\)\.focus\(\)/);
+    assert.match(distanceStyles, /body\.view-preview #backEdit\{display:block\}/);
+  });
+
+  it("provides visible focus styles and a logical top-level heading across standard templates", () => {
+    const memoriesCss = readFileSync(new URL("../templates/our-memories/our-memories.css", import.meta.url), "utf8");
+    const proposalCss = readFileSync(new URL("../templates/say-yes/say-yes.css", import.meta.url), "utf8");
+    const distanceCss = readFileSync(new URL("../templates/distance-means-nothing/distance.css", import.meta.url), "utf8");
+    const memoriesHtml = readFileSync(new URL("../templates/our-memories/index.html", import.meta.url), "utf8");
+    const proposalHtml = readFileSync(new URL("../templates/say-yes/index.html", import.meta.url), "utf8");
+    const distanceHtml = readFileSync(new URL("../templates/distance-means-nothing/index.html", import.meta.url), "utf8");
+    const loveLetterHtml = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    const universeHtml = readFileSync(new URL("../templates/our-universe/index.html", import.meta.url), "utf8");
+    assert.match(memoriesCss, /button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible/);
+    assert.match(proposalCss, /button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible/);
+    assert.match(distanceCss, /:focus-visible/);
+    for (const html of [memoriesHtml, proposalHtml, distanceHtml]) {
+      assert.match(html, /<p class="editor-title">/);
+      assert.doesNotMatch(html, /<h[2-6][^>]*>[^<]*(?:Kỷ niệm đôi mình|Hãy nói đồng ý|Xa mặt không cách lòng)/);
+    }
+    assert.match(loveLetterHtml, /<h2>1 · Câu chuyện<\/h2>/);
+    assert.doesNotMatch(loveLetterHtml, /<h3>/);
+    assert.match(universeHtml, /createElement\('h2'\);h\.className='editor-section-title'/);
+  });
+
+  it("uses CSP-safe static selectors for Love Letter theme changes", () => {
+    const loveLetter = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    assert.match(loveLetter, /document\.documentElement\.dataset\.theme=TH\[k\]\?k:'rose'/);
+    assert.doesNotMatch(loveLetter, /document\.documentElement\.style\.setProperty/);
+    assert.doesNotMatch(loveLetter, /b\.style\.borderColor=/);
+    for (const theme of ["rose", "mid", "lav", "ivory"]) {
+      assert.match(loveLetter, new RegExp(`:root\\[data-theme=${theme}\\]`));
+      assert.match(loveLetter, new RegExp(`#themes \\[data-k=${theme}\\]`));
+    }
   });
 
   it("rerenders loaded Our Memories images without triggering another design save", () => {
@@ -179,12 +247,17 @@ describe("publication template registry", () => {
     const source = readFileSync(new URL("../templates/our-universe/index.html", import.meta.url), "utf8");
     const script = [...source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)]
       .find(([, attributes]) => !/\bsrc\s*=/.test(attributes ?? ""));
+    const style = [...source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)][0];
     const policy = source.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/i);
     assert.ok(script, "expected an inline application script");
+    assert.ok(style, "expected inline styles");
     assert.ok(policy, "expected a page Content Security Policy");
     const body = (script[2] ?? "").replace(/\r\n?/g, "\n");
+    const styles = (style[1] ?? "").replace(/\r\n?/g, "\n");
     const hash = createHash("sha256").update(body).digest("base64");
+    const styleHash = createHash("sha256").update(styles).digest("base64");
     assert.ok(policy[1]?.includes(`'sha256-${hash}'`), "CSP must authorize the exact inline script");
+    assert.ok(policy[1]?.includes(`'sha256-${styleHash}'`), "CSP must authorize the exact inline style");
   });
 
   it("rejects unknown schemas and data fields instead of passing them to a renderer", () => {

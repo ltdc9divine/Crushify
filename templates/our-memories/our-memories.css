@@ -4,6 +4,7 @@ html,body{height:100%;margin:0}
 body{font:15px/1.5 "Playfair Display",Georgia,serif;color:#fbe9ee;overflow:hidden;background:radial-gradient(ellipse at 60% 40%,var(--b1),var(--b2) 70%)}
 button,input,select,textarea{font:inherit}
 button{cursor:pointer;color:inherit}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
 #stage{position:fixed;inset:0 0 0 380px;overflow:hidden}
 body.recipient #stage{left:0}
 #c{position:absolute;inset:0;width:100%;height:100%;touch-action:none;display:block}
@@ -52,7 +53,7 @@ body.twod #nav{display:none}
 /* editor */
 #editor{position:fixed;left:0;top:0;bottom:0;width:380px;overflow:auto;background:#12020cee;border-right:1px solid #ffffff18;padding:16px;z-index:10}
 body.recipient #editor,body.recipient #tabs{display:none}
-#editor h2{margin:0 0 10px;font-weight:500}#editor small{color:var(--ac);font-size:12px;margin-left:6px}
+.editor-title{margin:0 0 10px;font:500 22px/1.2 "Playfair Display",serif}#editor small{color:var(--ac);font-size:12px;margin-left:6px}
 details{border-top:1px solid #ffffff18;padding:8px 0}summary{cursor:pointer;padding:4px 0}
 label{display:block;font-size:12px;opacity:.9;margin:8px 0}
 input,textarea,select{width:100%;margin-top:4px;background:#ffffff12;border:1px solid #ffffff25;border-radius:8px;color:#fff;padding:8px}
@@ -61,7 +62,7 @@ label.row{display:flex;gap:8px;align-items:center}label.row input{width:auto;mar
 .btn{display:block;text-align:center;border:1px dashed var(--ac);border-radius:10px;padding:10px;cursor:pointer}
 .hint{font-size:12px;opacity:.7;margin:4px 0}
 fieldset{border:1px solid #ffffff20;border-radius:10px;margin:8px 0;padding:6px}fieldset input,fieldset textarea{margin:3px 0}
-.ph{display:grid;grid-template-columns:44px 1fr 46px 30px 30px;gap:5px;align-items:center;margin:5px 0;padding:4px;border-radius:8px;background:#ffffff0c;cursor:grab}
+.ph{display:grid;grid-template-columns:44px 1fr 42px repeat(4,30px);gap:5px;align-items:center;margin:5px 0;padding:4px;border-radius:8px;background:#ffffff0c;cursor:grab}
 .ph img{width:44px;height:44px;object-fit:cover;border-radius:4px}.ph input,.ph select{margin:0;padding:5px}
 .ph button{background:none;border:0;font-size:18px;opacity:.6}.ph button.on{color:var(--ac);opacity:1}
 #themes{display:grid;grid-template-columns:1fr 1fr;gap:6px}
@@ -86,6 +87,6 @@ body.recipient #homeStage,body.pv #homeStage{display:inline-block}
  body.open #hero{transform:translateX(-30px)}
  #tl{bottom:12px}#tl button{padding:7px 10px;font-size:13px}
  .hud button{padding:6px 10px;font-size:12px}
- .ph{grid-template-columns:40px 1fr 42px 26px 26px}
+ .ph{grid-template-columns:40px 1fr 38px repeat(4,26px)}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
