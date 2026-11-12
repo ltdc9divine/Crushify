@@ -29,7 +29,7 @@ The bounded lifecycle runner expires publications at the exact UTC boundary (`ex
 
 Original uploaded objects remain private. A media item is copied to a publication-specific derivative only when the customer explicitly consents to that asset. The API serves a derivative only while its publication is active, the related payment remains eligible, the source asset is ready, and consent has not been withdrawn.
 
-Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately deny public reads. Derivative/source deletion is tracked in D1; a failed deletion leaves cleanup pending and does not produce a success response for design deletion. The Worker has a scheduled maintenance handler and the local Wrangler config declares a 15-minute cron. Local lifecycle/retry tests pass, but no remote scheduler deployment or execution was verified.
+Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately deny public reads. Derivative/source deletion is tracked in D1; a failed deletion leaves cleanup pending and does not produce a success response for design deletion. The Cloudflare Worker retains a scheduled maintenance handler for rollback, but both Wrangler cron triggers are disabled. The Vercel Production Cron is the sole configured lifecycle schedule; local synthetic route/retry tests pass, but no deployed scheduler execution was verified.
 
 ## 4. Routes and UI
 

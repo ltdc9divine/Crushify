@@ -7,11 +7,13 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { createLocalEmailSink } from "./local-email-sink.mjs";
 
 const root = process.cwd();
 const port = 8788;
 const origin = `http://127.0.0.1:${port}`;
 const persistDirectory = await mkdtemp(join(tmpdir(), "crushify-love-letter-browser-"));
+const emailSink = await createLocalEmailSink();
 const webhookSecret = randomBytes(32).toString("hex");
 const accountNumber = "0000000000";
 const child = spawn(process.execPath, [
@@ -23,6 +25,8 @@ const child = spawn(process.execPath, [
   "--persist-to", persistDirectory,
   "--var", "ENVIRONMENT:local",
   "--var", "LOCAL_TEST_MODE:true",
+  "--var", `LOCAL_TEST_MAIL_SINK_URL:${emailSink.url}`,
+  "--var", "LOCAL_TEST_CATALOG_OVERRIDE:true",
   "--var", "PAYMENT_MODE:sepay-test",
   "--var", `APP_ORIGIN:${origin}`,
   "--var", `SEPAY_WEBHOOK_SECRET:${webhookSecret}`,
@@ -88,19 +92,14 @@ async function api(path, options = {}) {
 }
 
 async function signIn() {
-  const cursor = logs.length;
+  const cursor = emailSink.current();
   const requested = await api("/customers/session", {
     method: "POST",
     json: { email: `browser-${randomUUID()}@example.test` },
   });
   assert.equal(requested.response.status, 202);
-  let token;
-  for (let i = 0; i < 100; i++) {
-    token = logs.slice(cursor).match(/magic_token=([A-Za-z0-9_-]+)/)?.[1];
-    if (token) break;
-    await delay(100);
-  }
-  assert.ok(token, `Local test mail adapter did not emit a token.\n${safeLogs()}`);
+  assert.doesNotMatch(logs, /magic_token=/, "magic links must not appear in Worker logs");
+  const token = await emailSink.waitForMagicToken(cursor);
   const verified = await api("/customers/session/verify", {
     method: "POST",
     json: { token },
@@ -351,6 +350,7 @@ try {
 } finally {
   if (controlServer.listening) controlServer.close();
   await stopWorker();
+  await emailSink.close();
   if (process.platform === "win32") {
     const cleanup = spawn(process.execPath, [
       "-e",

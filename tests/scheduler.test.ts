@@ -36,6 +36,92 @@ async function createDatabase() {
 }
 
 describe("Vercel scheduled publication lifecycle", () => {
+  it("fails closed when the Cron secret or required providers are missing", async () => {
+    const { client, database } = await createDatabase();
+    const secret = "local-synthetic-cron-secret-with-sufficient-length";
+    let connections = 0;
+    const dependencies = {
+      async connectDatabase() {
+        connections++;
+        return { database, close: () => undefined };
+      },
+      createCloudinaryStorage: () => new MemoryStorageAdapter(),
+    };
+    const baseEnvironment = {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-production-test-org.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-token",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "crushify-production-test",
+      CLOUDINARY_API_KEY: "synthetic-api-key",
+      CLOUDINARY_API_SECRET: "synthetic-api-secret",
+      ENVIRONMENT: "production",
+      VERCEL_ENV: "production",
+      CRON_SECRET: secret,
+    };
+    const request = (authorization = `Bearer ${secret}`) => new Request(
+      "https://crushify.test/api/cron/publication-lifecycle",
+      { headers: { Authorization: authorization } },
+    );
+    try {
+      const missingSecret = createVercelApiHandler({
+        ...baseEnvironment,
+        CRON_SECRET: undefined,
+      }, dependencies);
+      assert.equal((await missingSecret(request())).status, 401);
+      assert.equal(connections, 0);
+
+      const shortSecret = createVercelApiHandler({
+        ...baseEnvironment,
+        CRON_SECRET: "too-short",
+      }, dependencies);
+      assert.equal((await shortSecret(request("Bearer too-short"))).status, 401);
+      assert.equal(connections, 0);
+
+      const missingDatabase = createVercelApiHandler({
+        ...baseEnvironment,
+        TURSO_DATABASE_URL: undefined,
+      }, dependencies);
+      const databaseResponse = await missingDatabase(request());
+      assert.equal(databaseResponse.status, 500);
+      assert.equal(
+        (await databaseResponse.json() as { error: { code: string } }).error.code,
+        "DATABASE_CONFIGURATION_ERROR",
+      );
+      assert.equal(connections, 0);
+
+      const missingStorage = createVercelApiHandler({
+        ...baseEnvironment,
+        STORAGE_PROVIDER: undefined,
+      }, dependencies);
+      const storageResponse = await missingStorage(request());
+      assert.equal(storageResponse.status, 500);
+      assert.equal(
+        (await storageResponse.json() as { error: { code: string } }).error.code,
+        "STORAGE_CONFIGURATION_ERROR",
+      );
+      assert.equal(connections, 0);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("keeps Vercel Cron as the only configured automatic lifecycle scheduler", async () => {
+    const vercel = JSON.parse(await readFile(join(process.cwd(), "vercel.json"), "utf8")) as {
+      crons?: unknown[];
+    };
+    assert.deepEqual(vercel.crons, [
+      { path: "/api/cron/publication-lifecycle", schedule: "0 3 * * *" },
+    ]);
+
+    for (const file of ["wrangler.jsonc", "wrangler.staging.jsonc"]) {
+      const config = JSON.parse(await readFile(join(process.cwd(), file), "utf8")) as {
+        triggers?: { crons?: unknown[] };
+      };
+      assert.equal(config.triggers?.crons, undefined, `${file} must not schedule duplicate lifecycle work`);
+    }
+  });
+
   it("uses a persistent exclusive lease and records successful idempotent runs", async () => {
     const { client, database } = await createDatabase();
     const now = new Date("2027-01-02T03:04:05.000Z");
@@ -82,11 +168,7 @@ describe("Vercel scheduled publication lifecycle", () => {
       DATABASE_PROVIDER: "turso",
       TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
       TURSO_STAGING_AUTH_TOKEN: "synthetic-token",
-      STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-staging-free",
-      CLOUDINARY_STAGING_API_KEY: "synthetic-api-key",
-      CLOUDINARY_STAGING_API_SECRET: "synthetic-api-secret",
-      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      STORAGE_PROVIDER: "mock",
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
       APP_ORIGIN: "https://crushify-staging.vercel.app",
@@ -97,13 +179,20 @@ describe("Vercel scheduled publication lifecycle", () => {
         connections++;
         return { database, close: () => undefined };
       },
-      createCloudinaryStorage: () => new MemoryStorageAdapter(),
+      createMockStorage: () => new MemoryStorageAdapter(),
     });
     try {
       const unauthorized = await handler(
         new Request("https://crushify-staging.vercel.app/api/cron/publication-lifecycle"),
       );
       assert.equal(unauthorized.status, 401);
+      assert.equal(connections, 0);
+
+      const invalid = await handler(new Request(
+        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
+        { headers: { Authorization: "Bearer invalid-local-test-value" } },
+      ));
+      assert.equal(invalid.status, 401);
       assert.equal(connections, 0);
 
       const authorized = await handler(new Request(

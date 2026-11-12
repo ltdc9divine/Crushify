@@ -5,9 +5,13 @@ import { handlePaymentRoutes } from "./payments.ts";
 import { handlePublicationRoutes } from "./publications.ts";
 import { recoverPendingFulfillments, runPublicationLifecycle } from "./publications.ts";
 import { D1DatabaseAdapter } from "./database/d1.ts";
-import { createStorageFromEnvironment } from "./storage/provider.ts";
+import {
+  CloudinaryConfigurationError,
+  createStorageFromEnvironment,
+} from "./storage/provider.ts";
 import { apiError, jsonResponse } from "./http.ts";
 import { PUBLICATION_SHELL_CSP } from "./security-headers.ts";
+import { logSafeError, logSafeInfo } from "./logging.ts";
 import type { Env } from "./types.ts";
 
 interface CloudflareEnv extends Omit<Env, "DB" | "ASSETS"> {
@@ -46,7 +50,7 @@ export async function handleApiRequest(
       try {
         await env.DB.prepare("SELECT 1").first();
       } catch (error) {
-        console.error("Database readiness check failed", { request_id: requestId, error });
+        logSafeError("database.readiness_check_failed", "database", error, { request_id: requestId });
         return apiError(requestId, 503, "DEPENDENCY_UNAVAILABLE", "Service unavailable");
       }
       return jsonResponse(
@@ -70,7 +74,7 @@ export async function handleApiRequest(
     if (publicationResponse) return publicationResponse;
     return apiError(requestId, 404, "NOT_FOUND", "Route not found");
   } catch (error) {
-    console.error("API request failed", { request_id: requestId, path: url.pathname, error });
+    logSafeError("api.request_failed", "api", error, { request_id: requestId });
     return apiError(requestId, 500, "INTERNAL_ERROR", "Request could not be completed");
   }
 }
@@ -84,8 +88,8 @@ export default {
     try {
       storage = createStorageFromEnvironment(env, env.MEDIA);
     } catch (error) {
-      console.error("Scheduled storage configuration failed", {
-        error: error instanceof Error ? error.message : "Unknown storage configuration error",
+      logSafeError("scheduler.storage_configuration_failed", "storage", error, {
+        environment: env.ENVIRONMENT,
       });
       throw error;
     }
@@ -97,10 +101,18 @@ export default {
     ctx.waitUntil((async () => {
       const fulfillment = await recoverPendingFulfillments(runtimeEnv, 50);
       const lifecycle = await runPublicationLifecycle(runtimeEnv, { limit: 50 });
-      console.info("Scheduled publication maintenance completed", { fulfillment, lifecycle });
+      logSafeInfo("scheduler.publication_maintenance_completed", "lifecycle", {
+        environment: runtimeEnv.ENVIRONMENT,
+        counts: {
+          completed: fulfillment.completed,
+          expired: lifecycle.expired,
+          erased: lifecycle.erased,
+          retryable: lifecycle.retryable,
+        },
+      });
     })().catch((error) => {
-      console.error("Scheduled publication maintenance failed", {
-        error: error instanceof Error ? error.message : "Unknown maintenance error",
+      logSafeError("scheduler.publication_maintenance_failed", "lifecycle", error, {
+        environment: runtimeEnv.ENVIRONMENT,
       });
       throw error;
     }));
@@ -115,10 +127,16 @@ export default {
       try {
         storage = createStorageFromEnvironment(env, env.MEDIA);
       } catch (error) {
-        console.error("Storage provider configuration failed", {
-          error: error instanceof Error ? error.message : "Unknown storage configuration error",
+        logSafeError("storage.provider_configuration_failed", "storage", error, {
+          environment: env.ENVIRONMENT,
         });
-        return apiError(crypto.randomUUID(), 500, "STORAGE_CONFIGURATION_ERROR", "Storage provider is not configured for this runtime");
+        const code = error instanceof CloudinaryConfigurationError
+          ? error.code
+          : "STORAGE_CONFIGURATION_ERROR";
+        const message = error instanceof CloudinaryConfigurationError
+          ? error.message
+          : "Storage provider is not configured for this runtime";
+        return apiError(crypto.randomUUID(), 500, code, message);
       }
       return handleApiRequest(request, {
         ...env,

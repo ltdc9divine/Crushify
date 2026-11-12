@@ -113,12 +113,16 @@ describe("Vercel API runtime adapter", () => {
       DATABASE_PROVIDER: "turso",
       TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging.turso.io",
       TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
-      STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-staging-free",
-      CLOUDINARY_STAGING_API_KEY: "synthetic-test-only",
-      CLOUDINARY_STAGING_API_SECRET: "synthetic-test-only",
-      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      STORAGE_PROVIDER: "mock",
       TURSO_DATABASE_URL: undefined,
+      PAYMENT_MODE: undefined,
+      SEPAY_WEBHOOK_SECRET: undefined,
+      SEPAY_BANK_CODE: undefined,
+      SEPAY_BANK_ACCOUNT: undefined,
+      SEPAY_ACCOUNT_NAME: undefined,
+      LOCAL_TEST_MODE: undefined,
+      LOCAL_TEST_CATALOG_OVERRIDE: undefined,
+      LOCAL_TEST_PRICING_POLICY: undefined,
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
     }, dependencies);
@@ -195,11 +199,7 @@ describe("Vercel API runtime adapter", () => {
       DATABASE_PROVIDER: "turso",
       TURSO_STAGING_DATABASE_URL: "libsql://crushify-production.turso.io",
       TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
-      STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-staging-free",
-      CLOUDINARY_STAGING_API_KEY: "synthetic-test-only",
-      CLOUDINARY_STAGING_API_SECRET: "synthetic-test-only",
-      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      STORAGE_PROVIDER: "mock",
       ENVIRONMENT: "staging",
       APP_ORIGIN: "https://preview.crushify.test",
       VERCEL_ENV: "preview",
@@ -262,7 +262,7 @@ describe("Vercel API runtime adapter", () => {
       CLOUDINARY_STAGING_CLOUD_NAME: "separate-staging-cloud",
       CLOUDINARY_STAGING_API_KEY: "synthetic-test-only",
       CLOUDINARY_STAGING_API_SECRET: "synthetic-test-only",
-      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      CLOUDINARY_PRODUCTION_CLOUD_NAME: "crushify-production-cloud",
       ENVIRONMENT: "production",
       APP_ORIGIN: "https://crushify.test",
       VERCEL_ENV: "production",
@@ -285,7 +285,7 @@ describe("Vercel API runtime adapter", () => {
       CLOUDINARY_STAGING_CLOUD_NAME: "hgtcizux",
       CLOUDINARY_STAGING_API_KEY: "synthetic-test-only",
       CLOUDINARY_STAGING_API_SECRET: "synthetic-test-only",
-      CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      CLOUDINARY_PRODUCTION_CLOUD_NAME: "crushify-production-cloud",
       ENVIRONMENT: "staging",
       APP_ORIGIN: "https://preview.crushify.test",
       VERCEL_ENV: "preview",
@@ -295,7 +295,7 @@ describe("Vercel API runtime adapter", () => {
     );
     assert.equal(productionCloudPreviewResponse.status, 500);
     assert.equal((await productionCloudPreviewResponse.json() as { error: { code: string } }).error.code,
-      "STORAGE_CONFIGURATION_ERROR");
+      "STORAGE_ISOLATION_ERROR");
 
     const stagingDatabaseInProduction = createVercelApiHandler({
       DATABASE_PROVIDER: "turso",
@@ -333,7 +333,7 @@ describe("Vercel API runtime adapter", () => {
       async connectDatabase() {
         throw new Error("Synthetic database connection failure");
       },
-      createCloudinaryStorage: () => new MemoryStorageAdapter(),
+      createMockStorage: () => new MemoryStorageAdapter(),
     });
     const stagingCloudResponse = await stagingCloudInProduction(
       new Request("https://crushify.test/api/v1/customers/me"),
@@ -386,9 +386,7 @@ describe("Vercel API runtime adapter", () => {
       TURSO_STAGING_AUTH_TOKEN: "synthetic-test-only",
       STORAGE_PROVIDER: "mock",
       ENVIRONMENT: "staging",
-      MAIL_PROVIDER: "resend",
-      MAIL_API_KEY: "synthetic-mail-key",
-      MAIL_FROM_EMAIL: "test@example.invalid",
+      PREVIEW_EMAIL_SINK: "discard",
       APP_ORIGIN: "https://preview.crushify.test",
       VERCEL_ENV: "preview",
     }, {
@@ -483,6 +481,10 @@ describe("Vercel API runtime adapter", () => {
         return connection;
       },
       createMockStorage: () => storage,
+      localTestEmailSink: async (message) => {
+        const token = message.text.match(/#magic_token=([A-Za-z0-9_-]+)/)?.[1];
+        if (token) tokenQueue.push(token);
+      },
     });
 
     try {
@@ -910,10 +912,36 @@ describe("Vercel API runtime adapter", () => {
       "APP_ORIGIN",
       "VERCEL_ENV",
       "VERCEL_URL",
+      "LOCAL_TEST_MAIL_SINK_URL",
     ];
     const originalEnvironment = new Map(envNames.map((name) => [name, process.env[name]]));
     const tokenQueue: string[] = [];
     const server = createServer((request, response) => {
+      if (request.method === "POST" && request.url === "/__crushify_test_email_sink") {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk: string) => {
+          body += chunk;
+          if (body.length > 64 * 1024) response.writeHead(413).end();
+        });
+        request.on("end", () => {
+          try {
+            const message = JSON.parse(body) as { text?: unknown };
+            const token = typeof message.text === "string"
+              ? message.text.match(/#magic_token=([A-Za-z0-9_-]+)/)?.[1]
+              : undefined;
+            if (!token) {
+              response.writeHead(400).end();
+              return;
+            }
+            tokenQueue.push(token);
+            response.writeHead(204).end();
+          } catch {
+            response.writeHead(400).end();
+          }
+        });
+        return;
+      }
       void nodeHandler(request, response);
     });
 
@@ -932,6 +960,7 @@ describe("Vercel API runtime adapter", () => {
       const address = server.address() as AddressInfo;
       const origin = `http://127.0.0.1:${address.port}`;
       process.env.APP_ORIGIN = origin;
+      process.env.LOCAL_TEST_MAIL_SINK_URL = `${origin}/__crushify_test_email_sink`;
 
       const originalInfo = console.info;
       console.info = (message?: unknown, details?: unknown, ...extra: unknown[]) => {

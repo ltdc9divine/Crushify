@@ -11,10 +11,17 @@ export interface Env {
   CLOUDINARY_CLOUD_NAME?: string;
   CLOUDINARY_API_KEY?: string;
   CLOUDINARY_API_SECRET?: string;
+  CLOUDINARY_STAGING_CLOUD_NAME?: string;
+  CLOUDINARY_STAGING_API_KEY?: string;
+  CLOUDINARY_STAGING_API_SECRET?: string;
+  CLOUDINARY_PRODUCTION_CLOUD_NAME?: string;
   ENVIRONMENT?: "local" | "staging" | "production";
   MAIL_PROVIDER?: "resend";
   MAIL_API_KEY?: string;
   MAIL_FROM_EMAIL?: string;
+  PREVIEW_EMAIL_SINK?: "discard";
+  LOCAL_TEST_EMAIL_SINK?: (message: import("./auth.ts").EmailMessage) => Promise<void>;
+  LOCAL_TEST_MAIL_SINK_URL?: string;
   MAILER?: Fetcher;
   MAILER_AUTH_TOKEN?: string;
   CRON_SECRET?: string;

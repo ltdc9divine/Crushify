@@ -22,9 +22,9 @@ const validCloudinaryEnvironment = {
   ENVIRONMENT: "staging",
   STORAGE_PROVIDER: "cloudinary",
   CLOUDINARY_STAGING_CLOUD_NAME: "crushify-staging-free",
+  CLOUDINARY_PRODUCTION_CLOUD_NAME: "crushify-production-cloud",
   CLOUDINARY_STAGING_API_KEY: "synthetic-cloudinary-key",
   CLOUDINARY_STAGING_API_SECRET: "synthetic-cloudinary-secret",
-  CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
   CLOUDINARY_SMOKE_TEST: "I_CONFIRM_SYNTHETIC_DATA",
 };
 
@@ -150,11 +150,12 @@ describe("staging script environment guards", () => {
     );
   });
 
-  it("requires a separate free cloud, Cloudinary storage, and explicit synthetic-data opt-in", () => {
+  it("rejects Cloudinary staging until account isolation is independently verified", () => {
     for (const override of [
       { STORAGE_PROVIDER: "mock" },
       { CLOUDINARY_STAGING_CLOUD_NAME: "hgtcizux" },
-      { CLOUDINARY_STAGING_ISOLATED_ACCOUNT: undefined },
+      { CLOUDINARY_STAGING_CLOUD_NAME: "CRUSHIFY-PRODUCTION-CLOUD" },
+      { CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined },
       { CLOUDINARY_SMOKE_TEST: undefined },
       { CLOUDINARY_STAGING_API_KEY: undefined },
       { CLOUDINARY_STAGING_API_SECRET: undefined },
@@ -164,9 +165,13 @@ describe("staging script environment guards", () => {
           ...validCloudinaryEnvironment,
           ...override,
         }),
-        /Cloudinary staging requires/,
+        /Cloudinary staging/,
       );
     }
+    assert.throws(
+      () => assertCloudinaryStagingConfiguration(validCloudinaryEnvironment),
+      /disabled until account isolation is independently verified/,
+    );
   });
 
   it("does not expose Cloudinary credentials in guard errors", () => {
@@ -180,8 +185,19 @@ describe("staging script environment guards", () => {
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.doesNotMatch(error.message, /synthetic-cloudinary-secret/);
-        return /Cloudinary staging requires/.test(error.message);
+        return /Cloudinary staging/.test(error.message);
       },
+    );
+  });
+
+  it("does not accept a self-declared isolation confirmation", () => {
+    assert.throws(
+      () => assertCloudinaryStagingConfiguration({
+        ...validCloudinaryEnvironment,
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined,
+        CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_FREE_CLOUD",
+      }),
+      /Cloudinary staging/,
     );
   });
 
@@ -194,7 +210,7 @@ describe("staging script environment guards", () => {
         CLOUDINARY_API_KEY: validCloudinaryEnvironment.CLOUDINARY_STAGING_API_KEY,
         CLOUDINARY_API_SECRET: validCloudinaryEnvironment.CLOUDINARY_STAGING_API_SECRET,
       }),
-      /Cloudinary staging requires/,
+      /Cloudinary staging/,
     );
   });
 });

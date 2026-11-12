@@ -216,12 +216,30 @@ describe("publication template registry", () => {
     assert.match(proposalCss, /button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible/);
     assert.match(distanceCss, /:focus-visible/);
     for (const html of [memoriesHtml, proposalHtml, distanceHtml]) {
-      assert.match(html, /<p class="editor-title">/);
+      assert.match(html, /<h1 class="editor-title">/);
       assert.doesNotMatch(html, /<h[2-6][^>]*>[^<]*(?:Kỷ niệm đôi mình|Hãy nói đồng ý|Xa mặt không cách lòng)/);
     }
     assert.match(loveLetterHtml, /<h2>1 · Câu chuyện<\/h2>/);
     assert.doesNotMatch(loveLetterHtml, /<h3>/);
     assert.match(universeHtml, /createElement\('h2'\);h\.className='editor-section-title'/);
+  });
+
+  it("exposes Love Letter photo deletion as a named keyboard-operable button", () => {
+    const loveLetter = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    assert.match(loveLetter, /b\.className='photo-thumb';b\.setAttribute\('aria-label',`Xóa ảnh kỷ niệm \$\{i\+1\}`\)/);
+    assert.match(loveLetter, /b\.onclick=\(\)=>\{up\.splice\(i,1\);D\.photos\?\.splice\(i,1\);PH\.length=0;syncPh\(\)\}/);
+  });
+
+  it("deletes removed assets only after the updated design is saved", () => {
+    const editor = readFileSync(new URL("../shared/customer-editor.js", import.meta.url), "utf8");
+    const save = editor.slice(editor.indexOf("async function save()"), editor.indexOf("function scheduleSave()"));
+    const designUpdate = save.indexOf("const result = await api(`/designs/");
+    const assetDelete = save.indexOf('await api(`/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" }, csrf);');
+    assert.ok(designUpdate >= 0);
+    assert.ok(assetDelete > designUpdate);
+    assert.match(editor, /key === "asset_id" \|\| key === "coverImage"/);
+    assert.match(save, /if \(!currentAssetIds\.has\(assetId\)\) pendingAssetDeletes\.add\(assetId\)/);
+    assert.match(save, /cleanupErrors\.length/);
   });
 
   it("uses CSP-safe static selectors for Love Letter theme changes", () => {

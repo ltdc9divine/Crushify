@@ -7,6 +7,7 @@
 - Wrangler is authenticated to the intended Cloudflare account.
 - Dedicated D1: `crushify-staging-db` (APAC). Migrations `0001_initial_schema.sql` and `0002_auth_previews_and_uploads.sql` are applied. The database contains no test/customer rows.
 - Dedicated Worker config: [wrangler.staging.jsonc](../wrangler.staging.jsonc), Worker name `crushify-staging`; static assets are served by the Worker when deployed.
+- The Worker scheduled handler remains in code for rollback compatibility, but `wrangler.staging.jsonc` no longer declares a Cron trigger; Vercel Cron is the sole configured lifecycle scheduler for the intended application architecture.
 - R2 bucket `crushify-staging-media` has **not** been created. Cloudflare API reports that R2 must first be enabled for the account in the Cloudflare Dashboard. No staging Worker is deployed until this is resolved.
 - Production is not configured or deployed. Do not use production database IDs, secrets, or resources in this guide.
 

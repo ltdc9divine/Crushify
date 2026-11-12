@@ -6,11 +6,54 @@ import { validateUniverseDesign } from "../src/universe.ts";
 import { detectImage } from "../src/assets.ts";
 import worker from "../src/index.ts";
 import { PUBLICATION_SHELL_CSP } from "../src/security-headers.ts";
+import { createStorageFromEnvironment } from "../src/storage/provider.ts";
 
 const noBindings = { DB: undefined } as never;
 
+describe("legacy Worker storage isolation", () => {
+  it("rejects staging Cloudinary at the shared provider factory and Worker API entry point", async () => {
+    const unsafeStaging = {
+      ENVIRONMENT: "staging",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_STAGING_CLOUD_NAME: "synthetic-staging-cloud",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-production-key",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-production-secret",
+      CLOUDINARY_PRODUCTION_CLOUD_NAME: "synthetic-production-cloud",
+    };
+    assert.throws(
+      () => createStorageFromEnvironment(unsafeStaging),
+      /disabled in staging/,
+    );
+
+    const response = await worker.fetch(
+      new Request("https://worker.example.test/api/v1/nonexistent"),
+      {
+        ...unsafeStaging,
+        DATABASE_PROVIDER: "d1",
+        DB: {} as never,
+        ASSETS: { fetch: async () => new Response(null, { status: 404 }) } as never,
+      } as never,
+    );
+    assert.equal(response.status, 500);
+    assert.equal((await response.json() as { error: { code: string } }).error.code,
+      "STORAGE_ISOLATION_ERROR");
+  });
+
+  it("preserves explicit R2 selection for staging Workers", () => {
+    const adapter = createStorageFromEnvironment({
+      ENVIRONMENT: "staging",
+      STORAGE_PROVIDER: "r2",
+    }, {
+      async put() {},
+      async get() { return null; },
+      async delete() {},
+    } as never);
+    assert.equal(adapter.constructor.name, "R2StorageAdapter");
+  });
+});
+
 describe("API foundation", () => {
-  it("uses the configured Resend adapter and disables local mail mode in staging", async () => {
+  it("uses the configured Resend adapter only in Production and disables mail in Preview", async () => {
     const originalFetch = globalThis.fetch;
     let capturedRequest: { url: string; authorization: string | null; body: Record<string, unknown> } | null = null;
     globalThis.fetch = async (input, init) => {
@@ -24,7 +67,7 @@ describe("API foundation", () => {
 
     try {
       const mailer = createEmailService({
-        ENVIRONMENT: "staging",
+        ENVIRONMENT: "production",
         LOCAL_TEST_MODE: "true",
         MAIL_PROVIDER: "resend",
         MAIL_API_KEY: "test-key",

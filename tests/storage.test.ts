@@ -179,8 +179,70 @@ describe("storage provider selection and R2 adapter", () => {
     );
     assert.throws(
       () => createStorageFromEnvironment({ STORAGE_PROVIDER: "cloudinary" }),
-      /credentials are required/,
+      /explicitly identified local or production environment/,
     );
+  });
+
+  it("rejects Cloudinary staging, incomplete configuration, and unidentified environments", () => {
+    const unsafeStagingConfigurations = [
+      { ENVIRONMENT: "staging", STORAGE_PROVIDER: "cloudinary" },
+      {
+        ENVIRONMENT: "staging",
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_STAGING_CLOUD_NAME: "synthetic-staging-cloud",
+      },
+      {
+        ENVIRONMENT: "staging",
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_STAGING_CLOUD_NAME: "synthetic-production-cloud",
+        CLOUDINARY_STAGING_API_KEY: "synthetic-production-key",
+        CLOUDINARY_STAGING_API_SECRET: "synthetic-production-secret",
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: "synthetic-production-cloud",
+      },
+      {
+        ENVIRONMENT: "staging",
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_CLOUD_NAME: "synthetic-production-cloud",
+        CLOUDINARY_API_KEY: "synthetic-production-key",
+        CLOUDINARY_API_SECRET: "synthetic-production-secret",
+      },
+    ];
+    for (const environment of unsafeStagingConfigurations) {
+      assert.throws(
+        () => createStorageFromEnvironment(environment),
+        /disabled in staging/,
+      );
+    }
+
+    assert.throws(
+      () => createStorageFromEnvironment({
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_CLOUD_NAME: "synthetic-cloud",
+        CLOUDINARY_API_KEY: "synthetic-key",
+        CLOUDINARY_API_SECRET: "synthetic-secret",
+      }),
+      /explicitly identified local or production environment/,
+    );
+    assert.throws(
+      () => createStorageFromEnvironment({
+        ENVIRONMENT: "production",
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_CLOUD_NAME: "synthetic-cloud",
+        CLOUDINARY_API_KEY: "synthetic-key",
+      }),
+      /incomplete or invalid/,
+    );
+  });
+
+  it("preserves explicitly identified Production Cloudinary selection without provider calls", () => {
+    const adapter = createStorageFromEnvironment({
+      ENVIRONMENT: "production",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "synthetic-production-cloud",
+      CLOUDINARY_API_KEY: "synthetic-production-key",
+      CLOUDINARY_API_SECRET: "synthetic-production-secret",
+    });
+    assert.ok(adapter instanceof CloudinaryStorageAdapter);
   });
 
   it("wraps an R2 binding behind the same private storage contract", async () => {
@@ -204,7 +266,10 @@ describe("storage provider selection and R2 adapter", () => {
         values.delete(objectKey);
       },
     } as unknown as R2Bucket;
-    const adapter = createStorageFromEnvironment({ STORAGE_PROVIDER: "r2" }, bucket);
+    const adapter = createStorageFromEnvironment({
+      ENVIRONMENT: "staging",
+      STORAGE_PROVIDER: "r2",
+    }, bucket);
     await adapter.upload(key, bytes, options);
     const object = await adapter.get(key);
     assert.equal(object?.size, bytes.length);

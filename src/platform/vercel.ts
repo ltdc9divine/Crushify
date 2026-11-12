@@ -4,16 +4,19 @@ import { connectDatabaseFromEnvironment } from "../database/provider.ts";
 import type { Database } from "../database.ts";
 import type { Storage } from "../storage.ts";
 import { CloudinaryStorageAdapter } from "../storage/cloudinary.ts";
+import {
+  CloudinaryConfigurationError,
+  resolveCloudinaryConfiguration,
+} from "../storage/cloudinary-policy.ts";
 import { MemoryStorageAdapter } from "../storage/mock.ts";
 import { runScheduledPublicationLifecycle } from "../scheduler.ts";
+import { logSafeError } from "../logging.ts";
 import type { Env } from "../types.ts";
 
 export const VERCEL_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
 const allowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const allowedHeaders = new Set(["authorization", "content-type", "idempotency-key", "x-csrf-token"]);
 const stagingTursoHostname = /^crushify-staging(?:-[a-z0-9-]+)?\.turso\.io$/i;
-const previouslyAssumedCloudinaryTestCloud = "hgtcizux";
-const stagingCloudinaryConfirmation = "I_CONFIRM_SEPARATE_FREE_CLOUD";
 
 export interface VercelEnvironment {
   DATABASE_PROVIDER?: string;
@@ -29,10 +32,12 @@ export interface VercelEnvironment {
   CLOUDINARY_STAGING_CLOUD_NAME?: string;
   CLOUDINARY_STAGING_API_KEY?: string;
   CLOUDINARY_STAGING_API_SECRET?: string;
-  CLOUDINARY_STAGING_ISOLATED_ACCOUNT?: string;
+  CLOUDINARY_PRODUCTION_CLOUD_NAME?: string;
   MAIL_PROVIDER?: string;
   MAIL_API_KEY?: string;
   MAIL_FROM_EMAIL?: string;
+  PREVIEW_EMAIL_SINK?: string;
+  LOCAL_TEST_MAIL_SINK_URL?: string;
   APP_ORIGIN?: string;
   LOCAL_TEST_MODE?: string;
   LOCAL_TEST_CATALOG_OVERRIDE?: string;
@@ -59,6 +64,7 @@ export interface VercelRuntimeDependencies {
   connectDatabase?: (environment: VercelEnvironment) => Promise<DatabaseConnection>;
   createCloudinaryStorage?: (environment: VercelEnvironment) => Storage;
   createMockStorage?: () => Storage;
+  localTestEmailSink?: (message: import("../auth.ts").EmailMessage) => Promise<void>;
 }
 
 function requestId(): string {
@@ -141,6 +147,17 @@ function validateCredentialScope(environment: VercelEnvironment): boolean {
       environment.CLOUDINARY_CLOUD_NAME,
       environment.CLOUDINARY_API_KEY,
       environment.CLOUDINARY_API_SECRET,
+      environment.MAIL_PROVIDER,
+      environment.MAIL_API_KEY,
+      environment.MAIL_FROM_EMAIL,
+      environment.PAYMENT_MODE,
+      environment.SEPAY_WEBHOOK_SECRET,
+      environment.SEPAY_BANK_CODE,
+      environment.SEPAY_BANK_ACCOUNT,
+      environment.SEPAY_ACCOUNT_NAME,
+      environment.LOCAL_TEST_MODE,
+      environment.LOCAL_TEST_CATALOG_OVERRIDE,
+      environment.LOCAL_TEST_MAIL_SINK_URL,
     ].some((value) => value !== undefined);
   const productionHasStagingCredentials = environment.VERCEL_ENV === "production" &&
     [
@@ -149,9 +166,37 @@ function validateCredentialScope(environment: VercelEnvironment): boolean {
       environment.CLOUDINARY_STAGING_CLOUD_NAME,
       environment.CLOUDINARY_STAGING_API_KEY,
       environment.CLOUDINARY_STAGING_API_SECRET,
-      environment.CLOUDINARY_STAGING_ISOLATED_ACCOUNT,
+      environment.PREVIEW_EMAIL_SINK,
+      environment.LOCAL_TEST_MAIL_SINK_URL,
     ].some((value) => value !== undefined);
   return !previewHasProductionCredentials && !productionHasStagingCredentials;
+}
+
+export function validateVercelEnvironment(environment: VercelEnvironment): string | null {
+  if (!["development", "preview", "production"].includes(environment.VERCEL_ENV ?? "")) {
+    return "RUNTIME_CONFIGURATION_ERROR";
+  }
+  if (!validateEnvironmentOverride(environment) || !validateCredentialScope(environment)) {
+    return "RUNTIME_CONFIGURATION_ERROR";
+  }
+  if (environment.APP_ORIGIN &&
+      !normalizeOrigin(environment.APP_ORIGIN, environment.VERCEL_ENV === "development")) {
+    return "RUNTIME_CONFIGURATION_ERROR";
+  }
+  if (environment.VERCEL_ENV === "preview") {
+    if (environment.PREVIEW_EMAIL_SINK !== undefined &&
+        environment.PREVIEW_EMAIL_SINK !== "discard") {
+      return "RUNTIME_CONFIGURATION_ERROR";
+    }
+    if (!originFromEnvironment(environment)) return "RUNTIME_CONFIGURATION_ERROR";
+    if (environment.STORAGE_PROVIDER === "cloudinary" ||
+        environment.CLOUDINARY_STAGING_CLOUD_NAME !== undefined ||
+        environment.CLOUDINARY_STAGING_API_KEY !== undefined ||
+        environment.CLOUDINARY_STAGING_API_SECRET !== undefined) {
+      return "STORAGE_ISOLATION_ERROR";
+    }
+  }
+  return null;
 }
 
 function corsHeaders(origin: string): Headers {
@@ -233,24 +278,6 @@ function validateDatabaseConfiguration(environment: VercelEnvironment): string |
   return null;
 }
 
-function cloudinaryConfiguration(environment: VercelEnvironment): {
-  cloudName?: string;
-  apiKey?: string;
-  apiSecret?: string;
-} {
-  return stagingRuntime(environment)
-    ? {
-        cloudName: environment.CLOUDINARY_STAGING_CLOUD_NAME,
-        apiKey: environment.CLOUDINARY_STAGING_API_KEY,
-        apiSecret: environment.CLOUDINARY_STAGING_API_SECRET,
-      }
-    : {
-        cloudName: environment.CLOUDINARY_CLOUD_NAME,
-        apiKey: environment.CLOUDINARY_API_KEY,
-        apiSecret: environment.CLOUDINARY_API_SECRET,
-      };
-}
-
 function localMockPaymentEnabled(environment: VercelEnvironment): boolean {
   if (environment.PAYMENT_MODE !== "mock" ||
       environment.LOCAL_TEST_MODE !== "true" ||
@@ -287,16 +314,13 @@ function createStorage(
   dependencies: VercelRuntimeDependencies,
 ): Storage {
   if (environment.STORAGE_PROVIDER === "cloudinary") {
-    const { cloudName, apiKey, apiSecret } = cloudinaryConfiguration(environment);
-    if (!cloudName || !apiKey || !apiSecret ||
-        (stagingRuntime(environment) &&
-          (cloudName === previouslyAssumedCloudinaryTestCloud ||
-           environment.CLOUDINARY_STAGING_ISOLATED_ACCOUNT !== stagingCloudinaryConfirmation))) {
-      throw new TypeError("Cloudinary configuration is incomplete");
-    }
+    const config = resolveCloudinaryConfiguration({
+      ...environment,
+      ENVIRONMENT: runtimeEnvironment(environment),
+    });
     return dependencies.createCloudinaryStorage
       ? dependencies.createCloudinaryStorage(environment)
-      : new CloudinaryStorageAdapter({ cloudName, apiKey, apiSecret });
+      : new CloudinaryStorageAdapter(config);
   }
   if (environment.STORAGE_PROVIDER === "mock" &&
       ((environment.LOCAL_TEST_MODE === "true" &&
@@ -315,14 +339,6 @@ const livenessDatabase: Database = {
     throw new Error("Database is not used by the liveness endpoint");
   },
 };
-
-function safeErrorCode(error: unknown): string {
-  if (error && typeof error === "object" && "code" in error &&
-      typeof error.code === "string" && /^[A-Z0-9_-]{1,40}$/i.test(error.code)) {
-    return error.code;
-  }
-  return error instanceof Error ? error.name : "UnknownError";
-}
 
 function secureSecretMatch(provided: string | null, expected: string | undefined): boolean {
   if (!provided || !expected || expected.length < 32) return false;
@@ -359,16 +375,21 @@ export function createVercelApiHandler(
         return apiError(requestId(), 405, "METHOD_NOT_ALLOWED", "Method not allowed");
       }
       if (!secureSecretMatch(
-        request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null,
+        request.headers.get("authorization")?.match(/^Bearer ([^\s]+)$/i)?.[1] ?? null,
         environment.CRON_SECRET,
       )) {
         return apiError(requestId(), 401, "UNAUTHENTICATED", "Scheduled request is not authorized");
       }
-      if (environment.ENVIRONMENT !== "staging" || environment.VERCEL_ENV !== "preview") {
+      const stagingPreview = environment.ENVIRONMENT === "staging" &&
+        environment.VERCEL_ENV === "preview";
+      const production = environment.ENVIRONMENT === "production" &&
+        environment.VERCEL_ENV === "production";
+      if (!stagingPreview && !production) {
         return apiError(requestId(), 404, "NOT_FOUND", "Route not found");
       }
-      if (!validateCredentialScope(environment)) {
-        return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Credentials do not match the Vercel deployment environment");
+      const scopeError = validateVercelEnvironment(environment);
+      if (scopeError) {
+        return apiError(requestId(), 500, scopeError, "Runtime configuration does not match the Vercel deployment environment");
       }
       const databaseError = validateDatabaseConfiguration(environment);
       if (databaseError) {
@@ -376,7 +397,10 @@ export function createVercelApiHandler(
       }
       try {
         storage ??= createStorage(environment, dependencies);
-      } catch {
+      } catch (error) {
+        if (error instanceof CloudinaryConfigurationError) {
+          return apiError(requestId(), 500, error.code, error.message);
+        }
         return apiError(requestId(), 500, "STORAGE_CONFIGURATION_ERROR", "Storage provider is not configured for this runtime");
       }
       if (!databasePromise) {
@@ -391,7 +415,7 @@ export function createVercelApiHandler(
         const result = await runScheduledPublicationLifecycle({
           DB: connection.database,
           STORAGE: storage,
-          ENVIRONMENT: "staging",
+          ENVIRONMENT: production ? "production" : "staging",
           DATA_RETENTION_DAYS: environment.DATA_RETENTION_DAYS,
         });
         return Response.json(result, {
@@ -399,7 +423,9 @@ export function createVercelApiHandler(
           headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
         });
       } catch (error) {
-        console.error("Vercel scheduled lifecycle failed", { code: safeErrorCode(error) });
+        logSafeError("vercel.scheduled_lifecycle_failed", "lifecycle", error, {
+          environment: production ? "production" : "staging",
+        });
         return apiError(requestId(), 503, "DEPENDENCY_UNAVAILABLE", "Scheduled maintenance could not complete");
       }
     }
@@ -426,11 +452,9 @@ export function createVercelApiHandler(
     if (!["development", "preview", "production"].includes(environment.VERCEL_ENV ?? "") || !origin) {
       return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Application origin is not configured for this runtime");
     }
-    if (!validateEnvironmentOverride(environment)) {
-      return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Application environment does not match the Vercel deployment");
-    }
-    if (!validateCredentialScope(environment)) {
-      return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Credentials do not match the Vercel deployment environment");
+    const scopeError = validateVercelEnvironment(environment);
+    if (scopeError) {
+      return apiError(requestId(), 500, scopeError, "Application environment or credentials do not match the Vercel deployment");
     }
 
     const databaseError = validateDatabaseConfiguration(environment);
@@ -444,7 +468,14 @@ export function createVercelApiHandler(
 
     try {
       storage ??= createStorage(environment, dependencies);
-    } catch {
+    } catch (error) {
+      if (error instanceof CloudinaryConfigurationError) {
+        return withCors(
+          apiError(requestId(), 500, error.code, error.message),
+          request,
+          origin,
+        );
+      }
       return withCors(
         apiError(requestId(), 500, "STORAGE_CONFIGURATION_ERROR", "Storage provider is not configured for this runtime"),
         request,
@@ -460,11 +491,14 @@ export function createVercelApiHandler(
       databasePromise = connection;
     }
 
+    const appEnvironment = runtimeEnvironment(environment);
     let connection: DatabaseConnection;
     try {
       connection = await databasePromise;
     } catch (error) {
-      console.error("Vercel database initialization failed", { code: safeErrorCode(error) });
+      logSafeError("vercel.database_initialization_failed", "database", error, {
+        environment: appEnvironment,
+      });
       return withCors(
         apiError(requestId(), 503, "DEPENDENCY_UNAVAILABLE", "Service unavailable"),
         request,
@@ -472,22 +506,36 @@ export function createVercelApiHandler(
       );
     }
 
-    const appEnvironment = runtimeEnvironment(environment);
     const appOrigin = origin ?? undefined;
-    const { cloudName, apiKey, apiSecret } = cloudinaryConfiguration(environment);
+    const cloudinary = environment.STORAGE_PROVIDER === "cloudinary"
+      ? resolveCloudinaryConfiguration({
+          ...environment,
+          ENVIRONMENT: appEnvironment,
+        })
+      : undefined;
     const appEnv: Env = {
       DB: connection.database,
       STORAGE: storage,
       DATABASE_PROVIDER: "turso",
       STORAGE_PROVIDER: environment.STORAGE_PROVIDER === "cloudinary" ? "cloudinary" : undefined,
-      CLOUDINARY_CLOUD_NAME: cloudName,
-      CLOUDINARY_API_KEY: apiKey,
-      CLOUDINARY_API_SECRET: apiSecret,
+      CLOUDINARY_CLOUD_NAME: cloudinary?.cloudName,
+      CLOUDINARY_API_KEY: cloudinary?.apiKey,
+      CLOUDINARY_API_SECRET: cloudinary?.apiSecret,
       ENVIRONMENT: appEnvironment,
       MAIL_PROVIDER: environment.VERCEL_ENV === "production" &&
           environment.MAIL_PROVIDER === "resend" ? "resend" : undefined,
       MAIL_API_KEY: environment.VERCEL_ENV === "production" ? environment.MAIL_API_KEY : undefined,
       MAIL_FROM_EMAIL: environment.VERCEL_ENV === "production" ? environment.MAIL_FROM_EMAIL : undefined,
+      PREVIEW_EMAIL_SINK: environment.VERCEL_ENV === "preview" &&
+          environment.PREVIEW_EMAIL_SINK === "discard" ? "discard" : undefined,
+      LOCAL_TEST_EMAIL_SINK: environment.VERCEL_ENV === "development" &&
+          environment.LOCAL_TEST_MODE === "true" && appEnvironment === "local"
+        ? dependencies.localTestEmailSink
+        : undefined,
+      LOCAL_TEST_MAIL_SINK_URL: environment.VERCEL_ENV === "development" &&
+          environment.LOCAL_TEST_MODE === "true" && appEnvironment === "local"
+        ? environment.LOCAL_TEST_MAIL_SINK_URL
+        : undefined,
       APP_ORIGIN: appOrigin,
       LOCAL_TEST_MODE: environment.LOCAL_TEST_MODE === "true" &&
           environment.VERCEL_ENV === "development" && appEnvironment === "local"

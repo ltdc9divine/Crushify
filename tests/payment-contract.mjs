@@ -78,6 +78,46 @@ export async function runPaymentContract({
   });
   assert.equal(unauthorized.response.status, 401, `${label}: order requires authentication`);
 
+  for (const [invalidDesignId, status] of [
+    [undefined, 400],
+    ["not-a-uuid", 400],
+    ["00000000-0000-4000-8000-000000000099", 404],
+  ]) {
+    const body = {
+      storage_plan_id: "1-month",
+      asset_consents: [],
+      ...(invalidDesignId === undefined ? {} : { design_id: invalidDesignId }),
+    };
+    const invalidDesign = await request("/orders", owner, {
+      method: "POST",
+      mutating: true,
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `invalid-design-${randomUUID()}`,
+      },
+      body: JSON.stringify(body),
+    });
+    assert.equal(invalidDesign.response.status, status,
+      `${label}: reject ${invalidDesignId ?? "missing"} design ID`);
+  }
+
+  const unsupportedDuration = await request("/orders", owner, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `unsupported-duration-${randomUUID()}`,
+    },
+    body: JSON.stringify({
+      design_id: designId,
+      duration_type: "weekly",
+      hosting_months: 1,
+      asset_consents: [],
+    }),
+  });
+  assert.equal(unsupportedDuration.response.status, 400,
+    `${label}: reject unsupported duration type`);
+
   const tampered = await createRequest(`tampered-${randomUUID()}`, designId, { amount: 1 });
   assert.equal(tampered.response.status, 400, `${label}: client cannot set amount`);
   const forgedPayment = await createRequest(`forged-payment-${randomUUID()}`, designId, {
@@ -201,7 +241,7 @@ export async function runPaymentContract({
     assert.equal(lifetime.body.pricing_snapshot.lifetime_price_minor, 199_000);
     assert.equal(lifetime.body.pricing_snapshot.hosting_months, null);
 
-    for (const hostingMonths of [0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const hostingMonths of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       const invalid = await request("/orders", owner, {
         method: "POST",
         mutating: true,
@@ -217,6 +257,13 @@ export async function runPaymentContract({
       });
       assert.equal(invalid.response.status, 400, `${label}: reject invalid month count ${hostingMonths}`);
     }
+
+    const unsupportedPlan = await createRequest(
+      `unsupported-plan-${randomUUID()}`,
+      designId,
+      { storage_plan_id: "2-months" },
+    );
+    assert.equal(unsupportedPlan.response.status, 400, `${label}: reject unsupported hosting plan`);
 
     const modifiedPrice = await request("/orders", owner, {
       method: "POST",
@@ -260,6 +307,8 @@ export async function runPaymentContract({
 
   const anonymousStatus = await request(`/orders/${created.body.order_id}/status`);
   assert.equal(anonymousStatus.response.status, 401, `${label}: order status requires authentication`);
+  const invalidOrderId = await request("/orders/not-a-uuid/status", owner);
+  assert.equal(invalidOrderId.response.status, 404, `${label}: invalid order identifiers are not resolved`);
   if (otherOwner) {
     const crossOwnerStatus = await request(`/orders/${created.body.order_id}/status`, otherOwner);
     assert.equal(crossOwnerStatus.response.status, 404, `${label}: another customer cannot read order details`);

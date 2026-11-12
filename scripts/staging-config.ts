@@ -1,3 +1,8 @@
+import {
+  CloudinaryConfigurationError,
+  resolveCloudinaryConfiguration,
+} from "../src/storage/cloudinary-policy.ts";
+
 type Environment = Record<string, string | undefined>;
 
 export class StagingConfigurationError extends Error {}
@@ -5,8 +10,6 @@ export class StagingConfigurationError extends Error {}
 const expectedDatabase = "crushify-staging";
 const expectedGroup = "crushify-staging-sg";
 const expectedRegion = "Singapore";
-const previouslyAssumedCloudinaryTestCloud = "hgtcizux";
-const stagingCloudinaryConfirmation = "I_CONFIRM_SEPARATE_FREE_CLOUD";
 const stagingDatabaseHostname = /^crushify-staging-[a-z0-9-]+\.turso\.io$/i;
 
 export function assertTursoMigrationConfirmation(environment: Environment): void {
@@ -69,20 +72,23 @@ export function assertCloudinaryStagingConfiguration(
 ): { cloudName: string; apiKey: string; apiSecret: string } {
   assertStagingEnvironment(environment);
   if (environment.STORAGE_PROVIDER !== "cloudinary" ||
-      !environment.CLOUDINARY_STAGING_CLOUD_NAME?.trim() ||
-      environment.CLOUDINARY_STAGING_CLOUD_NAME === previouslyAssumedCloudinaryTestCloud ||
-      environment.CLOUDINARY_STAGING_ISOLATED_ACCOUNT !== stagingCloudinaryConfirmation ||
-      environment.CLOUDINARY_SMOKE_TEST !== "I_CONFIRM_SYNTHETIC_DATA" ||
-      !environment.CLOUDINARY_STAGING_API_KEY?.trim() ||
-      !environment.CLOUDINARY_STAGING_API_SECRET?.trim()) {
+      environment.CLOUDINARY_SMOKE_TEST !== "I_CONFIRM_SYNTHETIC_DATA") {
     throw new StagingConfigurationError(
-      "Cloudinary staging requires a separately confirmed free cloud and explicit synthetic-data opt-in",
+      "Cloudinary staging requires the cloudinary provider and explicit synthetic-data opt-in",
     );
   }
 
-  return {
-    cloudName: environment.CLOUDINARY_STAGING_CLOUD_NAME,
-    apiKey: environment.CLOUDINARY_STAGING_API_KEY,
-    apiSecret: environment.CLOUDINARY_STAGING_API_SECRET,
-  };
+  try {
+    return resolveCloudinaryConfiguration({
+      ...environment,
+      ENVIRONMENT: "staging",
+    });
+  } catch (error) {
+    if (error instanceof CloudinaryConfigurationError) {
+      throw new StagingConfigurationError(
+        "Cloudinary staging is disabled until account isolation is independently verified",
+      );
+    }
+    throw error;
+  }
 }

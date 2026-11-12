@@ -7,6 +7,7 @@ import { createClient, type Client } from "@libsql/client";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
 import { handleApiRequest } from "../src/index.ts";
+import { createVercelApiHandler } from "../src/platform/vercel.ts";
 import { runPublicationLifecycle } from "../src/publications.ts";
 import type { Storage, StorageObject } from "../src/storage.ts";
 
@@ -159,7 +160,7 @@ async function createFixture(
             ) VALUES (?, ?, ?, 1, 'our-universe', 1, '1.0.0', ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         publicationId, designId, orderId, slug,
-        createHash("sha256").update(slug).digest("hex"), JSON.stringify({ data }),
+        createHash("sha256").update(slug).digest("hex"), JSON.stringify({ data: JSON.parse(data) }),
         options.status ?? "PUBLISHED", now, now, options.expiresAt, options.status === "EXPIRED" ? now : null,
         options.retentionUntil ?? null, now, now, now,
       ],
@@ -293,6 +294,146 @@ describe("publication expiration lifecycle", () => {
       });
       assert.equal(lifetimeEntitlement.rows[0]?.status, "LIFETIME");
       assert.equal(lifetimeEntitlement.rows[0]?.expires_at, null);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("runs the authenticated Production Vercel Cron route against synthetic expiry and cleanup records", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const failures = { derivative: 1, source: 1 };
+    const storage = createStorage(failures);
+    const now = new Date();
+    const expiredAt = new Date(now.getTime() - 60_000).toISOString();
+    const retentionUntil = new Date(now.getTime() - 1_000).toISOString();
+    const env = {
+      DB: adapter,
+      STORAGE: storage,
+      DATA_RETENTION_DAYS: "30",
+    } as Parameters<typeof runPublicationLifecycle>[0];
+    let connections = 0;
+    const secret = "local-synthetic-cron-secret-with-sufficient-length";
+    const handler = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-production-test-org.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-token",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "crushify-production-test",
+      CLOUDINARY_API_KEY: "synthetic-api-key",
+      CLOUDINARY_API_SECRET: "synthetic-api-secret",
+      ENVIRONMENT: "production",
+      VERCEL_ENV: "production",
+      APP_ORIGIN: "https://crushify.test",
+      CRON_SECRET: secret,
+      DATA_RETENTION_DAYS: "30",
+    }, {
+      async connectDatabase() {
+        connections++;
+        return { database: adapter, close: () => undefined };
+      },
+      createCloudinaryStorage: () => storage,
+    });
+
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const expiring = await createFixture(client, { expiresAt: expiredAt });
+      const active = await createFixture(client, {
+        expiresAt: new Date(now.getTime() + 86_400_000).toISOString(),
+      });
+      const retrying = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: expiredAt,
+        retentionUntil,
+        withAsset: true,
+      });
+      if (!("sourceKey" in retrying) || !("derivativeKey" in retrying)) {
+        assert.fail("Expected cleanup asset fixture");
+      }
+      await storage.upload(retrying.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.createPublishedDerivative(retrying.sourceKey, retrying.derivativeKey);
+
+      const unauthorized = await handler(
+        new Request("https://crushify.test/api/cron/publication-lifecycle"),
+      );
+      assert.equal(unauthorized.status, 401);
+      const invalid = await handler(new Request(
+        "https://crushify.test/api/cron/publication-lifecycle",
+        { headers: { Authorization: "Bearer invalid-local-test-value" } },
+      ));
+      assert.equal(invalid.status, 401);
+      assert.equal(connections, 0);
+
+      const firstResponse = await handler(new Request(
+        "https://crushify.test/api/cron/publication-lifecycle",
+        { headers: { Authorization: `Bearer ${secret}` } },
+      ));
+      assert.equal(firstResponse.status, 200);
+      assert.deepEqual(await firstResponse.json(), {
+        acquired: true,
+        expired: 1,
+        erased: 0,
+        retryable: 1,
+      });
+      assert.equal(connections, 1);
+      const firstStates = await client.execute({
+        sql: `SELECT id, status FROM publications WHERE id IN (?, ?, ?)`,
+        args: [expiring.publicationId, active.publicationId, retrying.publicationId],
+      });
+      const firstById = new Map(firstStates.rows.map((row) => [String(row.id), String(row.status)]));
+      assert.equal(firstById.get(expiring.publicationId), "EXPIRED");
+      assert.equal(firstById.get(active.publicationId), "PUBLISHED");
+      assert.equal(firstById.get(retrying.publicationId), "EXPIRED");
+      assert.equal((await handleApiRequest(
+        new Request(`https://crushify.test/api/v1/publications/${expiring.slug}`),
+        env,
+      )).status, 410);
+      const activeResponse = await handleApiRequest(
+        new Request(`https://crushify.test/api/v1/publications/${active.slug}`),
+        env,
+      );
+      assert.equal(activeResponse.status, 200, await activeResponse.clone().text());
+
+      const sourceRetry = await handler(new Request(
+        "https://crushify.test/api/cron/publication-lifecycle",
+        { headers: { Authorization: `Bearer ${secret}` } },
+      ));
+      assert.equal(sourceRetry.status, 200);
+      assert.deepEqual(await sourceRetry.json(), {
+        acquired: true,
+        expired: 0,
+        erased: 0,
+        retryable: 1,
+      });
+
+      const completed = await handler(new Request(
+        "https://crushify.test/api/cron/publication-lifecycle",
+        { headers: { Authorization: `Bearer ${secret}` } },
+      ));
+      assert.equal(completed.status, 200);
+      assert.deepEqual(await completed.json(), {
+        acquired: true,
+        expired: 0,
+        erased: 1,
+        retryable: 0,
+      });
+      const erasedAsset = await client.execute({
+        sql: "SELECT status FROM assets WHERE design_id = ?",
+        args: [retrying.designId],
+      });
+      assert.equal(erasedAsset.rows[0]?.status, "DELETED");
+      const repeated = await handler(new Request(
+        "https://crushify.test/api/cron/publication-lifecycle",
+        { headers: { Authorization: `Bearer ${secret}` } },
+      ));
+      assert.equal(repeated.status, 200);
+      assert.deepEqual(await repeated.json(), {
+        acquired: true,
+        expired: 0,
+        erased: 0,
+        retryable: 0,
+      });
     } finally {
       client.close();
     }

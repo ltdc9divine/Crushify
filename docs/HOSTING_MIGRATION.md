@@ -56,7 +56,7 @@ The command runs the numbered SQL files in `migrations/`, verifies SHA-256 migra
 
 The Node Function at `api/[...path].ts` forwards HTTP requests to the shared `handleApiRequest` router. It buffers only bounded bodies, preserves multi-value `Set-Cookie`, imposes a 30-second request-body read timeout, supports only explicit methods, and keeps API responses private. Static root and `/templates/<id>/` paths are served directly by Vercel; no SPA fallback or API rewrite is configured. CORS preflight is limited to the exact configured `APP_ORIGIN` (or Vercel's deployment URL for a Preview if no override is set); credentialed requests never receive wildcard CORS.
 
-Vercel Hobby is only for personal development, previews, and synthetic test data. Its terms and account eligibility must be checked before use; it must not be used for commercial sales, live checkout, or payment collection. The CLI account is authenticated, but this repository has no `.vercel` project link and no deployment was performed.
+Vercel Hobby is restricted to non-commercial, personal use under Vercel's current [Hobby plan terms](https://vercel.com/docs/plans/hobby). It must not be used for commercial sales, live checkout, or payment collection. Vercel's current [Cron Jobs limits](https://vercel.com/docs/schedules/cron-jobs/usage-and-pricing) allow a Hobby Cron no more often than daily, with up to 59 minutes of timing variance. The repository's daily schedule meets that frequency limit, but does not establish account eligibility or a deployed schedule. This repository has no `.vercel` project link and no deployment was performed.
 
 For Vercel local development:
 
@@ -65,15 +65,15 @@ For Vercel local development:
 3. Run `npm run db:migrate:turso` against that local file database, then run `vercel dev`. Local `mock` storage is accepted only with local test mode; do not deploy those values.
 4. The Vercel function limit is set to 4 MiB for images, below Vercel's documented 4.5 MB function request/response payload limit; the Cloudflare Worker retains its existing 5 MiB limit. The create-upload response advertises the runtime's actual limit. See [Vercel Function limits](https://vercel.com/docs/functions/limitations#request-body-size).
 
-For Vercel staging:
+For Vercel Preview staging:
 
-1. Use the dedicated non-production Turso database and Cloudinary Test cloud. Vercel serverless filesystems are ephemeral and must not be used for persistent databases.
-2. Set `ENVIRONMENT=staging` even when Vercel labels the `main` deployment as `production`; the adapter accepts this override only for Vercel Preview/Production channels. Configure server-only `DATABASE_PROVIDER=turso`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `STORAGE_PROVIDER=cloudinary`, `CLOUDINARY_CLOUD_NAME=hgtcizux`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `APP_ORIGIN`, and a random `CRON_SECRET` of at least 32 characters.
-3. Keep `LOCAL_TEST_MODE` and all payment/SePay variables disabled. The Vercel adapter does not pass payment mode or SePay secrets outside local development. Set a staging-only Resend test sender only if email is specifically required.
-4. Configure Vercel Cron's `CRON_SECRET` using the Vercel secret store; Vercel sends it as a bearer token. The lifecycle route is staging-only and rejects mismatched runtime settings. The daily cron is a repository configuration, not proof that a deployed schedule is active.
-5. Do not add production customer data, test with real users, or enable checkout. See [Vercel staging setup](./VERCEL_STAGING.md) for guarded database migration, synthetic-only smoke tests, and post-deployment checks.
+1. Use a dedicated, verified non-production Turso database. Vercel serverless filesystems are ephemeral and must not be used for persistent databases.
+2. Set `ENVIRONMENT=staging`, `DATABASE_PROVIDER=turso`, `TURSO_STAGING_DATABASE_URL`, `TURSO_STAGING_AUTH_TOKEN`, and `STORAGE_PROVIDER=mock` for isolated Preview checks. Preview Cloudinary storage requires a separately verified account and the `CLOUDINARY_STAGING_*` variables; the previously assumed cloud is rejected. Do not use generic Production credentials in Preview.
+3. Keep `LOCAL_TEST_MODE` and all payment/SePay variables disabled. The Vercel adapter does not pass payment mode or SePay secrets outside local development. Set a staging-only test mail sender only if separately approved.
+4. Vercel Cron invokes the Production deployment only. The handler requires the matching `ENVIRONMENT=production` and `VERCEL_ENV=production` pair for scheduled production cleanup; Preview has no scheduled lifecycle invocation. `CRON_SECRET` is required in the Vercel Production environment before an approved release. Vercel sends it as a bearer token. No production endpoint was invoked during this work.
+5. Do not add production customer data, test with real users, or enable checkout. See [Vercel staging setup](./VERCEL_STAGING.md) for guarded database migration and synthetic-only checks.
 
-Conventional `api/` routing creates the function, and root static hosting preserves direct template paths without rewriting those routes to HTML. `vercel.json` also configures one daily lifecycle Cron at 03:00 UTC. It is not active until this repository is deployed to the Vercel project, the staging variables and `CRON_SECRET` are configured, and the first invocation is observed.
+Conventional `api/` routing creates the Node Function, `api/cron/publication-lifecycle.ts` maps the Cron URL to the shared handler, and root static hosting preserves direct template paths. `vercel.json` declares one daily lifecycle Cron at 03:00 UTC. The schedule's runtime behavior is not verified until an authorized Production release process confirms its environment, required providers, secret, and first scheduled execution. Cloudflare `scheduled()` code remains for rollback compatibility, but both Wrangler cron triggers are disabled to avoid a second automatic lifecycle runner.
 
 ## Turso/libSQL configuration
 

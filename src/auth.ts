@@ -1,4 +1,5 @@
 import { apiError, getCookie, isAllowedOrigin, jsonResponse, nowIso, randomToken, readJson, safeId, sha256 } from "./http.ts";
+import { logSafeError, logSafeInfo } from "./logging.ts";
 import type { Env, Session } from "./types.ts";
 
 const SESSION_COOKIE = "crushify_session";
@@ -18,19 +19,38 @@ export interface EmailService {
 }
 
 class LocalTestingEmailService implements EmailService {
-  private readonly origin: string;
+  private readonly sink?: (message: EmailMessage) => Promise<void>;
+  private readonly sinkUrl?: string;
 
-  constructor(origin: string) {
-    this.origin = origin;
+  constructor(
+    sink?: (message: EmailMessage) => Promise<void>,
+    sinkUrl?: string,
+  ) {
+    this.sink = sink;
+    this.sinkUrl = sinkUrl;
   }
 
   async send(message: EmailMessage): Promise<void> {
-    console.info("Local-only Crushify magic link", {
-      to: message.to,
-      subject: message.subject,
-      text: message.text,
-      origin: this.origin,
-    });
+    if (this.sink) {
+      await this.sink(message);
+      return;
+    }
+    if (this.sinkUrl) {
+      const response = await fetch(this.sinkUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(message),
+      });
+      if (!response.ok) throw new Error(`Local email sink returned ${response.status}`);
+      return;
+    }
+    logSafeInfo("email.local_sink_discarded", "email", { environment: "local" });
+  }
+}
+
+class PreviewDiscardEmailService implements EmailService {
+  async send(_message: EmailMessage): Promise<void> {
+    logSafeInfo("email.preview_sink_discarded", "email", { environment: "staging" });
   }
 }
 
@@ -84,10 +104,32 @@ class ResendEmailService implements EmailService {
   }
 }
 
-export function createEmailService(env: Env, origin: string): EmailService | null {
+export function createEmailService(env: Env, _origin: string): EmailService | null {
+  if (env.ENVIRONMENT === "staging") {
+    return env.PREVIEW_EMAIL_SINK === "discard"
+      ? new PreviewDiscardEmailService()
+      : null;
+  }
   const isLocalTest = env.LOCAL_TEST_MODE === "true" &&
     (env.ENVIRONMENT === undefined || env.ENVIRONMENT === "local");
-  if (isLocalTest) return new LocalTestingEmailService(origin);
+  if (isLocalTest) {
+    const sinkUrl = env.LOCAL_TEST_MAIL_SINK_URL;
+    if (sinkUrl) {
+      let parsed: URL;
+      try {
+        parsed = new URL(sinkUrl);
+      } catch {
+        return null;
+      }
+      if (parsed.protocol !== "http:" ||
+          !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname) ||
+          !parsed.port || parsed.pathname !== "/__crushify_test_email_sink" ||
+          parsed.username || parsed.password || parsed.search || parsed.hash) {
+        return null;
+      }
+    }
+    return new LocalTestingEmailService(env.LOCAL_TEST_EMAIL_SINK, sinkUrl);
+  }
   if (env.MAIL_PROVIDER === "resend" && env.MAIL_API_KEY && env.MAIL_FROM_EMAIL) {
     return new ResendEmailService(env.MAIL_API_KEY, env.MAIL_FROM_EMAIL);
   }
@@ -280,7 +322,10 @@ export async function handleSessionRoutes(
       });
     } catch (error) {
       await env.DB.prepare("DELETE FROM login_tokens WHERE token_hash = ?").bind(tokenHash).run();
-      console.error("Magic-link delivery failed", { request_id: requestId, error });
+      logSafeError("auth.magic_link_delivery_failed", "email", error, {
+        request_id: requestId,
+        environment: env.ENVIRONMENT,
+      });
       return apiError(requestId, 502, "EMAIL_DELIVERY_FAILED", "Could not deliver sign-in email");
     }
     return jsonResponse({ message: "If the address can be used, a sign-in link has been sent." }, 202, requestId);

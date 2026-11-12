@@ -8,6 +8,21 @@
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
+  function assetReferences(value) {
+    const references = new Set();
+    const visit = (entry, key) => {
+      if (typeof entry === "string" && (key === "asset_id" || key === "coverImage") && ID.test(entry)) {
+        references.add(entry);
+      } else if (Array.isArray(entry)) {
+        for (const item of entry) visit(item, "");
+      } else if (record(entry)) {
+        for (const [childKey, child] of Object.entries(entry)) visit(child, childKey);
+      }
+    };
+    visit(value, "");
+    return references;
+  }
+
   async function api(path, options = {}, csrf = "") {
     const headers = new Headers(options.headers || {});
     if (csrf) headers.set("X-CSRF-Token", csrf);
@@ -113,6 +128,8 @@
     let timer = 0;
     let saving = false;
     let saveAgain = false;
+    let savedAssetIds = new Set();
+    const pendingAssetDeletes = new Set();
     let token = new URLSearchParams(location.hash.slice(1)).get("magic_token") ||
       new URLSearchParams(location.search).get("magic_token");
     const previewToken = new URLSearchParams(location.hash.slice(1)).get("preview_token") ||
@@ -144,6 +161,7 @@
         adapter.setSchemaVersion?.(design.schema_version);
         hydrating = true;
         await adapter.hydrate(design.data, (value) => loadAsset(value, previewToken));
+        savedAssetIds = assetReferences(design.data);
         revision = design.revision;
         hydrating = false;
         setStatus("Đã tải bản thiết kế đã lưu.", "saved");
@@ -187,7 +205,24 @@
             }),
           }, csrf);
           revision = result.revision;
-          setStatus("Đã lưu trên máy chủ.", "saved");
+          const currentAssetIds = assetReferences(data);
+          for (const assetId of savedAssetIds) {
+            if (!currentAssetIds.has(assetId)) pendingAssetDeletes.add(assetId);
+          }
+          for (const assetId of currentAssetIds) pendingAssetDeletes.delete(assetId);
+          savedAssetIds = currentAssetIds;
+          const cleanupErrors = [];
+          for (const assetId of pendingAssetDeletes) {
+            try {
+              await api(`/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" }, csrf);
+              pendingAssetDeletes.delete(assetId);
+            } catch (error) {
+              cleanupErrors.push(error instanceof Error ? error.message : "Không thể xóa ảnh cũ.");
+            }
+          }
+          setStatus(cleanupErrors.length
+            ? `Đã lưu thiết kế, nhưng ảnh đã bỏ chưa thể xóa khỏi máy chủ: ${cleanupErrors.join(" ")}`
+            : "Đã lưu trên máy chủ.", cleanupErrors.length ? "error" : "saved");
         } while (saveAgain);
       } catch (error) {
         success = false;

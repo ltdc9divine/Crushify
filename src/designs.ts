@@ -1,4 +1,5 @@
 import { requireCsrf, requireSession } from "./auth.ts";
+import { logSafeError } from "./logging.ts";
 import { apiError, jsonResponse, nowIso, randomToken, readJson, safeId, sha256 } from "./http.ts";
 import { isJsonWithinLimit } from "./universe.ts";
 import {
@@ -204,12 +205,7 @@ async function deleteDesign(
            updated_at = ? WHERE id = ? AND derivative_key = ?`,
       ).bind(nowIso(), derivative.id, derivative.derivative_key).run();
     } catch (error) {
-      console.error("Published media deletion failed", {
-        request_id: requestId,
-        design_id: designId,
-        publication_asset_id: derivative.id,
-        error,
-      });
+      logSafeError("design.published_media_deletion_failed", "storage", error, { request_id: requestId });
       return apiError(requestId, 503, "DELETION_PENDING", "Published media deletion will be retried");
     }
   }
@@ -220,7 +216,7 @@ async function deleteDesign(
   try {
     for (const asset of assets.results) await env.STORAGE.delete(asset.object_key);
   } catch (error) {
-    console.error("Design media deletion failed", { request_id: requestId, design_id: designId, error });
+    logSafeError("design.media_deletion_failed", "storage", error, { request_id: requestId });
     return apiError(requestId, 503, "DELETION_PENDING", "Design deletion will be retried");
   }
   const statements = assets.results.map((asset) =>

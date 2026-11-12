@@ -1,7 +1,7 @@
 import { requireCsrf, requireSession } from "./auth.ts";
+import { logSafeError } from "./logging.ts";
 import { apiError, MAX_IMAGE_BYTES, nowIso, randomToken, readBoundedBody, readJson, safeId, sha256, jsonResponse } from "./http.ts";
 import { serveAsset } from "./designs.ts";
-import { StorageError } from "./storage.ts";
 import type { Env } from "./types.ts";
 import { assetReferences, type TemplateData } from "./template-registry.ts";
 
@@ -215,10 +215,9 @@ async function uploadContent(
       await env.STORAGE.delete(session.object_key);
       binaryRemoved = true;
     } catch (cleanupError) {
-      console.error("Failed to clean up incomplete media upload", {
+      logSafeError("asset.incomplete_upload_cleanup_failed", "storage", cleanupError, {
         request_id: requestId,
-        asset_id: assetId,
-        error: cleanupError instanceof Error ? cleanupError.message : "Unknown storage cleanup error",
+        environment: env.ENVIRONMENT,
       });
     }
     if (binaryRemoved) {
@@ -230,18 +229,15 @@ async function uploadContent(
           "UPDATE assets SET status = 'DELETION_PENDING', updated_at = ? WHERE id = ? AND status = 'PENDING'",
         ).bind(nowIso(), assetId).run();
       } catch (stateError) {
-        console.error("Failed to mark incomplete upload for cleanup", {
+        logSafeError("asset.incomplete_upload_state_update_failed", "database", stateError, {
           request_id: requestId,
-          asset_id: assetId,
-          error: stateError instanceof Error ? stateError.message : "Unknown database error",
+          environment: env.ENVIRONMENT,
         });
       }
     }
-    console.error("Media upload failed", {
+    logSafeError("asset.upload_failed", "storage", error, {
       request_id: requestId,
-      asset_id: assetId,
-      error: error instanceof StorageError ? error.message :
-        error instanceof Error ? error.message : "Unknown upload error",
+      environment: env.ENVIRONMENT,
     });
     return apiError(requestId, 502, "UPLOAD_FAILED", "Image upload failed; retry the upload");
   }
@@ -350,7 +346,10 @@ async function deleteAsset(
   try {
     await env.STORAGE.delete(asset.object_key);
   } catch (error) {
-    console.error("Asset deletion failed", { request_id: requestId, asset_id: assetId, error });
+    logSafeError("asset.deletion_failed", "storage", error, {
+      request_id: requestId,
+      environment: env.ENVIRONMENT,
+    });
     return apiError(requestId, 503, "DELETION_PENDING", "Asset deletion will be retried");
   }
   const now = nowIso();

@@ -1,4 +1,5 @@
 import { requireCsrf, requireSession } from "./auth.ts";
+import { logSafeError } from "./logging.ts";
 import { DatabaseError } from "./database.ts";
 import {
   apiError,
@@ -361,11 +362,7 @@ async function cleanupAssets(
       ).bind(nowIso(), row.id, row.derivative_key).run();
     } catch (error) {
       success = false;
-      console.error("Published media cleanup failed", {
-        publication_id: publicationId,
-        publication_asset_id: row.id,
-        error,
-      });
+      logSafeError("publication.media_cleanup_failed", "storage", error);
       await env.DB.prepare(
         `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING', updated_at = ?
          WHERE id = ? AND derivative_key = ?`,
@@ -471,11 +468,7 @@ export async function runPublicationLifecycle(
         await env.STORAGE.delete(asset.object_key);
       } catch (error) {
         deleted = false;
-        console.error("Expired publication media cleanup failed", {
-          publication_id: publication.id,
-          asset_id: asset.id,
-          error,
-        });
+        logSafeError("publication.expired_media_cleanup_failed", "storage", error);
         break;
       }
     }
@@ -595,11 +588,7 @@ async function publish(
       try {
         await env.STORAGE.createPublishedDerivative(item.object_key, derivativeKey);
       } catch (error) {
-        console.error("Published media creation failed", {
-          publication_id: publicationId,
-          publication_asset_id: item.id,
-          error,
-        });
+        logSafeError("publication.media_creation_failed", "storage", error, { request_id: requestId });
         return apiError(requestId, 503, "MEDIA_PUBLISH_FAILED", "Could not prepare an approved photo");
       }
       const ready = await env.DB.prepare(
@@ -610,10 +599,8 @@ async function publish(
         try {
           await env.STORAGE.deletePublishedDerivative(derivativeKey);
         } catch (error) {
-          console.error("Uncommitted published media cleanup failed", {
-            publication_id: publicationId,
-            publication_asset_id: item.id,
-            error,
+          logSafeError("publication.uncommitted_media_cleanup_failed", "storage", error, {
+            request_id: requestId,
           });
         }
         return apiError(requestId, 409, "CONFLICT", "Photo consent changed during publish");
@@ -791,10 +778,8 @@ async function revokeAssetConsent(
            updated_at = ? WHERE id = ? AND derivative_key = ?`,
       ).bind(nowIso(), consent.id, consent.derivative_key).run();
     } catch (error) {
-      console.error("Consent revocation media cleanup failed", {
-        publication_id: publicationId,
-        publication_asset_id: consent.id,
-        error,
+      logSafeError("publication.consent_revocation_cleanup_failed", "storage", error, {
+        request_id: requestId,
       });
       return apiError(requestId, 503, "MEDIA_CLEANUP_PENDING", "Image access is revoked; media cleanup is pending");
     }
@@ -1346,11 +1331,7 @@ export async function handleFulfillmentForOrder(
          WHERE id = ? AND status IN ('PAID','FULFILLING')`,
       ).bind(nowIso(), orderId),
     ]);
-    console.error("Order fulfillment failed", {
-      order_id: orderId,
-      customer_id: customerId,
-      error: error instanceof Error ? error.message : "Unknown fulfillment failure",
-    });
+    logSafeError("publication.order_fulfillment_failed", "payment", error);
     return { completed: false, retryable: true };
   }
 }

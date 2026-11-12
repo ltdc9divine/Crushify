@@ -3,24 +3,20 @@ import { randomBytes } from "node:crypto";
 import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { runDatabaseContract } from "./database-contract.mjs";
 import { runPaymentContract } from "./payment-contract.mjs";
+import { createLocalEmailSink } from "./local-email-sink.mjs";
 
 const root = process.cwd();
-const devVars = resolve(root, ".dev.vars");
-if (!existsSync(devVars)) {
-  throw new Error("Copy .dev.vars.example to .dev.vars before running npm run test:integration.");
-}
-
 const persistDirectory = await mkdtemp(join(tmpdir(), "crushify-d1-contract-"));
 const port = 8787;
 const origin = `http://127.0.0.1:${port}`;
 const webhookSecret = randomBytes(32).toString("hex");
 const receivingAccount = "0000000000";
+const emailSink = await createLocalEmailSink();
 const child = spawn(
   process.execPath,
   [
@@ -38,6 +34,8 @@ const child = spawn(
     "ENVIRONMENT:local",
     "--var",
     "LOCAL_TEST_MODE:true",
+    "--var",
+    `LOCAL_TEST_MAIL_SINK_URL:${emailSink.url}`,
     "--var",
     "LOCAL_TEST_CATALOG_OVERRIDE:true",
     "--var",
@@ -57,7 +55,6 @@ const child = spawn(
 );
 let logs = "";
 let ready = false;
-let logCursor = 0;
 const capture = (chunk) => {
   logs += chunk.toString();
   if (logs.includes("Ready on")) ready = true;
@@ -119,26 +116,7 @@ async function waitReady() {
 }
 
 async function waitForMagicToken(after) {
-  for (let attempt = 0; attempt < 80; attempt++) {
-    const text = logs.slice(after);
-    const match = text.match(/magic_token=([A-Za-z0-9_-]+)/);
-    if (match) return match[1];
-    await delay(100);
-  }
-  throw new Error(`Local email adapter did not emit a link.\n${sanitizedLogs()}`);
-}
-
-async function waitForNextMagicToken() {
-  for (let attempt = 0; attempt < 80; attempt++) {
-    const text = logs.slice(logCursor);
-    const match = text.match(/magic_token=([A-Za-z0-9_-]+)/);
-    if (match) {
-      logCursor += text.indexOf(match[0]) + match[0].length;
-      return match[1];
-    }
-    await delay(100);
-  }
-  throw new Error(`Local email adapter did not emit a contract magic link.\n${sanitizedLogs()}`);
+  return emailSink.waitForMagicToken(after);
 }
 
 function makeRequest(session, options = {}) {
@@ -152,7 +130,9 @@ function makeRequest(session, options = {}) {
 }
 
 async function json(path, session, options = {}) {
-  const response = await fetch(origin + "/api/v1" + path, makeRequest(session, options));
+  const request = makeRequest(session, options);
+  request.headers.set("Connection", "close");
+  const response = await fetch(origin + "/api/v1" + path, request);
   const body = response.status === 204 ||
     !response.headers.get("content-type")?.includes("application/json")
     ? null
@@ -173,17 +153,18 @@ async function paymentContractRequest(path, session, options = {}) {
 }
 
 async function signIn(email) {
-  const start = logs.length;
+  const start = emailSink.current();
   const requested = await json("/customers/session", null, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email }),
   });
   assert.equal(requested.response.status, 202);
-  const magicLinkLog = logs.slice(start);
-  assert.match(magicLinkLog, /#magic_token=/);
-  assert.doesNotMatch(magicLinkLog, /\?magic_token=/);
+  assert.doesNotMatch(logs, /magic_token=/, "magic links must not appear in Wrangler logs");
   const token = await waitForMagicToken(start);
+  const magicLinkMessage = emailSink.messages[start];
+  assert.match(magicLinkMessage.text, /#magic_token=/);
+  assert.doesNotMatch(magicLinkMessage.text, /\?magic_token=/);
   const verified = await json("/customers/session/verify", null, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -388,7 +369,7 @@ try {
     assert.equal(invalidReturn.response.status, 400, `unsafe return path ${index} is rejected`);
   }
 
-  const expiredMagicStart = logs.length;
+  const expiredMagicStart = emailSink.current();
   const expiredMagicEmail = `expired-magic-${crypto.randomUUID()}@example.test`;
   const expiredMagicRequest = await json("/customers/session", null, {
     method: "POST",
@@ -457,6 +438,34 @@ try {
     body: JSON.stringify({ template_id: "our-universe", schema_version: 1 }),
   });
   assert.equal(paymentDesign.response.status, 201);
+  const paymentDesignData = structuredClone(paymentDesign.body.data);
+  const syntheticHeadline = `ORDERS-2.7 synthetic ${crypto.randomUUID()}`;
+  paymentDesignData.headline = syntheticHeadline;
+  const savedPaymentDesign = await json(`/designs/${paymentDesign.body.design_id}`, first, {
+    method: "PUT",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      schema_version: paymentDesign.body.schema_version,
+      expected_revision: paymentDesign.body.revision,
+      data: paymentDesignData,
+    }),
+  });
+  assert.equal(savedPaymentDesign.response.status, 200);
+  assert.equal(savedPaymentDesign.body.revision, paymentDesign.body.revision + 1);
+  const reloadedPaymentDesign = await json(`/designs/${paymentDesign.body.design_id}`, first);
+  assert.equal(reloadedPaymentDesign.response.status, 200);
+  assert.equal(reloadedPaymentDesign.body.data.headline, syntheticHeadline);
+  const designPreview = await json(`/designs/${paymentDesign.body.design_id}/preview`, first, {
+    method: "POST",
+    mutating: true,
+  });
+  assert.equal(designPreview.response.status, 201);
+  const previewData = await paymentContractRequest("/previews", null, {
+    token: designPreview.body.token,
+  });
+  assert.equal(previewData.response.status, 200);
+  assert.equal(previewData.body.data.headline, syntheticHeadline);
   await runPaymentContract({
     request: paymentContractRequest,
     async seedPrice(amount) {
@@ -1068,10 +1077,9 @@ try {
       : await response.json();
     return { response, body };
   };
-  logCursor = logs.length;
   const contract = await runDatabaseContract({
     request: contractRequest,
-    getMagicToken: waitForNextMagicToken,
+    getMagicToken: () => emailSink.waitForMagicToken(),
     label: "Cloudflare D1 + local R2",
   });
 
@@ -1177,6 +1185,7 @@ try {
   process.exitCode = 1;
 } finally {
   await stopWorker();
+  await emailSink.close();
   if (process.platform === "win32") {
     const cleanup = spawn(
       process.execPath,
