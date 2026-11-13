@@ -32,6 +32,8 @@ export async function runPaymentContract({
   inspectWebhookOutcomes,
   inspectWebhookEvent,
   setPublicationExpiry,
+  setPublicationEntitlementStatus,
+  countOrdersForDesign,
   deactivateTemplatePrice,
   inspectEntitlement,
   inspectStoragePlan,
@@ -44,6 +46,15 @@ export async function runPaymentContract({
   failPublicationCreation,
   restorePublicationCreation,
   recoverFulfillments,
+  inspectFulfillmentJob,
+  makeFulfillmentJobDue,
+  setFulfillmentJobLease,
+  setFulfillmentJobAttempts,
+  runConcurrentFulfillmentClaims,
+  assertRecoveryIgnoresOrder,
+  failPublicationPublishing,
+  restorePublicationPublishing,
+  inspectPublicationIdentity,
   allTemplates = false,
   testStandardPricing = false,
   expectedMode = "sepay-test",
@@ -410,6 +421,19 @@ export async function runPaymentContract({
     body: invalidBody,
   });
   assert.equal(invalidSignature.response.status, 401, `${label}: reject invalid signature`);
+  const unchangedAfterInvalidSignature = await request(`/orders/${created.body.order_id}/status`, owner);
+  assert.equal(unchangedAfterInvalidSignature.body.status, "AWAITING_PAYMENT",
+    `${label}: invalid signatures do not mutate the order`);
+  assert.equal(unchangedAfterInvalidSignature.body.payment.status, "PENDING");
+  if (inspectOrderArtifacts) {
+    assert.deepEqual(await inspectOrderArtifacts(created.body.order_id), {
+      payments: 1,
+      processedEvents: 0,
+      publications: 0,
+      entitlements: 0,
+      fulfillmentJobs: 0,
+    }, `${label}: invalid signatures do not persist settlement or fulfillment state`);
+  }
   const missingSignature = await request("/payments/sepay/webhook", null, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -663,9 +687,61 @@ export async function runPaymentContract({
           fulfillmentJobs: 1,
           failedJobs: 1,
         });
+        if (inspectFulfillmentJob) {
+          const job = await inspectFulfillmentJob(workflow.order.body.order_id);
+          assert.equal(job.status, "FAILED");
+          assert.equal(job.attempts, 1);
+          assert.ok(Date.parse(job.next_attempt_at) > Date.now(),
+            `${label}: failed fulfillment observes retry backoff`);
+          assert.ok(job.last_failure_at);
+          assert.match(job.last_error_code, /^(DATABASE_ERROR|RANGE_ERROR|TYPE_ERROR|FULFILLMENT_FAILED)$/);
+          assert.equal(job.lease_token, null);
+          assert.equal(job.lease_expires_at, null);
+        }
+        const earlyRecovery = await recoverFulfillments();
+        assert.equal(earlyRecovery.attempted, 0,
+          `${label}: recovery does not bypass the retry backoff`);
+
+        if (runConcurrentFulfillmentClaims) {
+          const concurrent = await runConcurrentFulfillmentClaims(workflow.order.body.order_id);
+          assert.equal(concurrent.claimed, 1,
+            `${label}: only one concurrent worker acquires the job`);
+          assert.equal(concurrent.completed, 0,
+            `${label}: the injected failure keeps the job retryable`);
+          assert.equal(concurrent.competingCompleted, false,
+            `${label}: the competing worker cannot finalize another worker's lease`);
+          const afterRace = await inspectFulfillmentJob(workflow.order.body.order_id);
+          assert.equal(afterRace.attempts, 2,
+            `${label}: a losing worker does not increment the attempt count`);
+          assert.equal(afterRace.status, "FAILED");
+        }
+
+        if (setFulfillmentJobLease) {
+          await setFulfillmentJobLease(
+            workflow.order.body.order_id,
+            "synthetic-active-lease",
+            "2999-01-01T00:00:00.000Z",
+          );
+          const activeLease = await recoverFulfillments();
+          assert.equal(activeLease.attempted, 0,
+            `${label}: a live lease cannot be claimed by another worker`);
+          const activeJob = await inspectFulfillmentJob(workflow.order.body.order_id);
+          assert.equal(activeJob.lease_token, "synthetic-active-lease");
+          await setFulfillmentJobLease(
+            workflow.order.body.order_id,
+            "synthetic-expired-lease",
+            "2000-01-01T00:00:00.000Z",
+          );
+        }
         await restorePublicationCreation(workflow.order.body.order_id);
         const recovered = await recoverFulfillments();
         assert.equal(recovered.completed, 1, `${label}: recovery retries failed fulfillment`);
+        const recoveredJob = await inspectFulfillmentJob?.(workflow.order.body.order_id);
+        if (recoveredJob) {
+          assert.equal(recoveredJob.status, "COMPLETED");
+          assert.equal(recoveredJob.lease_token, null);
+          assert.equal(recoveredJob.lease_expires_at, null);
+        }
       }
 
       const status = await request(`/orders/${workflow.order.body.order_id}/status`, owner);
@@ -744,6 +820,100 @@ export async function runPaymentContract({
     const invalidSlug = await request("/publications/not-a-valid-slug");
     assert.equal(invalidSlug.response.status, 404,
       `${label}: invalid public slugs are not served`);
+
+    if (failPublicationPublishing && restorePublicationPublishing &&
+        inspectPublicationIdentity && recoverFulfillments && inspectFulfillmentJob) {
+      const design = await request("/designs", owner, {
+        method: "POST",
+        mutating: true,
+        json: { template_id: "our-universe", schema_version: 1 },
+      });
+      assert.equal(design.response.status, 201);
+      const order = await createRequest(`publication-retry-${randomUUID()}`, design.body.design_id);
+      assert.equal(order.response.status, 201);
+      await failPublicationPublishing(order.body.order_id);
+      const transactionId = `publication-${randomUUID()}`;
+      const payload = JSON.stringify({
+        id: transactionId,
+        accountNumber: receivingAccount,
+        code: order.body.payment.reference,
+        transferType: "in",
+        transferAmount: order.body.total_minor,
+      });
+      const settled = await request("/payments/sepay/webhook", null, {
+        method: "POST",
+        headers: signedHeaders(webhookSecret, payload),
+        body: payload,
+      });
+      assert.equal(settled.response.status, 200);
+      const beforeRetry = await inspectFulfillmentJob(order.body.order_id);
+      assert.equal(beforeRetry.status, "FAILED");
+      const publicationBeforeRetry = await inspectPublicationIdentity(order.body.order_id);
+      assert.ok(publicationBeforeRetry?.id);
+      assert.ok(publicationBeforeRetry?.slug);
+      await restorePublicationPublishing(order.body.order_id);
+      await makeFulfillmentJobDue(order.body.order_id);
+      const retry = await recoverFulfillments();
+      assert.equal(retry.completed, 1);
+      const publicationAfterRetry = await inspectPublicationIdentity(order.body.order_id);
+      assert.deepEqual(publicationAfterRetry, publicationBeforeRetry,
+        `${label}: retry reuses the existing publication ID and public slug`);
+      const fulfilled = await request(`/orders/${order.body.order_id}/status`, owner);
+      assert.equal(fulfilled.body.status, "FULFILLED");
+      assert.equal(fulfilled.body.payment.status, "SUCCEEDED");
+      assert.deepEqual(await inspectOrderArtifacts(order.body.order_id), {
+        payments: 1,
+        processedEvents: 1,
+        publications: 1,
+        entitlements: 1,
+        fulfillmentJobs: 1,
+      });
+    }
+
+    if (setFulfillmentJobAttempts && inspectFulfillmentJob &&
+        failPublicationCreation && restorePublicationCreation && recoverFulfillments) {
+      const design = await request("/designs", owner, {
+        method: "POST",
+        mutating: true,
+        json: { template_id: "our-universe", schema_version: 1 },
+      });
+      assert.equal(design.response.status, 201);
+      const order = await createRequest(`manual-fulfillment-${randomUUID()}`, design.body.design_id);
+      assert.equal(order.response.status, 201);
+      await failPublicationCreation(order.body.order_id);
+      const transactionId = `manual-${randomUUID()}`;
+      const payload = JSON.stringify({
+        id: transactionId,
+        accountNumber: receivingAccount,
+        code: order.body.payment.reference,
+        transferType: "in",
+        transferAmount: order.body.total_minor,
+      });
+      const settled = await request("/payments/sepay/webhook", null, {
+        method: "POST",
+        headers: signedHeaders(webhookSecret, payload),
+        body: payload,
+      });
+      assert.equal(settled.response.status, 200);
+      await setFulfillmentJobAttempts(order.body.order_id, 7);
+      const exhausted = await recoverFulfillments();
+      assert.equal(exhausted.manualReview, 1,
+        `${label}: exhausting retries moves the paid order to manual review`);
+      const job = await inspectFulfillmentJob(order.body.order_id);
+      assert.equal(job.status, "MANUAL_REVIEW");
+      assert.equal(job.attempts, 8);
+      assert.equal(job.next_attempt_at, null);
+      assert.equal(job.lease_token, null);
+      assert.match(job.last_error_code, /^(DATABASE_ERROR|RANGE_ERROR|TYPE_ERROR|FULFILLMENT_FAILED)$/);
+      const stillPaid = await request(`/orders/${order.body.order_id}/status`, owner);
+      assert.equal(stillPaid.body.status, "FULFILLING");
+      assert.equal(stillPaid.body.payment.status, "SUCCEEDED");
+      await restorePublicationCreation(order.body.order_id);
+      const noFurtherRetry = await recoverFulfillments();
+      assert.equal(noFurtherRetry.attempted, 0,
+        `${label}: manual-review jobs stop automatic retries`);
+      assert.equal((await inspectFulfillmentJob(order.body.order_id)).status, "MANUAL_REVIEW");
+    }
   }
 
   const mismatchOrder = await createRequest(`mismatch-${randomUUID()}`);
@@ -890,6 +1060,9 @@ export async function runPaymentContract({
   assert.equal(overpaymentReview.body.status, expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW",
     `${label}: overpayment never marks an order paid`);
   if (expectedMode === "mock") assert.equal(overpaymentReview.body.payment.status, "PENDING");
+  if (assertRecoveryIgnoresOrder) {
+    await assertRecoveryIgnoresOrder(overpaymentOrder.body.order_id);
+  }
 
   const competingOrder = await createRequest(`competing-${randomUUID()}`);
   assert.equal(competingOrder.response.status, 201);
@@ -976,6 +1149,12 @@ export async function runPaymentContract({
     const cancelledStatus = await request(`/orders/${cancelledOrder.body.order_id}/status`, owner);
     assert.equal(cancelledStatus.body.status, expectedMode === "mock" ? "CANCELLED" : "MANUAL_REVIEW",
       `${label}: a late transfer cannot pay a cancelled order`);
+    if (assertRecoveryIgnoresOrder) {
+      await assertRecoveryIgnoresOrder(cancelledOrder.body.order_id);
+    }
+  }
+  if (assertRecoveryIgnoresOrder) {
+    await assertRecoveryIgnoresOrder(expiredOrder.body.order_id);
   }
 
   if (failOrderPayment && restoreOrderPayment && inspectWebhookEvent) {
@@ -1033,6 +1212,9 @@ export async function runPaymentContract({
   const outgoingReview = await request(`/orders/${outgoingOrder.body.order_id}/status`, owner);
   assert.equal(outgoingReview.body.status, expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW");
   if (expectedMode === "mock") assert.equal(outgoingReview.body.payment.status, "PENDING");
+  if (assertRecoveryIgnoresOrder) {
+    await assertRecoveryIgnoresOrder(outgoingOrder.body.order_id, true);
+  }
 
   const unmatchedPayload = JSON.stringify({
     id: Number(`${Date.now()}`.slice(-8)) + 6,
@@ -1116,6 +1298,46 @@ export async function runPaymentContract({
         asset_consents: [],
       }),
     });
+    if (setPublicationEntitlementStatus && countOrdersForDesign) {
+      const before = await countOrdersForDesign(designId);
+      await setPublicationEntitlementStatus(website.publication_id, "REVOKED");
+      const rejected = await submitRenewal("1-month");
+      assert.equal(rejected.response.status, 409,
+        `${label}: renewal requires a valid active or expired entitlement`);
+      assert.equal(rejected.body.error.code, "ENTITLEMENT_UNAVAILABLE");
+      assert.equal(await countOrdersForDesign(designId), before,
+        `${label}: invalid entitlement does not create a renewal order`);
+      await setPublicationEntitlementStatus(website.publication_id, "ACTIVE");
+    }
+    if (otherOwner && countOrdersForDesign) {
+      const before = await countOrdersForDesign(designId);
+      const foreignRenewal = await request("/orders", otherOwner, {
+        method: "POST",
+        mutating: true,
+        headers: { "Idempotency-Key": `foreign-renewal-${randomUUID()}` },
+        json: {
+          design_id: designId,
+          renewal_publication_id: website.publication_id,
+          duration_type: "monthly",
+          hosting_months: 1,
+        },
+      });
+      assert.equal(foreignRenewal.response.status, 404,
+        `${label}: a different customer cannot renew this publication`);
+      assert.equal(await countOrdersForDesign(designId), before,
+        `${label}: cross-owner renewal does not create an order`);
+    }
+    if (cancelOrder) {
+      const expiryBefore = (await request("/publications", owner)).body.websites
+        .find((item) => item.publication_id === website.publication_id)?.expires_at;
+      const unpaid = await submitRenewal("1-month");
+      assert.equal(unpaid.response.status, 201);
+      await cancelOrder(unpaid.body.order_id);
+      const expiryAfter = (await request("/publications", owner)).body.websites
+        .find((item) => item.publication_id === website.publication_id)?.expires_at;
+      assert.equal(expiryAfter, expiryBefore,
+        `${label}: unpaid/cancelled renewal does not extend persisted publication expiry`);
+    }
     const addMonths = (value, months) => {
       const start = new Date(value);
       const day = start.getUTCDate();
@@ -1157,6 +1379,55 @@ export async function runPaymentContract({
       assert.equal(status.body.status, "FULFILLED", `${label}: renewal fulfillment completes`);
       return { options };
     };
+
+    if (failPublicationPublishing && restorePublicationPublishing &&
+        inspectFulfillmentJob && inspectEntitlement && inspectPublicationIdentity &&
+        makeFulfillmentJobDue && recoverFulfillments) {
+      const currentPublication = await request(`/publications/${website.publication_id}`, owner);
+      assert.equal(currentPublication.response.status, 200);
+      const unpublish = await request(`/publications/${website.publication_id}/unpublish`, owner, {
+        method: "POST",
+        mutating: true,
+        json: { expected_lifecycle_revision: currentPublication.body.lifecycle_revision },
+      });
+      assert.equal(unpublish.response.status, 200);
+
+      const renewal = await submitRenewal("1-month");
+      assert.equal(renewal.response.status, 201);
+      await failPublicationPublishing(renewal.body.order_id);
+      const paymentOptions = makeRenewalPayment(renewal);
+      const firstDelivery = await request("/payments/sepay/webhook", null, paymentOptions);
+      assert.equal(firstDelivery.response.status, 200);
+      const failedJob = await inspectFulfillmentJob(renewal.body.order_id);
+      assert.equal(failedJob.status, "FAILED");
+      const entitlementBeforeRetry = await inspectEntitlement(renewal.body.order_id);
+      assert.equal(entitlementBeforeRetry.status, "ACTIVE",
+        `${label}: entitlement is durably recorded before publication retry`);
+      const replay = await request("/payments/sepay/webhook", null, paymentOptions);
+      assert.equal(replay.response.status, 200);
+      assert.deepEqual(await inspectEntitlement(renewal.body.order_id), entitlementBeforeRetry,
+        `${label}: webhook replay does not apply the renewal twice`);
+
+      const stillPaid = await request(`/orders/${renewal.body.order_id}/status`, owner);
+      assert.equal(stillPaid.body.status, "FULFILLING");
+      assert.equal(stillPaid.body.payment.status, "SUCCEEDED");
+      const publicationBeforeRetry = await inspectPublicationIdentity(renewal.body.order_id);
+      assert.deepEqual(publicationBeforeRetry, {
+        id: website.publication_id,
+        slug: new URL(currentPublication.body.url).pathname.split("/").at(-1),
+      });
+
+      await restorePublicationPublishing(renewal.body.order_id);
+      await makeFulfillmentJobDue(renewal.body.order_id);
+      const recovered = await recoverFulfillments();
+      assert.equal(recovered.completed, 1);
+      assert.equal((await request(`/orders/${renewal.body.order_id}/status`, owner)).body.status, "FULFILLED");
+      assert.deepEqual(await inspectEntitlement(renewal.body.order_id), entitlementBeforeRetry,
+        `${label}: recovery reuses the entitlement without extending it twice`);
+      assert.deepEqual(await inspectPublicationIdentity(renewal.body.order_id), publicationBeforeRetry,
+        `${label}: renewal retry preserves the publication identity and URL`);
+      await setPublicationExpiry(website.publication_id, "2099-01-31T12:00:00.000Z");
+    }
 
     const concurrentKey = randomUUID();
     const [renewalA, renewalB] = await Promise.all([

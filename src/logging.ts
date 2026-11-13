@@ -15,6 +15,7 @@ export interface SafeLogContext {
     erased?: number;
     retryable?: number;
     completed?: number;
+    manual_review?: number;
   };
 }
 
@@ -36,7 +37,7 @@ const safeCategories = new Set<LogCategory>([
   "payment",
   "storage",
 ]);
-const safeCountKeys = ["expired", "erased", "retryable", "completed"] as const;
+const safeCountKeys = ["expired", "erased", "retryable", "completed", "manual_review"] as const;
 const eventPattern = /^[a-z][a-z0-9._-]{0,80}$/;
 
 function errorType(error: unknown): string {

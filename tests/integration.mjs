@@ -587,6 +587,22 @@ try {
           WHERE publication_id = '${publicationId}' AND status IN ('ACTIVE','EXPIRED')`,
       );
     },
+    setPublicationEntitlementStatus(publicationId, status) {
+      if (!["ACTIVE", "REVOKED"].includes(status)) throw new Error("Unexpected synthetic entitlement status");
+      executeLocalD1(
+        `UPDATE storage_entitlements SET status = '${status}'
+          WHERE id = (
+            SELECT id FROM storage_entitlements WHERE publication_id = '${publicationId}'
+            ORDER BY created_at DESC, id DESC LIMIT 1
+          )`,
+      );
+    },
+    countOrdersForDesign(designId) {
+      const rows = queryLocalD1(
+        `SELECT COUNT(*) AS count FROM orders WHERE design_id = '${designId}'`,
+      );
+      return Number(rows[0]?.count ?? 0);
+    },
     deactivateTemplatePrice() {
       executeLocalD1(
         "UPDATE template_prices SET is_active = 0 WHERE template_id = 'our-universe' AND schema_version = 1",
@@ -964,11 +980,14 @@ try {
   });
   assert.equal(expiredPreview.status, 404);
 
+  executeLocalD1(
+    `UPDATE orders SET status = 'FULFILLED' WHERE id = '${paidOrderId}'`,
+  );
   const deletedDesign = await json(`/designs/${designId}`, first, {
     method: "DELETE",
     mutating: true,
   });
-  assert.equal(deletedDesign.response.status, 200);
+  assert.equal(deletedDesign.response.status, 202);
   const goneDesign = await json(`/designs/${designId}`, first);
   assert.equal(goneDesign.response.status, 404);
 
@@ -1029,11 +1048,14 @@ try {
   assert.equal(liveDeletionPublication.response.status, 200);
   const deletionPublicImagePath = liveDeletionPublication.body.data.photos[0].url;
   assert.equal((await fetch(origin + deletionPublicImagePath)).status, 200);
+  executeLocalD1(
+    `UPDATE orders SET status = 'FULFILLED' WHERE id = '${deletionOrderId}'`,
+  );
   const removedPublishedDesign = await json(`/designs/${deletionDesignId}`, first, {
     method: "DELETE",
     mutating: true,
   });
-  assert.equal(removedPublishedDesign.response.status, 200);
+  assert.equal(removedPublishedDesign.response.status, 202);
   assert.equal((await json(`/publications/${deletionPublicationSlug}`, null)).response.status, 404);
   assert.equal((await fetch(origin + deletionPublicImagePath)).status, 404);
   const deletionState = queryLocalD1(
@@ -1046,11 +1068,11 @@ try {
       WHERE d.id = '${deletionDesignId}'`,
   );
   assert.equal(deletionState.length, 1);
-  assert.equal(deletionState[0].design_status, "ARCHIVED");
-  assert.equal(deletionState[0].publication_status, "REVOKED");
+  assert.equal(deletionState[0].design_status, "DELETION_PENDING");
+  assert.equal(deletionState[0].publication_status, "UNPUBLISHED");
   assert.equal(deletionState[0].derivative_status, "DELETED");
   assert.equal(deletionState[0].derivative_key, null);
-  assert.equal(deletionState[0].asset_status, "DELETED");
+  assert.equal(deletionState[0].asset_status, "READY");
 
   const revoked = await json("/customers/session", first, {
     method: "DELETE",
@@ -1122,6 +1144,87 @@ try {
     { method: "POST", mutating: true },
   );
   assert.equal(completedRetry.response.status, 200);
+  const retriedAssetCount = queryLocalD1(
+    `SELECT COUNT(*) AS count FROM assets
+      WHERE id = '${failedUpload.grant.asset_id}' AND status = 'READY'`,
+  );
+  assert.equal(retriedAssetCount[0].count, 1, "retry reuses the original asset row");
+
+  const uploadDeletionRaceDesign = await contractRequest("/designs", contract.owner, {
+    method: "POST",
+    mutating: true,
+    json: { template_id: "our-universe", schema_version: 1 },
+  });
+  assert.equal(uploadDeletionRaceDesign.response.status, 201);
+  const uploadDeletionRaceGrant = await contractRequest("/assets/upload-url", contract.owner, {
+    method: "POST",
+    mutating: true,
+    json: {
+      design_id: uploadDeletionRaceDesign.body.design_id,
+      media_type: "image/png",
+      size: makePng().length,
+    },
+  });
+  assert.equal(uploadDeletionRaceGrant.response.status, 201);
+  executeLocalD1(
+    `UPDATE asset_upload_sessions
+        SET status = 'UPLOADING', used_at = '2026-11-14T00:00:00.000Z',
+            lease_expires_at = '2099-01-01T00:00:00.000Z'
+      WHERE asset_id = '${uploadDeletionRaceGrant.body.asset_id}'`,
+  );
+  const activeUploadDelete = await contractRequest(
+    `/designs/${uploadDeletionRaceDesign.body.design_id}`,
+    contract.owner,
+    { method: "DELETE", mutating: true },
+  );
+  assert.equal(activeUploadDelete.response.status, 409);
+  assert.equal(queryLocalD1(
+    `SELECT status FROM designs WHERE id = '${uploadDeletionRaceDesign.body.design_id}'`,
+  )[0].status, "DRAFT");
+  executeLocalD1(
+    `UPDATE asset_upload_sessions
+        SET lease_expires_at = '2000-01-01T00:00:00.000Z'
+      WHERE asset_id = '${uploadDeletionRaceGrant.body.asset_id}'`,
+  );
+  const expiredUploadDelete = await contractRequest(
+    `/designs/${uploadDeletionRaceDesign.body.design_id}`,
+    contract.owner,
+    { method: "DELETE", mutating: true },
+  );
+  assert.equal(expiredUploadDelete.response.status, 200);
+  const cancelledUpload = await fetch(origin + uploadDeletionRaceGrant.body.upload_url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${uploadDeletionRaceGrant.body.upload_token}`,
+      "Content-Type": "image/png",
+    },
+    body: makePng(),
+  });
+  assert.equal(cancelledUpload.status, 409);
+  const archivedUploadDesign = await contractRequest(
+    "/assets/upload-url",
+    contract.owner,
+    {
+      method: "POST",
+      mutating: true,
+      json: {
+        design_id: uploadDeletionRaceDesign.body.design_id,
+        media_type: "image/png",
+        size: makePng().length,
+      },
+    },
+  );
+  assert.equal(archivedUploadDesign.response.status, 404);
+  assert.deepEqual(queryLocalD1(
+    `SELECT d.status AS design_status, a.status AS asset_status, u.status AS upload_status
+       FROM designs d JOIN assets a ON a.design_id = d.id
+       JOIN asset_upload_sessions u ON u.asset_id = a.id
+      WHERE d.id = '${uploadDeletionRaceDesign.body.design_id}'`,
+  )[0], {
+    design_status: "ARCHIVED",
+    asset_status: "DELETED",
+    upload_status: "CANCELLED",
+  });
 
   const rollbackDesign = await contractRequest("/designs", contract.owner, {
     method: "POST",

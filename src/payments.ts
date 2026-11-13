@@ -361,7 +361,7 @@ async function createOrder(
     ? await env.DB.prepare(
       `SELECT p.id, p.design_id, p.status, p.expires_at,
          (SELECT e.status FROM storage_entitlements e
-          WHERE e.publication_id = p.id ORDER BY e.created_at DESC LIMIT 1) AS entitlement_status
+          WHERE e.publication_id = p.id ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS entitlement_status
        FROM publications p
        JOIN designs d ON d.id = p.design_id AND d.customer_id = ?
        WHERE p.id = ? AND p.status IN ('PUBLISHED','UNPUBLISHED','EXPIRED')
@@ -377,7 +377,7 @@ async function createOrder(
     : await env.DB.prepare(
       `SELECT p.id, p.design_id, p.status, p.expires_at,
          (SELECT e.status FROM storage_entitlements e
-          WHERE e.publication_id = p.id ORDER BY e.created_at DESC LIMIT 1) AS entitlement_status
+          WHERE e.publication_id = p.id ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS entitlement_status
        FROM publications p
        JOIN designs d ON d.id = p.design_id AND d.customer_id = ?
        WHERE d.id = ? AND p.status IN ('PUBLISHED','UNPUBLISHED','EXPIRED')
@@ -396,6 +396,12 @@ async function createOrder(
   }
   if (renewal?.entitlement_status === "LIFETIME") {
     return apiError(requestId, 409, "LIFETIME_ACTIVE", "Lifetime storage does not require renewal");
+  }
+  if (renewalPublicationId &&
+      renewal?.entitlement_status !== "ACTIVE" &&
+      renewal?.entitlement_status !== "EXPIRED") {
+    return apiError(requestId, 409, "ENTITLEMENT_UNAVAILABLE",
+      "A renewable storage entitlement is required");
   }
   if (renewalPublicationId && term.type === "lifetime" && !localFixturePricing) {
     return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Lifetime upgrades are not available for renewal");
@@ -656,6 +662,16 @@ async function createOrder(
              WHERE renewal.id = ? AND renewal.design_id = d.id
                AND renewal.status IN ('PUBLISHED','UNPUBLISHED','EXPIRED')
                AND (renewal.retention_delete_after_at IS NULL OR renewal.retention_delete_after_at > ?)
+               AND EXISTS (
+                 SELECT 1 FROM storage_entitlements entitlement
+                 WHERE entitlement.publication_id = renewal.id
+                   AND entitlement.status IN ('ACTIVE','EXPIRED')
+                   AND entitlement.id = (
+                     SELECT latest.id FROM storage_entitlements latest
+                     WHERE latest.publication_id = renewal.id
+                     ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1
+                   )
+               )
            ))
        )`,
     ).bind(orderId, ownerId, "VND", amount, amount, design.id, renewalPublicationId,

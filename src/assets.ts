@@ -5,6 +5,8 @@ import { serveAsset } from "./designs.ts";
 import type { Env } from "./types.ts";
 import { assetReferences, type TemplateData } from "./template-registry.ts";
 
+const UPLOAD_LEASE_MS = 15 * 60 * 1000;
+
 interface ImageInfo {
   contentType: "image/png" | "image/jpeg";
   width: number;
@@ -115,22 +117,57 @@ async function createUpload(
   }
 
   const id = safeId();
+  const uploadSessionId = safeId();
   const key = `private/${randomToken(32)}-${mediaType === "image/png" ? "png" : "jpg"}`;
   const token = randomToken();
   const now = nowIso();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-  await env.DB.batch([
+  const inserted = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO assets
        (id, customer_id, design_id, object_key, visibility, status, media_type, byte_size, sha256, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'PRIVATE', 'PENDING', ?, ?, '', ?, ?)`,
-    ).bind(id, required.session!.customerId, designId, key, mediaType, size, now, now),
+       SELECT ?, ?, ?, ?, 'PRIVATE', 'PENDING', ?, ?, '', ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM designs
+         WHERE id = ? AND customer_id = ? AND status = 'DRAFT'
+       )
+       AND (
+         SELECT COUNT(*) FROM assets
+         WHERE design_id = ? AND customer_id = ?
+           AND status IN ('PENDING','QUARANTINED','READY')
+       ) < ?`,
+    ).bind(
+      id, required.session!.customerId, designId, key, mediaType, size, now, now,
+      designId, required.session!.customerId, designId, required.session!.customerId, maxAssets,
+    ),
     env.DB.prepare(
       `INSERT INTO asset_upload_sessions
-       (id, asset_id, customer_id, token_hash, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(safeId(), id, required.session!.customerId, await sha256(token), expiresAt, now),
+       (id, asset_id, customer_id, token_hash, expires_at, created_at, status)
+       SELECT ?, ?, ?, ?, ?, ?, 'PENDING'
+       WHERE EXISTS (
+         SELECT 1 FROM assets
+         WHERE id = ? AND customer_id = ? AND design_id = ? AND status = 'PENDING'
+       )
+       AND EXISTS (
+         SELECT 1 FROM designs
+         WHERE id = ? AND customer_id = ? AND status = 'DRAFT'
+       )`,
+    ).bind(
+      uploadSessionId, id, required.session!.customerId, await sha256(token), expiresAt, now,
+      id, required.session!.customerId, designId, designId, required.session!.customerId,
+    ),
+    env.DB.prepare(
+      `DELETE FROM assets
+       WHERE id = ? AND status = 'PENDING'
+         AND NOT EXISTS (
+           SELECT 1 FROM asset_upload_sessions WHERE asset_id = ?
+         )`,
+    ).bind(id, id),
   ]);
+  if (inserted[0]?.meta.changes !== 1 || inserted[1]?.meta.changes !== 1) {
+    return apiError(requestId, 409, "DESIGN_CHANGED",
+      "This design is no longer available for uploads. Reopen an active draft and try again.");
+  }
   return jsonResponse({
     asset_id: id,
     upload_url: `/api/v1/assets/${id}/content`,
@@ -151,18 +188,32 @@ async function uploadContent(
   const token = bearerToken(request);
   if (!token) return apiError(requestId, 401, "UNAUTHENTICATED", "Valid upload capability required");
   const session = await env.DB.prepare(
-    `SELECT u.id AS upload_id, u.customer_id, a.object_key, a.media_type, a.byte_size
+    `SELECT u.id AS upload_id, u.customer_id, u.status AS upload_status, u.expires_at,
+            a.object_key, a.media_type, a.byte_size, a.status AS asset_status,
+            d.status AS design_status
      FROM asset_upload_sessions u JOIN assets a ON a.id = u.asset_id
-     WHERE u.asset_id = ? AND u.token_hash = ? AND u.used_at IS NULL
-       AND u.expires_at > ? AND a.status = 'PENDING'`,
-  ).bind(assetId, await sha256(token), nowIso()).first<{
+     JOIN designs d ON d.id = a.design_id
+     WHERE u.asset_id = ? AND u.token_hash = ?`,
+  ).bind(assetId, await sha256(token)).first<{
     upload_id: string;
     customer_id: string;
+    upload_status: string;
+    expires_at: string;
     object_key: string;
     media_type: string;
     byte_size: number;
+    asset_status: string;
+    design_status: string;
   }>();
   if (!session) return apiError(requestId, 401, "INVALID_UPLOAD_TOKEN", "Upload capability is invalid or expired");
+  if (session.upload_status !== "PENDING" || session.asset_status !== "PENDING" ||
+      session.design_status !== "DRAFT") {
+    return apiError(requestId, 409, "UPLOAD_CANCELLED",
+      "This upload was cancelled because its design is no longer an active draft.");
+  }
+  if (session.expires_at <= nowIso()) {
+    return apiError(requestId, 401, "INVALID_UPLOAD_TOKEN", "Upload capability is invalid or expired");
+  }
   const declaredLength = Number(request.headers.get("content-length") ?? 0);
   const maxBytes = uploadMaxBytes(env);
   if (session.byte_size > maxBytes || declaredLength > maxBytes ||
@@ -188,12 +239,22 @@ async function uploadContent(
   }
 
   const now = nowIso();
+  const leaseExpiresAt = new Date(Date.now() + UPLOAD_LEASE_MS).toISOString();
   const claimed = await env.DB.prepare(
-    `UPDATE asset_upload_sessions SET used_at = ?
-     WHERE id = ? AND used_at IS NULL AND expires_at > ?
+    `UPDATE asset_upload_sessions
+     SET status = 'UPLOADING', used_at = ?, lease_expires_at = ?
+     WHERE id = ? AND status = 'PENDING' AND used_at IS NULL AND expires_at > ?
+       AND EXISTS (
+         SELECT 1 FROM assets a JOIN designs d ON d.id = a.design_id
+         WHERE a.id = asset_upload_sessions.asset_id AND a.customer_id = ?
+           AND a.status = 'PENDING' AND d.status = 'DRAFT'
+       )
      RETURNING id`,
-  ).bind(now, session.upload_id, now).first<{ id: string }>();
-  if (!claimed) return apiError(requestId, 409, "UPLOAD_ALREADY_USED", "Upload capability has already been used");
+  ).bind(now, leaseExpiresAt, session.upload_id, now, session.customer_id).first<{ id: string }>();
+  if (!claimed) {
+    return apiError(requestId, 409, "UPLOAD_CANCELLED",
+      "This upload was cancelled because its design changed or was deleted.");
+  }
 
   const digest = await sha256(bytes);
   try {
@@ -203,12 +264,35 @@ async function uploadContent(
       width: info.width,
       height: info.height,
     });
-    const stored = await env.DB.prepare(
-      `UPDATE assets
-       SET sha256 = ?, width = ?, height = ?, status = 'QUARANTINED', updated_at = ?
-       WHERE id = ? AND customer_id = ? AND status = 'PENDING'`,
-    ).bind(digest, info.width, info.height, nowIso(), assetId, session.customer_id).run();
-    if (stored.meta.changes !== 1) throw new Error("Uploaded asset metadata could not be persisted");
+    const finalizedAt = nowIso();
+    const finalized = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE assets
+         SET sha256 = ?, width = ?, height = ?, status = 'QUARANTINED', updated_at = ?
+         WHERE id = ? AND customer_id = ? AND status = 'PENDING'
+           AND EXISTS (
+             SELECT 1 FROM designs
+             WHERE id = assets.design_id AND customer_id = ? AND status = 'DRAFT'
+           )
+           AND EXISTS (
+             SELECT 1 FROM asset_upload_sessions
+             WHERE asset_id = assets.id AND status = 'UPLOADING' AND lease_expires_at > ?
+           )`,
+      ).bind(digest, info.width, info.height, finalizedAt, assetId, session.customer_id,
+        session.customer_id, finalizedAt),
+      env.DB.prepare(
+        `UPDATE asset_upload_sessions SET status = 'COMPLETE', lease_expires_at = NULL
+         WHERE id = ? AND status = 'UPLOADING' AND lease_expires_at > ?
+           AND EXISTS (
+             SELECT 1 FROM assets a JOIN designs d ON d.id = a.design_id
+             WHERE a.id = asset_upload_sessions.asset_id AND a.status = 'QUARANTINED'
+               AND d.status = 'DRAFT'
+           )`,
+      ).bind(session.upload_id, finalizedAt),
+    ]);
+    if (finalized[0]?.meta.changes !== 1 || finalized[1]?.meta.changes !== 1) {
+      throw new Error("Uploaded asset metadata could not be persisted for the active design");
+    }
   } catch (error) {
     let binaryRemoved = false;
     try {
@@ -220,26 +304,76 @@ async function uploadContent(
         environment: env.ENVIRONMENT,
       });
     }
-    if (binaryRemoved) {
-      await env.DB.prepare("UPDATE asset_upload_sessions SET used_at = NULL WHERE id = ?")
-        .bind(session.upload_id).run();
-    } else {
-      try {
-        await env.DB.prepare(
-          "UPDATE assets SET status = 'DELETION_PENDING', updated_at = ? WHERE id = ? AND status = 'PENDING'",
-        ).bind(nowIso(), assetId).run();
-      } catch (stateError) {
-        logSafeError("asset.incomplete_upload_state_update_failed", "database", stateError, {
-          request_id: requestId,
-          environment: env.ENVIRONMENT,
-        });
+    try {
+      if (binaryRemoved) {
+        await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE assets
+             SET status = 'PENDING', sha256 = '', width = NULL, height = NULL, updated_at = ?
+             WHERE id = ? AND customer_id = ? AND status IN ('PENDING','QUARANTINED')
+               AND EXISTS (
+                 SELECT 1 FROM designs
+                 WHERE id = assets.design_id AND customer_id = ? AND status = 'DRAFT'
+               )
+               AND EXISTS (
+                 SELECT 1 FROM asset_upload_sessions
+                 WHERE asset_id = assets.id AND status IN ('UPLOADING','COMPLETE')
+               )`,
+          ).bind(nowIso(), assetId, session.customer_id, session.customer_id),
+          env.DB.prepare(
+            `UPDATE asset_upload_sessions
+             SET status = 'PENDING', used_at = NULL, lease_expires_at = NULL
+             WHERE id = ? AND status IN ('UPLOADING','COMPLETE')
+               AND EXISTS (
+                 SELECT 1 FROM assets a JOIN designs d ON d.id = a.design_id
+                 WHERE a.id = asset_upload_sessions.asset_id AND a.status = 'PENDING'
+                   AND d.status = 'DRAFT'
+               )`,
+          ).bind(session.upload_id),
+          env.DB.prepare(
+            `UPDATE assets SET status = 'DELETION_PENDING', updated_at = ?
+             WHERE id = ? AND customer_id = ? AND status IN ('PENDING','QUARANTINED')
+               AND EXISTS (
+                 SELECT 1 FROM designs
+                 WHERE id = assets.design_id AND customer_id = ? AND status <> 'DRAFT'
+               )`,
+          ).bind(nowIso(), assetId, session.customer_id, session.customer_id),
+          env.DB.prepare(
+            `UPDATE asset_upload_sessions SET status = 'CANCELLED', lease_expires_at = NULL
+             WHERE id = ? AND status IN ('UPLOADING','COMPLETE')
+               AND EXISTS (
+                 SELECT 1 FROM designs d JOIN assets a ON a.design_id = d.id
+                 WHERE a.id = asset_upload_sessions.asset_id AND d.status <> 'DRAFT'
+               )`,
+          ).bind(session.upload_id),
+        ]);
+      } else {
+        await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE assets SET status = 'DELETION_PENDING', updated_at = ?
+             WHERE id = ? AND customer_id = ? AND status IN ('PENDING','QUARANTINED')`,
+          ).bind(nowIso(), assetId, session.customer_id),
+          env.DB.prepare(
+            `UPDATE asset_upload_sessions SET status = 'CANCELLED', lease_expires_at = NULL
+             WHERE id = ? AND status IN ('UPLOADING','COMPLETE')`,
+          ).bind(session.upload_id),
+        ]);
       }
+    } catch (stateError) {
+      logSafeError("asset.incomplete_upload_state_update_failed", "database", stateError, {
+        request_id: requestId,
+        environment: env.ENVIRONMENT,
+      });
     }
     logSafeError("asset.upload_failed", "storage", error, {
       request_id: requestId,
       environment: env.ENVIRONMENT,
     });
-    return apiError(requestId, 502, "UPLOAD_FAILED", "Image upload failed; retry the upload");
+    return apiError(requestId, binaryRemoved ? 502 : 503,
+      binaryRemoved ? "UPLOAD_FAILED" : "UPLOAD_CLEANUP_PENDING",
+      binaryRemoved
+        ? "The image could not be saved. You can safely retry the upload."
+        : "The image was not saved and cleanup is pending; retry removing this photo before uploading again.");
   }
   return new Response(null, {
     status: 204,
@@ -259,8 +393,11 @@ async function completeUpload(
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
   const asset = await env.DB.prepare(
-    `SELECT object_key, media_type, byte_size, sha256, width, height, status
-     FROM assets WHERE id = ? AND customer_id = ?`,
+    `SELECT a.object_key, a.media_type, a.byte_size, a.sha256, a.width, a.height,
+            a.status, d.status AS design_status, u.status AS upload_status
+     FROM assets a JOIN designs d ON d.id = a.design_id
+     LEFT JOIN asset_upload_sessions u ON u.asset_id = a.id
+     WHERE a.id = ? AND a.customer_id = ?`,
   ).bind(assetId, required.session!.customerId).first<{
     object_key: string;
     media_type: string;
@@ -269,9 +406,15 @@ async function completeUpload(
     width: number | null;
     height: number | null;
     status: string;
+    design_status: string;
+    upload_status: string | null;
   }>();
   if (!asset) return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
-  if (asset.status !== "QUARANTINED") return apiError(requestId, 409, "UPLOAD_NOT_READY", "Upload content is not ready");
+  if (asset.status !== "QUARANTINED" || asset.upload_status !== "COMPLETE" ||
+      asset.design_status !== "DRAFT") {
+    return apiError(requestId, 409, "UPLOAD_CANCELLED",
+      "This upload cannot be finalized because its design is no longer an active draft.");
+  }
   const object = await env.STORAGE.get(asset.object_key);
   if (!object || object.size !== asset.byte_size || object.contentType !== asset.media_type) {
     return apiError(requestId, 409, "UPLOAD_NOT_READY", "Uploaded image is unavailable");
@@ -281,16 +424,40 @@ async function completeUpload(
   if (!info || info.contentType !== asset.media_type || await sha256(bytes) !== asset.sha256 ||
       info.width !== asset.width || info.height !== asset.height) {
     await env.STORAGE.delete(asset.object_key);
-    await env.DB.prepare(
-      "UPDATE assets SET status = 'REJECTED', updated_at = ? WHERE id = ? AND customer_id = ?",
-    ).bind(nowIso(), assetId, required.session!.customerId).run();
+    const rejected = await env.DB.prepare(
+      `UPDATE assets SET status = 'REJECTED', updated_at = ?
+       WHERE id = ? AND customer_id = ? AND status = 'QUARANTINED'
+         AND EXISTS (
+           SELECT 1 FROM designs
+           WHERE id = assets.design_id AND customer_id = ? AND status = 'DRAFT'
+         )
+         AND EXISTS (
+           SELECT 1 FROM asset_upload_sessions
+           WHERE asset_id = assets.id AND status = 'COMPLETE'
+         )`,
+    ).bind(nowIso(), assetId, required.session!.customerId, required.session!.customerId).run();
+    if (rejected.meta.changes !== 1) {
+      return apiError(requestId, 409, "UPLOAD_CANCELLED",
+        "This upload was cancelled because its design changed or was deleted.");
+    }
     return apiError(requestId, 422, "UPLOAD_REJECTED", "Uploaded image failed verification");
   }
   const result = await env.DB.prepare(
     `UPDATE assets SET status = 'READY', updated_at = ?
-     WHERE id = ? AND customer_id = ? AND status = 'QUARANTINED'`,
-  ).bind(nowIso(), assetId, required.session!.customerId).run();
-  if (result.meta.changes !== 1) return apiError(requestId, 409, "CONFLICT", "Upload state changed");
+     WHERE id = ? AND customer_id = ? AND status = 'QUARANTINED'
+       AND EXISTS (
+         SELECT 1 FROM designs
+         WHERE id = assets.design_id AND customer_id = ? AND status = 'DRAFT'
+       )
+       AND EXISTS (
+         SELECT 1 FROM asset_upload_sessions
+         WHERE asset_id = assets.id AND status = 'COMPLETE'
+       )`,
+  ).bind(nowIso(), assetId, required.session!.customerId, required.session!.customerId).run();
+  if (result.meta.changes !== 1) {
+    return apiError(requestId, 409, "UPLOAD_CANCELLED",
+      "This upload was cancelled because its design changed or was deleted.");
+  }
   return jsonResponse({
     asset_id: assetId,
     media_type: asset.media_type,
@@ -313,18 +480,39 @@ async function deleteAsset(
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
   const asset = await env.DB.prepare(
-    `SELECT a.object_key, a.design_id, a.status, d.data_json, d.template_id
+    `SELECT a.object_key, a.design_id, a.status, d.data_json, d.template_id,
+            EXISTS (
+              SELECT 1 FROM asset_upload_sessions u
+              WHERE u.asset_id = a.id AND u.status = 'UPLOADING'
+                AND u.lease_expires_at > ?
+            ) AS upload_in_progress
      FROM assets a JOIN designs d ON d.id = a.design_id
      WHERE a.id = ? AND a.customer_id = ?`,
-  ).bind(assetId, required.session!.customerId).first<{
+  ).bind(nowIso(), assetId, required.session!.customerId).first<{
     object_key: string;
     design_id: string;
     status: string;
     data_json: string;
     template_id: string;
+    upload_in_progress: number;
   }>();
   if (!asset) return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
-  if (asset.status === "DELETED") return jsonResponse({ deleted: true }, 200, requestId);
+  if (asset.status === "DELETED") {
+    try {
+      await env.STORAGE.delete(asset.object_key);
+    } catch (error) {
+      logSafeError("asset.deletion_failed", "storage", error, {
+        request_id: requestId,
+        environment: env.ENVIRONMENT,
+      });
+      return apiError(requestId, 503, "DELETION_PENDING", "Asset deletion will be retried");
+    }
+    return jsonResponse({ deleted: true }, 200, requestId);
+  }
+  if (asset.upload_in_progress) {
+    return apiError(requestId, 409, "UPLOAD_IN_PROGRESS",
+      "This photo is still uploading. Try removing it again after the upload finishes.");
+  }
   if (asset.status === "READY") {
     const design = JSON.parse(asset.data_json) as TemplateData;
     if (assetReferences(asset.template_id, design).includes(assetId)) {
@@ -340,9 +528,38 @@ async function deleteAsset(
   if (activeConsent) {
     return apiError(requestId, 409, "ASSET_IN_USE", "Revoke publication consent before deleting this photo");
   }
-  await env.DB.prepare(
-    "UPDATE assets SET status = 'DELETION_PENDING', updated_at = ? WHERE id = ? AND customer_id = ?",
-  ).bind(nowIso(), assetId, required.session!.customerId).run();
+  const claimTime = nowIso();
+  const deletionClaim = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE assets SET status = 'DELETION_PENDING', updated_at = ?
+       WHERE id = ? AND customer_id = ? AND status = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM asset_upload_sessions
+           WHERE asset_id = assets.id AND status = 'UPLOADING'
+             AND lease_expires_at > ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM publication_assets pa
+           JOIN publications p ON p.id = pa.publication_id
+           WHERE pa.asset_id = assets.id AND pa.revoked_at IS NULL
+             AND p.status IN ('PUBLISHED','UNPUBLISHED')
+         )`,
+    ).bind(claimTime, assetId, required.session!.customerId, asset.status, claimTime),
+    env.DB.prepare(
+      `UPDATE asset_upload_sessions
+       SET status = 'CANCELLED', lease_expires_at = NULL, used_at = COALESCE(used_at, ?)
+       WHERE asset_id = ? AND status IN ('PENDING','UPLOADING')
+         AND (status = 'PENDING' OR lease_expires_at <= ?)
+         AND EXISTS (
+           SELECT 1 FROM assets
+           WHERE id = ? AND customer_id = ? AND status = 'DELETION_PENDING'
+         )`,
+    ).bind(claimTime, assetId, claimTime, assetId, required.session!.customerId),
+  ]);
+  if (deletionClaim[0]?.meta.changes !== 1) {
+    return apiError(requestId, 409, "ASSET_IN_USE",
+      "This photo changed or is still in use; reload the design before removing it.");
+  }
   try {
     await env.STORAGE.delete(asset.object_key);
   } catch (error) {
@@ -353,14 +570,23 @@ async function deleteAsset(
     return apiError(requestId, 503, "DELETION_PENDING", "Asset deletion will be retried");
   }
   const now = nowIso();
-  await env.DB.batch([
+  const finalized = await env.DB.batch([
     env.DB.prepare(
-      "UPDATE assets SET status = 'DELETED', deleted_at = ?, updated_at = ? WHERE id = ? AND customer_id = ?",
+      `UPDATE assets SET status = 'DELETED', deleted_at = ?, updated_at = ?
+       WHERE id = ? AND customer_id = ? AND status = 'DELETION_PENDING'`,
     ).bind(now, now, assetId, required.session!.customerId),
     env.DB.prepare(
       "UPDATE preview_tokens SET revoked_at = ? WHERE design_id = ? AND revoked_at IS NULL",
     ).bind(now, asset.design_id),
   ]);
+  if (finalized[0]?.meta.changes !== 1) {
+    const current = await env.DB.prepare(
+      "SELECT status FROM assets WHERE id = ? AND customer_id = ?",
+    ).bind(assetId, required.session!.customerId).first<{ status: string }>();
+    if (current?.status !== "DELETED") {
+      return apiError(requestId, 503, "DELETION_PENDING", "Asset deletion will be retried");
+    }
+  }
   return jsonResponse({ deleted: true }, 200, requestId);
 }
 

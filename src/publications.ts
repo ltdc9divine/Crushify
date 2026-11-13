@@ -27,6 +27,44 @@ import type { Env } from "./types.ts";
 const CONSENT_VERSION = "public-image-v1";
 const SLUG_PATTERN = /^g[A-Za-z0-9_-]{20,40}$/;
 const ID_PATTERN = /^[0-9a-f-]{36}$/i;
+const FULFILLMENT_LEASE_MS = 5 * 60_000;
+const FULFILLMENT_MAX_ATTEMPTS = 8;
+const FULFILLMENT_BASE_BACKOFF_MS = 30_000;
+const FULFILLMENT_MAX_BACKOFF_MS = 60 * 60_000;
+
+function verifiedFulfillmentOrder(orderId: string): string {
+  return `EXISTS (
+    SELECT 1 FROM orders o
+    JOIN payments payment ON payment.order_id = o.id AND payment.provider = 'SEPAY'
+    JOIN payment_webhook_events webhook ON webhook.provider = payment.provider
+      AND webhook.event_id = payment.provider_payment_id AND webhook.outcome = 'PROCESSED'
+    WHERE o.id = ${orderId} AND o.order_type = 'SELF_SERVICE'
+      AND o.status IN ('PAID','FULFILLING') AND o.paid_at IS NOT NULL
+      AND o.payment_review_required = 0
+      AND payment.status = 'SUCCEEDED' AND payment.review_required = 0
+      AND payment.provider_payment_id IS NOT NULL AND payment.provider_payment_id <> ''
+      AND payment.succeeded_at IS NOT NULL
+      AND payment.amount_minor = o.total_minor AND payment.currency = o.currency
+  )`;
+}
+
+function fulfillmentFailureCode(error: unknown): string {
+  if (error instanceof DatabaseError) return "DATABASE_ERROR";
+  if (error instanceof RangeError) return "RANGE_ERROR";
+  if (error instanceof TypeError) return "TYPE_ERROR";
+  return "FULFILLMENT_FAILED";
+}
+
+function fulfillmentBackoffMs(attempts: number): number {
+  const exponent = Math.min(Math.max(attempts - 1, 0), 20);
+  return Math.min(FULFILLMENT_MAX_BACKOFF_MS, FULFILLMENT_BASE_BACKOFF_MS * 2 ** exponent);
+}
+
+export interface FulfillmentResult {
+  completed: boolean;
+  retryable: boolean;
+  manualReview?: boolean;
+}
 
 interface EligibleOrder {
   order_id: string;
@@ -362,7 +400,7 @@ async function loadOwnedPublication(
   ).bind(customerId, publicationId).first<PublicationRow>();
 }
 
-async function cleanupAssets(
+export async function cleanupAssets(
   env: Env,
   publicationId: string,
 ): Promise<boolean> {
@@ -410,7 +448,7 @@ export async function runPublicationLifecycle(
   const retainUntil = new Date(nowDate.getTime() + retentionDays * 86400_000).toISOString();
   const expiring = await env.DB.prepare(
     `SELECT id FROM publications
-     WHERE status = 'PUBLISHED' AND expires_at IS NOT NULL AND expires_at <= ?
+     WHERE status IN ('PUBLISHED','UNPUBLISHED') AND expires_at IS NOT NULL AND expires_at <= ?
        AND NOT EXISTS (
          SELECT 1 FROM storage_entitlements entitlement
          WHERE entitlement.publication_id = publications.id AND entitlement.status = 'LIFETIME'
@@ -424,7 +462,7 @@ export async function runPublicationLifecycle(
          SET status = 'EXPIRED', expired_at = COALESCE(expired_at, ?),
              retention_delete_after_at = COALESCE(retention_delete_after_at, ?),
              lifecycle_revision = lifecycle_revision + 1, updated_at = ?
-         WHERE id = ? AND status = 'PUBLISHED' AND expires_at <= ?`,
+         WHERE id = ? AND status IN ('PUBLISHED','UNPUBLISHED') AND expires_at <= ?`,
       ).bind(now, retainUntil, now, id, now),
       env.DB.prepare(
         `UPDATE storage_entitlements SET status = 'EXPIRED'
@@ -445,11 +483,16 @@ export async function runPublicationLifecycle(
        AND NOT EXISTS (
          SELECT 1 FROM orders o
          WHERE o.design_id = publications.design_id
-           AND (o.status IN ('PAID','FULFILLING') OR
-             (o.status = 'AWAITING_PAYMENT' AND o.expires_at > ?))
+           AND o.status IN ('DRAFT','AWAITING_PAYMENT','PAID','FULFILLING','REFUND_PENDING')
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM fulfillment_jobs job
+         JOIN orders o ON o.id = job.order_id
+         WHERE o.design_id = publications.design_id
+           AND job.status IN ('PENDING','PROCESSING','FAILED','MANUAL_REVIEW')
        )
      ORDER BY retention_delete_after_at LIMIT ?`,
-  ).bind(now, now, limit).all<{ id: string; design_id: string }>();
+  ).bind(now, limit).all<{ id: string; design_id: string }>();
   let erased = 0;
   let retryable = 0;
   for (const publication of expired.results) {
@@ -470,12 +513,17 @@ export async function runPublicationLifecycle(
 
     const claimed = await env.DB.prepare(
       `UPDATE designs SET status = 'ARCHIVED', updated_at = ?
-       WHERE id = ? AND status IN ('DRAFT','ARCHIVED')
+       WHERE id = ? AND status IN ('DRAFT','ARCHIVED','DELETION_PENDING')
          AND NOT EXISTS (
            SELECT 1 FROM orders o
            WHERE o.design_id = designs.id
-             AND (o.status IN ('PAID','FULFILLING') OR
-               (o.status = 'AWAITING_PAYMENT' AND o.expires_at > ?))
+             AND o.status IN ('DRAFT','AWAITING_PAYMENT','PAID','FULFILLING','REFUND_PENDING')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM fulfillment_jobs job
+           JOIN orders o ON o.id = job.order_id
+           WHERE o.design_id = designs.id
+             AND job.status IN ('PENDING','PROCESSING','FAILED','MANUAL_REVIEW')
          )
          AND NOT EXISTS (
            SELECT 1 FROM publications other
@@ -484,7 +532,7 @@ export async function runPublicationLifecycle(
                (other.status IN ('EXPIRED','REVOKED') AND
                  (other.retention_delete_after_at IS NULL OR other.retention_delete_after_at > ?)))
          )`,
-    ).bind(now, publication.design_id, now, publication.id, now).run();
+    ).bind(now, publication.design_id, publication.id, now).run();
     if (claimed.meta.changes !== 1) {
       retryable++;
       continue;
@@ -974,7 +1022,7 @@ async function listCustomerWebsites(
   const ownerId = required.session!.customerId;
   const rows = await env.DB.prepare(
     `SELECT d.id AS design_id, d.template_id, d.schema_version, d.revision, d.data_json,
-            t.title AS template_title,
+            d.status AS design_status, t.title AS template_title,
             o.id AS order_id, o.order_reference, o.status AS order_status,
             p.status AS payment_status,
             pub.id AS publication_id, pub.slug, pub.status AS publication_status,
@@ -983,7 +1031,31 @@ async function listCustomerWebsites(
             entitlement.status AS entitlement_status,
             entitlement.storage_plan_id, plan.title AS storage_plan_title,
             entitlement.starts_at AS entitlement_started_at,
-            fj.status AS fulfillment_status
+            fj.status AS fulfillment_status,
+            CASE WHEN d.status IN ('ARCHIVED','DELETION_PENDING') THEN 1 ELSE 0 END AS cleanup_pending,
+            CASE WHEN d.status = 'DELETION_PENDING' AND (
+              EXISTS (
+                SELECT 1 FROM orders protected_order
+                WHERE protected_order.design_id = d.id
+                  AND protected_order.status IN ('PAID','FULFILLING','FULFILLED','REFUND_PENDING','REFUNDED')
+              ) OR EXISTS (
+                SELECT 1 FROM publications protected_publication
+                WHERE protected_publication.design_id = d.id
+              ) OR EXISTS (
+                SELECT 1 FROM payments protected_payment
+                JOIN orders protected_order ON protected_order.id = protected_payment.order_id
+                WHERE protected_order.design_id = d.id
+                  AND protected_payment.status IN ('SUCCEEDED','REFUND_PENDING','REFUNDED')
+              )
+            ) THEN 1 ELSE 0 END AS deletion_requested,
+            CASE WHEN d.status = 'DELETION_PENDING' AND EXISTS (
+              SELECT 1 FROM publications cleanup_publication
+              JOIN publication_assets cleanup_asset
+                ON cleanup_asset.publication_id = cleanup_publication.id
+              WHERE cleanup_publication.design_id = d.id
+                AND cleanup_asset.derivative_key IS NOT NULL
+                AND cleanup_asset.derivative_status = 'CLEANUP_PENDING'
+            ) THEN 1 ELSE 0 END AS media_cleanup_pending
      FROM designs d
      JOIN templates t ON t.id = d.template_id
      LEFT JOIN orders o ON o.id = (
@@ -998,7 +1070,15 @@ async function listCustomerWebsites(
      )
      LEFT JOIN storage_plans plan ON plan.id = entitlement.storage_plan_id
      LEFT JOIN fulfillment_jobs fj ON fj.order_id = o.id
-     WHERE d.customer_id = ? AND d.status IN ('DRAFT','PUBLISHED')
+     WHERE d.customer_id = ? AND (
+       d.status IN ('DRAFT','PUBLISHED','DELETION_PENDING') OR
+       (d.status = 'ARCHIVED' AND EXISTS (
+         SELECT 1 FROM publications cleanup_publication
+         WHERE cleanup_publication.design_id = d.id
+           AND cleanup_publication.status IN ('EXPIRED','REVOKED')
+           AND cleanup_publication.retention_delete_after_at IS NOT NULL
+       ))
+     )
      ORDER BY d.updated_at DESC LIMIT 100`,
   ).bind(ownerId).all<{
     design_id: string;
@@ -1006,6 +1086,7 @@ async function listCustomerWebsites(
     schema_version: number;
     revision: number;
     data_json: string;
+    design_status: string;
     template_title: string;
     order_id: string | null;
     order_reference: string | null;
@@ -1024,6 +1105,9 @@ async function listCustomerWebsites(
     storage_plan_title: string | null;
     entitlement_started_at: string | null;
     fulfillment_status: string | null;
+    cleanup_pending: number;
+    deletion_requested: number;
+    media_cleanup_pending: number;
   }>();
   const entitlementRows = await env.DB.prepare(
     `SELECT e.publication_id, e.order_id, e.storage_plan_id, p.title AS storage_plan_title,
@@ -1070,9 +1154,12 @@ async function listCustomerWebsites(
   return jsonResponse({
     websites: rows.results.map((row) => ({
       ...row,
+      cleanup_pending: row.cleanup_pending === 1,
+      deletion_requested: row.deletion_requested === 1,
+      media_cleanup_pending: row.media_cleanup_pending === 1,
       public_url: row.slug ? `${origin}/p/${encodeURIComponent(row.slug)}` : null,
-      photo_asset_ids: assetReferences(row.template_id,
-        JSON.parse(row.data_json) as TemplateData),
+      photo_asset_ids: row.cleanup_pending === 1 ? [] : assetReferences(
+        row.template_id, JSON.parse(row.data_json) as TemplateData),
       storage_plan: row.storage_plan_id ? {
         id: row.storage_plan_id,
         title: row.storage_plan_title,
@@ -1142,14 +1229,33 @@ async function applyStorageRenewal(
   }
 
   let entitlement = await env.DB.prepare(
-    `SELECT expires_at, previous_expires_at, starts_at
+    `SELECT publication_id, storage_plan_id, duration_months,
+            expires_at, previous_expires_at, starts_at
      FROM storage_entitlements WHERE order_id = ?`,
   ).bind(orderId).first<{
+    publication_id: string;
+    storage_plan_id: string;
+    duration_months: number | null;
     expires_at: string | null;
     previous_expires_at: string | null;
     starts_at: string;
   }>();
+  if (entitlement &&
+      (entitlement.publication_id !== publicationId ||
+       entitlement.storage_plan_id !== item.storage_plan_id ||
+       entitlement.duration_months !== item.duration_months)) {
+    throw new Error("RENEWAL_ENTITLEMENT_MISMATCH");
+  }
   if (!entitlement) {
+    const currentEntitlement = await env.DB.prepare(
+      `SELECT status FROM storage_entitlements
+       WHERE publication_id = ?
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+    ).bind(publicationId).first<{ status: string }>();
+    if (!currentEntitlement ||
+        (currentEntitlement.status !== "ACTIVE" && currentEntitlement.status !== "EXPIRED")) {
+      throw new Error("RENEWAL_ENTITLEMENT_UNAVAILABLE");
+    }
     const nowTime = Date.parse(order.paid_at);
     if (!Number.isFinite(nowTime)) throw new Error("PAYMENT_ACTIVATION_INVALID");
     const previousExpiry = publication.expires_at;
@@ -1203,6 +1309,9 @@ async function applyStorageRenewal(
     ]);
     if (update[0]?.meta.changes !== 1) throw new Error("RENEWAL_STATE_CHANGED");
     entitlement = {
+      publication_id: publicationId,
+      storage_plan_id: item.storage_plan_id,
+      duration_months: item.duration_months,
       expires_at: expiry?.toISOString() ?? null,
       previous_expires_at: previousExpiry,
       starts_at: startsAt,
@@ -1228,24 +1337,49 @@ async function applyStorageRenewal(
 export async function handleFulfillmentForOrder(
   env: Env,
   orderId: string,
-): Promise<{ completed: boolean; retryable: boolean }> {
+  now = new Date(),
+): Promise<FulfillmentResult> {
   if (!resolvePaymentEnvironmentPolicy(env).fulfillmentEnabled) {
     throw new Error("Payment fulfillment is disabled for this runtime");
   }
+  if (!Number.isFinite(now.getTime())) throw new RangeError("Invalid fulfillment time");
+  const timestamp = now.toISOString();
   const job = await env.DB.prepare(
     `SELECT status FROM fulfillment_jobs WHERE order_id = ?`,
   ).bind(orderId).first<{ status: string }>();
-  if (!job || job.status === "COMPLETED") return { completed: job?.status === "COMPLETED", retryable: false };
-  const now = nowIso();
+  if (!job) return { completed: false, retryable: false };
+  if (job.status === "COMPLETED") return { completed: true, retryable: false };
+  if (job.status === "MANUAL_REVIEW") {
+    return { completed: false, retryable: false, manualReview: true };
+  }
+
+  const leaseToken = randomToken(24);
+  const leaseExpiresAt = new Date(now.getTime() + FULFILLMENT_LEASE_MS).toISOString();
   const claimed = await env.DB.prepare(
-    `UPDATE fulfillment_jobs SET status = 'PROCESSING', attempts = attempts + 1,
-       started_at = ?, updated_at = ?, last_error_code = NULL
-     WHERE order_id = ? AND (
-       status IN ('PENDING','FAILED') OR
-       (status = 'PROCESSING' AND updated_at <= ?)
-     )`,
-  ).bind(now, now, orderId, new Date(Date.now() - 5 * 60_000).toISOString()).run();
-  if (claimed.meta.changes !== 1) return { completed: false, retryable: true };
+    `UPDATE fulfillment_jobs
+     SET status = 'PROCESSING', attempts = attempts + 1, started_at = ?,
+       updated_at = ?, last_error_code = NULL, next_attempt_at = NULL,
+       lease_token = ?, lease_expires_at = ?
+     WHERE order_id = ? AND attempts < ? AND (
+       (status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR
+       (status = 'FAILED' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR
+       (status = 'PROCESSING' AND
+         (lease_token IS NULL OR lease_expires_at <= ?))
+     ) AND ${verifiedFulfillmentOrder("fulfillment_jobs.order_id")}`,
+  ).bind(timestamp, timestamp, leaseToken, leaseExpiresAt, orderId,
+    FULFILLMENT_MAX_ATTEMPTS, timestamp, timestamp, timestamp).run();
+  if (claimed.meta.changes !== 1) {
+    const current = await env.DB.prepare(
+      "SELECT status FROM fulfillment_jobs WHERE order_id = ?",
+    ).bind(orderId).first<{ status: string }>();
+    return {
+      completed: current?.status === "COMPLETED",
+      retryable: current?.status === "PENDING" ||
+        current?.status === "PROCESSING" ||
+        current?.status === "FAILED",
+      ...(current?.status === "MANUAL_REVIEW" ? { manualReview: true } : {}),
+    };
+  }
 
   let customerId: string | null = null;
   try {
@@ -1259,54 +1393,68 @@ export async function handleFulfillmentForOrder(
     }>();
     if (!order) throw new Error("PAID_ORDER_UNAVAILABLE");
     customerId = order.customer_id;
-    await env.DB.prepare(
+    const started = await env.DB.prepare(
       `UPDATE orders SET status = 'FULFILLING', updated_at = ?
-       WHERE id = ? AND status IN ('PAID','FULFILLING')`,
-    ).bind(nowIso(), orderId).run();
+       WHERE id = ? AND status IN ('PAID','FULFILLING')
+         AND EXISTS (
+           SELECT 1 FROM fulfillment_jobs
+           WHERE order_id = ? AND status = 'PROCESSING' AND lease_token = ?
+         )
+         AND ${verifiedFulfillmentOrder("orders.id")}`,
+    ).bind(nowIso(), orderId, orderId, leaseToken).run();
+    if (started.meta.changes !== 1) throw new Error("PAID_ORDER_UNAVAILABLE");
 
     if (order.renewal_publication_id) {
       await applyStorageRenewal(env, orderId, customerId, order.renewal_publication_id);
     } else {
-    const existing = await env.DB.prepare(
-      `SELECT id, lifecycle_revision, status FROM publications WHERE order_id = ?`,
-    ).bind(orderId).first<{ id: string; lifecycle_revision: number; status: string }>();
-    let publication = existing;
-    if (!publication) {
-      const eligible = await paidOrderForOwner(env, customerId, orderId);
-      if (!eligible) throw new Error("PAYMENT_NOT_VERIFIED");
-      const item = await env.DB.prepare(
-        `SELECT metadata_json FROM order_items
-         WHERE order_id = ? AND item_type = 'ADD_ON'
-           AND json_extract(metadata_json, '$.kind') = 'STORAGE_PLAN'`,
-      ).bind(orderId).first<{ metadata_json: string }>();
-      if (!item) throw new Error("STORAGE_PLAN_SNAPSHOT_MISSING");
-      const snapshot = JSON.parse(item.metadata_json) as { asset_consents?: unknown };
-      const request = new Request(`${env.APP_ORIGIN ?? "https://crushify.local"}/api/v1/publications`);
-      const created = await insertPublication(request, env, crypto.randomUUID(), customerId, {
-        order_id: orderId,
-        expected_revision: eligible.design_current_revision,
-        asset_consents: snapshot.asset_consents ?? [],
-      });
-      if (created.status !== 201) {
-        const body = await created.json() as { error?: { code?: string } };
-        throw new Error(body.error?.code ?? "PUBLICATION_CREATE_FAILED");
-      }
-      publication = await env.DB.prepare(
+      const existing = await env.DB.prepare(
         `SELECT id, lifecycle_revision, status FROM publications WHERE order_id = ?`,
       ).bind(orderId).first<{ id: string; lifecycle_revision: number; status: string }>();
-    }
-    if (!publication) throw new Error("PUBLICATION_CREATE_FAILED");
-    if (publication.status !== "PUBLISHED") {
-      const request = new Request(`${env.APP_ORIGIN ?? "https://crushify.local"}/api/v1/publications`);
-      const published = await publish(
-        request, env, crypto.randomUUID(), customerId, publication.id, publication.lifecycle_revision,
-      );
-      if (!published.ok) {
-        const body = await published.json() as { error?: { code?: string } };
-        throw new Error(body.error?.code ?? "PUBLICATION_FAILED");
+      let publication = existing;
+      if (!publication) {
+        const eligible = await paidOrderForOwner(env, customerId, orderId);
+        if (!eligible) throw new Error("PAYMENT_NOT_VERIFIED");
+        const item = await env.DB.prepare(
+          `SELECT metadata_json FROM order_items
+           WHERE order_id = ? AND item_type = 'ADD_ON'
+             AND json_extract(metadata_json, '$.kind') = 'STORAGE_PLAN'`,
+        ).bind(orderId).first<{ metadata_json: string }>();
+        if (!item) throw new Error("STORAGE_PLAN_SNAPSHOT_MISSING");
+        const snapshot = JSON.parse(item.metadata_json) as { asset_consents?: unknown };
+        const request = new Request(`${env.APP_ORIGIN ?? "https://crushify.local"}/api/v1/publications`);
+        const created = await insertPublication(request, env, crypto.randomUUID(), customerId, {
+          order_id: orderId,
+          expected_revision: eligible.design_current_revision,
+          asset_consents: snapshot.asset_consents ?? [],
+        });
+        if (created.status !== 201) {
+          const body = await created.json() as { error?: { code?: string } };
+          throw new Error(body.error?.code ?? "PUBLICATION_CREATE_FAILED");
+        }
+        publication = await env.DB.prepare(
+          `SELECT id, lifecycle_revision, status FROM publications WHERE order_id = ?`,
+        ).bind(orderId).first<{ id: string; lifecycle_revision: number; status: string }>();
+      }
+      if (!publication) throw new Error("PUBLICATION_CREATE_FAILED");
+      if (publication.status !== "PUBLISHED") {
+        const request = new Request(`${env.APP_ORIGIN ?? "https://crushify.local"}/api/v1/publications`);
+        const published = await publish(
+          request, env, crypto.randomUUID(), customerId, publication.id, publication.lifecycle_revision,
+        );
+        if (!published.ok) {
+          const body = await published.json() as { error?: { code?: string } };
+          throw new Error(body.error?.code ?? "PUBLICATION_FAILED");
+        }
       }
     }
-    }
+
+    const leaseRenewed = await env.DB.prepare(
+      `UPDATE fulfillment_jobs SET lease_expires_at = ?, updated_at = ?
+       WHERE order_id = ? AND status = 'PROCESSING' AND lease_token = ?
+         AND lease_expires_at > ?`,
+    ).bind(new Date(Date.now() + FULFILLMENT_LEASE_MS).toISOString(), nowIso(),
+      orderId, leaseToken, nowIso()).run();
+    if (leaseRenewed.meta.changes !== 1) throw new Error("FULFILLMENT_LEASE_LOST");
 
     const publishedAt = nowIso();
     const results = await env.DB.batch([
@@ -1324,80 +1472,144 @@ export async function handleFulfillmentForOrder(
          JOIN order_items i ON i.order_id = o.id AND i.item_type = 'ADD_ON'
            AND json_extract(i.metadata_json, '$.kind') = 'STORAGE_PLAN'
          JOIN storage_plans sp ON sp.id = i.reference_id
-         WHERE o.id = ? AND o.renewal_publication_id IS NULL AND p.status = 'PUBLISHED'
+         JOIN payments payment ON payment.order_id = o.id AND payment.provider = 'SEPAY'
+         JOIN payment_webhook_events webhook ON webhook.provider = payment.provider
+           AND webhook.event_id = payment.provider_payment_id AND webhook.outcome = 'PROCESSED'
+         WHERE o.id = ? AND o.renewal_publication_id IS NULL
+           AND o.status = 'FULFILLING' AND o.paid_at IS NOT NULL
+           AND o.payment_review_required = 0 AND p.status = 'PUBLISHED'
+           AND payment.status = 'SUCCEEDED' AND payment.review_required = 0
+           AND payment.provider_payment_id IS NOT NULL AND payment.provider_payment_id <> ''
+           AND payment.succeeded_at IS NOT NULL
+           AND payment.amount_minor = o.total_minor AND payment.currency = o.currency
+           AND EXISTS (
+             SELECT 1 FROM fulfillment_jobs
+             WHERE order_id = o.id AND status = 'PROCESSING' AND lease_token = ?
+           )
          ON CONFLICT(order_id) DO NOTHING`,
-      ).bind(safeId(), publishedAt, orderId),
+      ).bind(safeId(), publishedAt, orderId, leaseToken),
       env.DB.prepare(
         `UPDATE orders SET status = 'FULFILLED', updated_at = ?
          WHERE id = ? AND status = 'FULFILLING'
            AND EXISTS (
+             SELECT 1 FROM fulfillment_jobs
+             WHERE order_id = orders.id AND status = 'PROCESSING' AND lease_token = ?
+           )
+           AND EXISTS (
              SELECT 1 FROM payments payment
              JOIN payment_webhook_events e ON e.provider = payment.provider
                AND e.event_id = payment.provider_payment_id AND e.outcome = 'PROCESSED'
-             JOIN publications p ON p.status = 'PUBLISHED'
-               AND (p.order_id = orders.id OR p.id = orders.renewal_publication_id)
+             JOIN publications p ON (p.order_id = orders.id OR p.id = orders.renewal_publication_id)
+               AND (p.status = 'PUBLISHED' OR
+                 (orders.renewal_publication_id IS NOT NULL AND p.status = 'UNPUBLISHED'))
              WHERE payment.order_id = orders.id AND payment.provider = 'SEPAY'
                AND payment.status = 'SUCCEEDED' AND payment.succeeded_at IS NOT NULL
                AND payment.provider_payment_id IS NOT NULL AND payment.provider_payment_id <> ''
                AND payment.review_required = 0 AND payment.amount_minor = orders.total_minor
                AND payment.currency = orders.currency
            )`,
-      ).bind(publishedAt, orderId),
+      ).bind(publishedAt, orderId, leaseToken),
       env.DB.prepare(
         `UPDATE fulfillment_jobs SET status = 'COMPLETED', completed_at = ?, updated_at = ?,
-           last_error_code = NULL
-         WHERE order_id = ? AND status = 'PROCESSING'`,
-      ).bind(publishedAt, publishedAt, orderId),
+           last_error_code = NULL, next_attempt_at = NULL, lease_token = NULL,
+           lease_expires_at = NULL
+         WHERE order_id = ? AND status = 'PROCESSING' AND lease_token = ?
+           AND EXISTS (
+             SELECT 1 FROM orders o
+             WHERE o.id = fulfillment_jobs.order_id AND o.status = 'FULFILLED'
+               AND EXISTS (
+                 SELECT 1 FROM storage_entitlements entitlement
+                 WHERE entitlement.order_id = o.id
+               )
+           )`,
+      ).bind(publishedAt, publishedAt, orderId, leaseToken),
       env.DB.prepare(
         `INSERT INTO audit_logs (
            id, actor_type, actor_id, action, entity_type, entity_id, request_id, metadata_json, created_at
-         ) VALUES (?, 'SYSTEM', NULL, 'order.fulfilled', 'order', ?, NULL, '{}', ?)`,
-      ).bind(safeId(), orderId, publishedAt),
+         )
+         SELECT ?, 'SYSTEM', NULL, 'order.fulfilled', 'order', ?, NULL, '{}', ?
+         WHERE EXISTS (
+           SELECT 1 FROM fulfillment_jobs
+           WHERE order_id = ? AND status = 'COMPLETED' AND completed_at = ?
+         )`,
+      ).bind(safeId(), orderId, publishedAt, orderId, publishedAt),
     ]);
     if (results[1]?.meta.changes !== 1 || results[2]?.meta.changes !== 1) {
       throw new Error("FULFILLMENT_FINALIZATION_FAILED");
     }
     return { completed: true, retryable: false };
   } catch (error) {
-    await env.DB.batch([
-      env.DB.prepare(
-        `UPDATE fulfillment_jobs SET status = 'FAILED', last_error_code = ?,
-           updated_at = ? WHERE order_id = ? AND status = 'PROCESSING'`,
-      ).bind(error instanceof Error ? error.message.slice(0, 80) : "FULFILLMENT_FAILED", nowIso(), orderId),
-      env.DB.prepare(
-        `UPDATE orders SET status = 'FULFILLING', updated_at = ?
-         WHERE id = ? AND status IN ('PAID','FULFILLING')`,
-      ).bind(nowIso(), orderId),
-    ]);
+    const failedAt = now;
+    const attempts = await env.DB.prepare(
+      "SELECT attempts FROM fulfillment_jobs WHERE order_id = ? AND status = 'PROCESSING' AND lease_token = ?",
+    ).bind(orderId, leaseToken).first<{ attempts: number }>();
+    if (!attempts) return { completed: false, retryable: false };
+    const requiresManualReview = attempts.attempts >= FULFILLMENT_MAX_ATTEMPTS;
+    const nextAttemptAt = requiresManualReview
+      ? null
+      : new Date(failedAt.getTime() + fulfillmentBackoffMs(attempts.attempts)).toISOString();
+    const failure = await env.DB.prepare(
+      `UPDATE fulfillment_jobs SET status = ?, last_error_code = ?,
+         last_failure_at = ?, next_attempt_at = ?, lease_token = NULL,
+         lease_expires_at = NULL, updated_at = ?
+       WHERE order_id = ? AND status = 'PROCESSING' AND lease_token = ?`,
+    ).bind(requiresManualReview ? "MANUAL_REVIEW" : "FAILED",
+      fulfillmentFailureCode(error), failedAt.toISOString(), nextAttemptAt,
+      failedAt.toISOString(), orderId, leaseToken).run();
     logSafeError("publication.order_fulfillment_failed", "payment", error);
-    return { completed: false, retryable: true };
+    return {
+      completed: false,
+      retryable: failure.meta.changes === 1 && !requiresManualReview,
+      manualReview: failure.meta.changes === 1 && requiresManualReview,
+    };
   }
 }
 
 export async function recoverPendingFulfillments(
   env: Env,
   limit = 50,
-): Promise<{ attempted: number; completed: number; retryable: number }> {
+  now = new Date(),
+): Promise<{ attempted: number; completed: number; retryable: number; manualReview: number }> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new RangeError("Fulfillment recovery batch size must be between 1 and 100");
   }
   if (!resolvePaymentEnvironmentPolicy(env).fulfillmentEnabled) {
     throw new Error("Payment fulfillment recovery is disabled for this runtime");
   }
+  if (!Number.isFinite(now.getTime())) throw new RangeError("Invalid fulfillment recovery time");
+  const timestamp = now.toISOString();
+  const exhausted = await env.DB.prepare(
+    `UPDATE fulfillment_jobs SET status = 'MANUAL_REVIEW', next_attempt_at = NULL,
+       lease_token = NULL, lease_expires_at = NULL,
+       last_error_code = COALESCE(last_error_code, 'RETRY_LIMIT_EXHAUSTED'),
+       last_failure_at = COALESCE(last_failure_at, updated_at), updated_at = ?
+     WHERE attempts >= ? AND (
+       status IN ('PENDING','FAILED') OR
+       (status = 'PROCESSING' AND
+         (lease_token IS NULL OR lease_expires_at <= ?))
+     ) AND ${verifiedFulfillmentOrder("fulfillment_jobs.order_id")}`,
+  ).bind(timestamp, FULFILLMENT_MAX_ATTEMPTS, timestamp).run();
   const rows = await env.DB.prepare(
     `SELECT order_id FROM fulfillment_jobs
-     WHERE status IN ('PENDING','FAILED') OR
-       (status = 'PROCESSING' AND updated_at <= ?)
+     WHERE attempts < ? AND (
+       (status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR
+       (status = 'FAILED' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR
+       (status = 'PROCESSING' AND
+         (lease_token IS NULL OR lease_expires_at <= ?))
+     ) AND ${verifiedFulfillmentOrder("fulfillment_jobs.order_id")}
      ORDER BY created_at LIMIT ?`,
-  ).bind(new Date(Date.now() - 5 * 60_000).toISOString(), limit).all<{ order_id: string }>();
+  ).bind(FULFILLMENT_MAX_ATTEMPTS, timestamp, timestamp, timestamp, limit)
+    .all<{ order_id: string }>();
   let completed = 0;
   let retryable = 0;
+  let manualReview = Number(exhausted.meta.changes);
   for (const row of rows.results) {
-    const result = await handleFulfillmentForOrder(env, row.order_id);
+    const result = await handleFulfillmentForOrder(env, row.order_id, now);
     if (result.completed) completed++;
     else if (result.retryable) retryable++;
+    else if (result.manualReview) manualReview++;
   }
-  return { attempted: rows.results.length, completed, retryable };
+  return { attempted: rows.results.length, completed, retryable, manualReview };
 }
 
 async function publicPublication(

@@ -21,6 +21,8 @@ Creating and publishing a publication verifies that the authenticated customer o
 
 The publication stores a snapshot of the exact template, schema, renderer, and design revision. Lifecycle transitions carry an expected lifecycle revision so stale mutations fail with a conflict. The implementation supports publish, unpublish, republish, permanent revoke, snapshot update while unpublished, optional expiry, and dashboard listing.
 
+Renewal creation requires the publication's latest storage entitlement to be `ACTIVE` or `EXPIRED`; the order-insertion transaction and fulfillment path repeat the entitlement check. A renewal entitlement is bound to its paid order, publication, and plan so recovery reuses the recorded extension rather than applying it twice. The account dashboard stores an idempotency key in tab-scoped session storage across retries/reloads of the same request, and clears it after a successful response.
+
 Public slugs are random bearer links. D1 stores the slug for the authenticated owner dashboard to reconstruct the recipient URL and stores a hash for public-route lookup; protect D1 and its backups as containing bearer-link secrets. Treat a shared link as public to anyone who receives it. Public responses expose only validated recipient data and safe media paths, not customer identity, draft IDs, order/payment metadata, or private originals.
 
 The bounded lifecycle runner expires publications at the exact UTC boundary (`expires_at <= now`), skips lifetime entitlements (`expires_at = NULL`), and retains content until its configured deletion date. Retention cleanup defers while a valid pending, paid, or fulfilling order exists, claims the design against new checkout before deleting source assets, and retries failed media deletion. It also defers cleanup when a source asset is still referenced by another active or retained publication. A renewal accepted before the retention deadline restores the existing publication and stable slug; a paid renewal after the deadline cannot revive retained data.
@@ -31,6 +33,10 @@ Original uploaded objects remain private. A media item is copied to a publicatio
 
 Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately deny public reads. Derivative/source deletion is tracked in D1; a failed deletion leaves cleanup pending and does not produce a success response for design deletion. The Cloudflare Worker retains a scheduled maintenance handler for rollback, but both Wrangler cron triggers are disabled. The Vercel Production Cron is the sole configured lifecycle schedule. Vercel Preview has no scheduled lifecycle. Its manual `POST /api/ops/staging/publication-lifecycle` requires a Preview-only `STAGING_LIFECYCLE_SECRET` (exactly 64 hexadecimal characters), independently generated from Production secrets; `CRON_SECRET` alone cannot authorize it. Although authorization remains isolated, the route returns `STORAGE_UNAVAILABLE` before database access because Preview has no approved durable media provider, so it performs no lifecycle mutation. Preview durable storage is unavailable until a separate staging provider is approved and configured. Local synthetic tests cover the route's fail-closed behavior and the unchanged local lifecycle retry/cleanup behavior; no deployed scheduler or manual lifecycle execution was verified.
 
+When retention cleanup or customer-requested design deletion fails, the customer website list keeps the retained design visible with a cleanup-pending state. A draft with no protected financial/publication history can be retried by its owner; physical cleanup checkpoints each successfully removed source asset and archives/clears the draft only after cleanup completes. It is blocked while an order or fulfillment is in progress and while another active or retained publication references one of its assets.
+
+A customer deletion request for a design with a paid/refunded order, publication, or storage entitlement is a soft deletion: active publication access is removed, publication derivatives are cleaned up with retryable state, and the original design data, source media, entitlement history, and payment/order ledger remain intact. The entitlement and payment state are not revoked or rewritten. Finite hosting continues to expire at its persisted UTC expiry and enters the normal retention lifecycle; lifetime hosting is never time-expired. The request does not issue a refund or permanently erase protected data. The owner must approve a refund policy and any longer-term erasure/retention policy before adding those actions.
+
 ## 4. Routes and UI
 
 - `POST /api/v1/publications`: create from an eligible order/revision and consent list.
@@ -39,6 +45,9 @@ Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately d
 - `PATCH /api/v1/publications/{publicationId}`: update an unpublished snapshot.
 - `POST /api/v1/publications/{publicationId}/publish|republish|unpublish|revoke`: lifecycle actions.
 - `POST /api/v1/publications/{publicationId}/assets/{assetId}/consent`: withdraw media consent.
+- `POST /api/v1/orders`: create an owner-scoped initial or storage-renewal order with server-calculated pricing and idempotency.
+- `GET /api/v1/orders/{orderId}/status`: inspect the authenticated customer's order and fulfillment state.
+- `DELETE /api/v1/designs/{designId}`: owner/CSRF-protected design deletion; pending cleanup is retryable from the account dashboard.
 - `GET /api/v1/publications/{slug}` and `/assets/{assetId}`: recipient data and consented derivative.
 - `GET /p/{slug}`: static recipient shell.
 - `/account/websites/`: customer dashboard with consent selection and lifecycle actions.

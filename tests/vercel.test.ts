@@ -16,10 +16,10 @@ import {
 } from "../src/database/migrations.ts";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { connectDatabaseFromEnvironment } from "../src/database/provider.ts";
-import type { Database } from "../src/database.ts";
+import type { Database, DatabaseStatement } from "../src/database.ts";
 import type { Storage } from "../src/storage.ts";
 import { MemoryStorageAdapter } from "../src/storage/mock.ts";
-import { recoverPendingFulfillments } from "../src/publications.ts";
+import { handleFulfillmentForOrder, recoverPendingFulfillments } from "../src/publications.ts";
 import {
   createVercelApiHandler,
   resolveVercelDatabaseConfiguration,
@@ -41,6 +41,61 @@ async function loadMigrations(): Promise<SqlMigration[]> {
       sql: await readFile(join(directory, file), "utf8"),
     };
   }));
+}
+
+function pauseFirstFulfillmentClaim(database: Database): {
+  database: Database;
+  waitForClaim: Promise<void>;
+  release: () => void;
+} {
+  let signalClaim!: () => void;
+  let releaseClaim!: () => void;
+  let paused = false;
+  const waitForClaim = new Promise<void>((resolve) => {
+    signalClaim = resolve;
+  });
+  const waitForRelease = new Promise<void>((resolve) => {
+    releaseClaim = resolve;
+  });
+  const originalStatements = new WeakMap<DatabaseStatement, DatabaseStatement>();
+  const wrapStatement = (statement: DatabaseStatement, sql: string): DatabaseStatement => {
+    const wrapped: DatabaseStatement = {
+      bind(...values) {
+        return wrapStatement(statement.bind(...values), sql);
+      },
+      first<T = Record<string, unknown>>(columnName?: string) {
+        return statement.first<T>(columnName);
+      },
+      all<T = Record<string, unknown>>() {
+        return statement.all<T>();
+      },
+      async run<T = unknown>() {
+        const result = await statement.run<T>();
+        if (!paused && sql.startsWith("UPDATE fulfillment_jobs") &&
+            sql.includes("SET status = 'PROCESSING'")) {
+          paused = true;
+          signalClaim();
+          await waitForRelease;
+        }
+        return result;
+      },
+    };
+    originalStatements.set(wrapped, statement);
+    return wrapped;
+  };
+  return {
+    database: {
+      prepare(sql) {
+        return wrapStatement(database.prepare(sql), sql);
+      },
+      batch(statements) {
+        return database.batch(statements.map((statement) =>
+          originalStatements.get(statement) ?? statement));
+      },
+    },
+    waitForClaim,
+    release: releaseClaim,
+  };
 }
 
 function requestWithOrigin(path: string, origin: string, init: RequestInit = {}): Request {
@@ -641,7 +696,7 @@ describe("Vercel API runtime adapter", () => {
 
     try {
       const migrations = await loadMigrations();
-      assert.deepEqual(await applyMigrations(migrationClient, migrations), [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.deepEqual(await applyMigrations(migrationClient, migrations), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       await verifyMigrationSchema(migrationClient, migrations);
       await migrationClient.execute("CREATE TABLE staging_schema_unexpected (id TEXT PRIMARY KEY)");
       await assert.rejects(
@@ -863,6 +918,23 @@ describe("Vercel API runtime adapter", () => {
               },
             ], "write");
           },
+          async setPublicationEntitlementStatus(publicationId: string, status: string) {
+            await migrationClient.execute({
+              sql: `UPDATE storage_entitlements SET status = ?
+                    WHERE id = (
+                      SELECT id FROM storage_entitlements WHERE publication_id = ?
+                      ORDER BY created_at DESC, id DESC LIMIT 1
+                    )`,
+              args: [status, publicationId],
+            });
+          },
+          async countOrdersForDesign(designId: string) {
+            const result = await migrationClient.execute({
+              sql: "SELECT COUNT(*) AS count FROM orders WHERE design_id = ?",
+              args: [designId],
+            });
+            return Number(result.rows[0]?.count ?? 0);
+          },
           async deactivateTemplatePrice() {
             await migrationClient.execute(
               "UPDATE template_prices SET is_active = 0 WHERE template_id = 'our-universe' AND schema_version = 1",
@@ -921,6 +993,133 @@ describe("Vercel API runtime adapter", () => {
           },
           async restorePublicationCreation() {
             await migrationClient.execute("DROP TRIGGER reject_test_publication_creation");
+          },
+          async inspectFulfillmentJob(orderId: string) {
+            const result = await migrationClient.execute({
+              sql: `SELECT status, attempts, last_error_code, started_at, completed_at,
+                    next_attempt_at, lease_token, lease_expires_at, last_failure_at
+                    FROM fulfillment_jobs WHERE order_id = ?`,
+              args: [orderId],
+            });
+            assert.equal(result.rows.length, 1);
+            return result.rows[0]!;
+          },
+          async makeFulfillmentJobDue(orderId: string) {
+            await migrationClient.execute({
+              sql: `UPDATE fulfillment_jobs SET next_attempt_at = '2000-01-01T00:00:00.000Z'
+                    WHERE order_id = ? AND status = 'FAILED'`,
+              args: [orderId],
+            });
+          },
+          async setFulfillmentJobLease(orderId: string, token: string, expiresAt: string) {
+            await migrationClient.execute({
+              sql: `UPDATE fulfillment_jobs SET status = 'PROCESSING', next_attempt_at = NULL,
+                    lease_token = ?, lease_expires_at = ?, updated_at = ?
+                    WHERE order_id = ?`,
+              args: [token, expiresAt, new Date().toISOString(), orderId],
+            });
+          },
+          async setFulfillmentJobAttempts(orderId: string, attempts: number) {
+            await migrationClient.execute({
+              sql: `UPDATE fulfillment_jobs SET status = 'FAILED', attempts = ?,
+                    next_attempt_at = '2000-01-01T00:00:00.000Z',
+                    lease_token = NULL, lease_expires_at = NULL
+                    WHERE order_id = ?`,
+              args: [attempts, orderId],
+            });
+          },
+          async runConcurrentFulfillmentClaims(orderId: string) {
+            const baseDatabase = new TursoDatabaseAdapter(migrationClient);
+            await migrationClient.execute({
+              sql: `UPDATE fulfillment_jobs SET next_attempt_at = '2000-01-01T00:00:00.000Z'
+                    WHERE order_id = ? AND status = 'FAILED'`,
+              args: [orderId],
+            });
+            const before = await migrationClient.execute({
+              sql: "SELECT attempts FROM fulfillment_jobs WHERE order_id = ?",
+              args: [orderId],
+            });
+            const blocked = pauseFirstFulfillmentClaim(baseDatabase);
+            const env = {
+              DB: blocked.database,
+              STORAGE: storage,
+              ENVIRONMENT: "local" as const,
+              APP_ORIGIN: "https://crushify.test",
+            };
+            const first = handleFulfillmentForOrder(env, orderId);
+            await blocked.waitForClaim;
+            let second: Awaited<ReturnType<typeof handleFulfillmentForOrder>> | undefined;
+            try {
+              second = await handleFulfillmentForOrder({
+                ...env,
+                DB: baseDatabase,
+              }, orderId);
+            } finally {
+              blocked.release();
+            }
+            await first;
+            const after = await migrationClient.execute({
+              sql: "SELECT status, attempts FROM fulfillment_jobs WHERE order_id = ?",
+              args: [orderId],
+            });
+            return {
+              claimed: Number(after.rows[0]?.attempts) - Number(before.rows[0]?.attempts),
+              completed: after.rows[0]?.status === "COMPLETED" ? 1 : 0,
+              competingCompleted: second?.completed === true,
+            };
+          },
+          async assertRecoveryIgnoresOrder(orderId: string, failedPayment = false) {
+            if (failedPayment) {
+              await migrationClient.execute({
+                sql: "UPDATE payments SET status = 'FAILED' WHERE order_id = ? AND status = 'PENDING'",
+                args: [orderId],
+              });
+            }
+            await migrationClient.execute({
+              sql: `INSERT INTO fulfillment_jobs (id, order_id, status, created_at, updated_at)
+                    VALUES (?, ?, 'PENDING', ?, ?) ON CONFLICT(order_id) DO NOTHING`,
+              args: [crypto.randomUUID(), orderId, new Date().toISOString(), new Date().toISOString()],
+            });
+            const result = await recoverPendingFulfillments({
+              DB: new TursoDatabaseAdapter(migrationClient),
+              STORAGE: storage,
+              ENVIRONMENT: "local",
+              APP_ORIGIN: "https://crushify.test",
+            });
+            const job = await migrationClient.execute({
+              sql: "SELECT status, attempts FROM fulfillment_jobs WHERE order_id = ?",
+              args: [orderId],
+            });
+            assert.equal(job.rows[0]?.status, "PENDING");
+            assert.equal(Number(job.rows[0]?.attempts), 0);
+            assert.equal(result.attempted, 0);
+          },
+          async failPublicationPublishing(orderId: string) {
+            await migrationClient.execute(
+              `CREATE TRIGGER reject_test_publication_publishing BEFORE UPDATE OF status ON publications
+               WHEN NEW.status = 'PUBLISHED' AND EXISTS (
+                 SELECT 1 FROM publications target
+                 WHERE target.id = NEW.id AND (
+                   target.order_id = '${orderId}' OR target.id = (
+                     SELECT renewal_publication_id FROM orders WHERE id = '${orderId}'
+                   )
+                 )
+               )
+               BEGIN SELECT RAISE(ABORT, 'forced publication publish failure'); END`,
+            );
+          },
+          async restorePublicationPublishing() {
+            await migrationClient.execute("DROP TRIGGER reject_test_publication_publishing");
+          },
+          async inspectPublicationIdentity(orderId: string) {
+            const result = await migrationClient.execute({
+              sql: `SELECT id, slug FROM publications
+                    WHERE order_id = ? OR id = (
+                      SELECT renewal_publication_id FROM orders WHERE id = ?
+                    ) LIMIT 1`,
+              args: [orderId, orderId],
+            });
+            return result.rows[0] ?? null;
           },
           async recoverFulfillments() {
             return recoverPendingFulfillments({
@@ -1098,7 +1297,7 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       process.env.DATABASE_PROVIDER = "turso";
       process.env.TURSO_DATABASE_URL = databaseUrl;
       process.env.TURSO_AUTH_TOKEN = "";

@@ -52,6 +52,7 @@
     const card = document.createElement("article");
     card.className = "card";
     card.dataset.designId = row.design_id;
+    card.dataset.publicationId = row.publication_id || "";
     addText(card, "h2", row.template_title);
     const details = document.createElement("div");
     details.className = "meta";
@@ -85,6 +86,11 @@
       detail("Xử lý đơn", row.fulfillment_status === "FAILED"
         ? "Đang chờ xử lý lại"
         : "Đang hoàn tất đơn hàng");
+    }
+    if (row.cleanup_pending) {
+      detail("Dọn dẹp", row.deletion_requested
+        ? `Website đã ngừng công khai theo yêu cầu. Nội dung, gói lưu trữ và lịch sử thanh toán được giữ nguyên; yêu cầu này không tự động hoàn tiền hoặc xóa dữ liệu vĩnh viễn.${row.media_cleanup_pending ? " Ảnh công khai còn chờ dọn dẹp." : ""}`
+        : "Đang chờ xử lý lại; website đã được thu hồi khỏi công khai.");
     }
     if (row.published_at) detail("Xuất bản lúc", new Date(row.published_at).toLocaleString("vi-VN"));
     if (row.renewal_history?.length) {
@@ -160,89 +166,101 @@
       track.textContent = "Theo dõi đơn hàng";
       actions.append(track);
     }
-    const edit = document.createElement("a");
-    edit.className = "button";
-    edit.href = `/templates/${encodeURIComponent(row.template_id)}/index.html?design=${encodeURIComponent(row.design_id)}`;
-    edit.textContent = "Mở trình chỉnh sửa / xem trước";
-    actions.append(edit);
-    if (row.payment_status === "SUCCEEDED" && !row.publication_id) {
-      const create = document.createElement("button");
-      create.className = "primary";
-      create.textContent = "Tạo website";
-      create.dataset.action = "create";
-      actions.append(create);
-    }
-    if (row.publication_id && row.publication_status === "UNPUBLISHED") {
-      const publish = document.createElement("button");
-      publish.className = "primary";
-      publish.textContent = row.published_at ? "Xuất bản lại" : "Xuất bản";
-      publish.dataset.action = "publish";
-      actions.append(publish);
-    }
-    if (row.publication_id && row.publication_status === "PUBLISHED") {
-      const unpublish = document.createElement("button");
-      unpublish.textContent = "Gỡ website";
-      unpublish.dataset.action = "unpublish";
-      actions.append(unpublish);
-    }
-    if (row.publication_id && row.publication_status !== "REVOKED") {
-      const revoke = document.createElement("button");
-      revoke.className = "danger";
-      revoke.textContent = "Thu hồi liên kết";
-      revoke.dataset.action = "revoke";
-      actions.append(revoke);
-    }
-    if (row.publication_id && row.publication_status !== "REVOKED" &&
-        row.revision > row.published_revision) {
-      const update = document.createElement("button");
-      update.textContent = "Chuẩn bị bản sửa";
-      update.dataset.action = "update";
-      actions.append(update);
-    }
-    if (row.publication_id && row.publication_status === "PUBLISHED") {
-      const copy = document.createElement("button");
-      copy.textContent = "Sao chép liên kết";
-      copy.dataset.action = "copy";
-      actions.append(copy);
-    }
-    if (row.publication_id && row.entitlement_status !== "LIFETIME" &&
-        row.publication_status !== "REVOKED" && row.publication_status !== "DELETION_PENDING") {
-      const renew = document.createElement("button");
-      renew.textContent = "Tạo đơn gia hạn";
-      renew.dataset.action = "renew";
-      if (renewalMonthlyRate !== null) {
-        const label = document.createElement("label");
-        label.textContent = `Số tháng gia hạn (${renewalMonthlyRate.toLocaleString("vi-VN")} VND/tháng)`;
-        const months = document.createElement("input");
-        months.type = "number";
-        months.min = "1";
-        months.step = "1";
-        months.value = "1";
-        months.inputMode = "numeric";
-        months.dataset.months = "";
-        months.setAttribute("aria-label", "Số tháng gia hạn");
-        label.append(months);
-        renew.disabled = !storageCheckoutEnabled;
-        actions.append(label, renew);
-      } else {
-        const select = document.createElement("select");
-        select.dataset.plan = "";
-        select.setAttribute("aria-label", "Chọn gói gia hạn");
-        const prompt = document.createElement("option");
-        prompt.value = "";
-        prompt.textContent = "Chọn gói gia hạn";
-        select.append(prompt);
-        for (const plan of storagePlans) {
-          const option = document.createElement("option");
-          option.value = plan.id;
-          option.textContent = plan.available && plan.amount_minor !== null
-            ? `${plan.title} · ${plan.amount_minor.toLocaleString("vi-VN")} ${plan.currency}`
-            : `${plan.title} · ${plan.lifetime ? "không áp dụng gia hạn" : "chưa được cấu hình"}`;
-          option.disabled = !plan.available || !storageCheckoutEnabled;
-          select.append(option);
+    if (row.design_status === "DELETION_PENDING") {
+      if (!row.deletion_requested || row.media_cleanup_pending) {
+        const retryDelete = document.createElement("button");
+        retryDelete.className = "danger";
+        retryDelete.textContent = row.deletion_requested
+          ? "Thử lại dọn ảnh công khai"
+          : "Thử lại xóa thiết kế";
+        retryDelete.dataset.action = "retry-delete";
+        actions.append(retryDelete);
+      }
+    } else if (!row.cleanup_pending) {
+      const edit = document.createElement("a");
+      edit.className = "button";
+      edit.href = `/templates/${encodeURIComponent(row.template_id)}/index.html?design=${encodeURIComponent(row.design_id)}`;
+      edit.textContent = "Mở trình chỉnh sửa / xem trước";
+      actions.append(edit);
+      if (row.payment_status === "SUCCEEDED" && !row.publication_id) {
+        const create = document.createElement("button");
+        create.className = "primary";
+        create.textContent = "Tạo website";
+        create.dataset.action = "create";
+        actions.append(create);
+      }
+      if (row.publication_id && row.publication_status === "UNPUBLISHED") {
+        const publish = document.createElement("button");
+        publish.className = "primary";
+        publish.textContent = row.published_at ? "Xuất bản lại" : "Xuất bản";
+        publish.dataset.action = "publish";
+        actions.append(publish);
+      }
+      if (row.publication_id && row.publication_status === "PUBLISHED") {
+        const unpublish = document.createElement("button");
+        unpublish.textContent = "Gỡ website";
+        unpublish.dataset.action = "unpublish";
+        actions.append(unpublish);
+      }
+      if (row.publication_id && row.publication_status !== "REVOKED") {
+        const revoke = document.createElement("button");
+        revoke.className = "danger";
+        revoke.textContent = "Thu hồi liên kết";
+        revoke.dataset.action = "revoke";
+        actions.append(revoke);
+      }
+      if (row.publication_id && row.publication_status !== "REVOKED" &&
+          row.revision > row.published_revision) {
+        const update = document.createElement("button");
+        update.textContent = "Chuẩn bị bản sửa";
+        update.dataset.action = "update";
+        actions.append(update);
+      }
+      if (row.publication_id && row.publication_status === "PUBLISHED") {
+        const copy = document.createElement("button");
+        copy.textContent = "Sao chép liên kết";
+        copy.dataset.action = "copy";
+        actions.append(copy);
+      }
+      if (row.publication_id && row.entitlement_status !== "LIFETIME" &&
+          row.publication_status !== "REVOKED" && row.publication_status !== "DELETION_PENDING") {
+        const renew = document.createElement("button");
+        renew.textContent = "Tạo đơn gia hạn";
+        renew.dataset.action = "renew";
+        if (renewalMonthlyRate !== null) {
+          const label = document.createElement("label");
+          label.textContent = `Số tháng gia hạn (${renewalMonthlyRate.toLocaleString("vi-VN")} VND/tháng)`;
+          const months = document.createElement("input");
+          months.type = "number";
+          months.min = "1";
+          months.step = "1";
+          months.value = "1";
+          months.inputMode = "numeric";
+          months.dataset.months = "";
+          months.setAttribute("aria-label", "Số tháng gia hạn");
+          label.append(months);
+          renew.disabled = !storageCheckoutEnabled;
+          actions.append(label, renew);
+        } else {
+          const select = document.createElement("select");
+          select.dataset.plan = "";
+          select.setAttribute("aria-label", "Chọn gói gia hạn");
+          const prompt = document.createElement("option");
+          prompt.value = "";
+          prompt.textContent = "Chọn gói gia hạn";
+          select.append(prompt);
+          for (const plan of storagePlans) {
+            const option = document.createElement("option");
+            option.value = plan.id;
+            option.textContent = plan.available && plan.amount_minor !== null
+              ? `${plan.title} · ${plan.amount_minor.toLocaleString("vi-VN")} ${plan.currency}`
+              : `${plan.title} · ${plan.lifetime ? "không áp dụng gia hạn" : "chưa được cấu hình"}`;
+            option.disabled = !plan.available || !storageCheckoutEnabled;
+            select.append(option);
+          }
+          renew.disabled = !storageCheckoutEnabled || !storagePlans.some((plan) => plan.available);
+          actions.append(select, renew);
         }
-        renew.disabled = !storageCheckoutEnabled || !storagePlans.some((plan) => plan.available);
-        actions.append(select, renew);
       }
     }
     card.append(actions);
@@ -291,9 +309,19 @@
       if (!storagePlanId) throw new Error("Hãy chọn gói lưu trữ cần gia hạn.");
       duration = { storage_plan_id: storagePlanId };
     }
+    const fingerprint = JSON.stringify({
+      publicationId: row.publication_id,
+      duration,
+    });
+    const requestKey = `crushify:renewal:${fingerprint}`;
+    let idempotencyKey = sessionStorage.getItem(requestKey);
+    if (!idempotencyKey) {
+      idempotencyKey = crypto.randomUUID();
+      sessionStorage.setItem(requestKey, idempotencyKey);
+    }
     const order = await api("/orders", {
       method: "POST",
-      headers: { "Idempotency-Key": crypto.randomUUID() },
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({
         design_id: row.design_id,
         renewal_publication_id: row.publication_id,
@@ -301,6 +329,7 @@
         asset_consents: [],
       }),
     });
+    sessionStorage.removeItem(requestKey);
     const amount = order.total_minor.toLocaleString("vi-VN");
     setNotice(`Đã tạo đơn ${order.order_reference} (${amount} ${order.currency}), trạng thái ${order.status}. Website chỉ được gia hạn sau khi thanh toán được xác minh.`);
     const instructions = order.payment?.instructions;
@@ -389,7 +418,9 @@
     const button = event.target instanceof Element ? event.target.closest("button[data-action]") : null;
     if (!button) return;
     const card = button.closest(".card");
-    const row = rows.find((item) => item.design_id === card?.dataset.designId);
+    const row = rows.find((item) =>
+      item.design_id === card?.dataset.designId &&
+      (item.publication_id || "") === (card?.dataset.publicationId || ""));
     if (!row || !(button instanceof HTMLButtonElement)) return;
     button.disabled = true;
     try {
@@ -399,6 +430,9 @@
       else if (button.dataset.action === "revoke") await revokePublication(row);
       else if (button.dataset.action === "update") await updatePublication(row, card);
       else if (button.dataset.action === "renew") await createRenewalOrder(row, card);
+      else if (button.dataset.action === "retry-delete") {
+        await api(`/designs/${encodeURIComponent(row.design_id)}`, { method: "DELETE" });
+      }
       else if (button.dataset.action === "revoke-consent") {
         const assetId = button.dataset.asset;
         if (!assetId) throw new Error("Không tìm thấy ảnh cần thu hồi quyền.");

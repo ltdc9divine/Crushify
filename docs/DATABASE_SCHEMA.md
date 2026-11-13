@@ -1,9 +1,9 @@
 # Crushify Database Schema
 
-**Status:** SQLite schema contract shared by the current Cloudflare D1 backend and the staged Turso/libSQL target. Migrations `0001`–`0008` are applied to local Wrangler D1 by integration tests and an ephemeral Turso/libSQL file database by tests; no persistent or remote database has been migrated.
+**Status:** SQLite schema contract shared by the current Cloudflare D1 backend and the staged Turso/libSQL target. Migrations `0001`–`0010` are applied to local Wrangler D1 by integration tests and an ephemeral Turso/libSQL file database by tests; no persistent or remote database has been migrated.
 **Schema baseline:** `schema_migrations` starts at version `1`; each later migration is immutable and transactional where D1 supports it.
 
-**Implementation note:** `migrations/0001_initial_schema.sql` is the baseline; `0002_auth_previews_and_uploads.sql` adds local authentication, preview, upload, rate-limit, and Our Universe v1 seed; `0003_local_test_payments.sql` adds the empty price catalog and payment-review/webhook fields; `0004_payment_webhook_recovery.sql` adds bounded-recovery metadata for verified webhook events; `0008_scheduled_maintenance.sql` adds a persistent Vercel lifecycle lease and run history. Business services use a provider-neutral database interface. D1-specific calls remain within the Cloudflare Worker boundary and D1 adapter. The generic `npm run db:migrate:turso` is intended for local files; the separate Vercel staging command requires staging-scoped credentials, explicit operator confirmation, an exact hostname pin, and validates the remote migration ledger before applying checksummed migrations. The Vercel adapter selects Turso using the staging-specific credential pair in Preview and Production-specific variables in Production. No remote Turso migration or D1 data transfer has occurred. Treat applied migrations as immutable.
+**Implementation note:** `migrations/0001_initial_schema.sql` is the baseline; `0002_auth_previews_and_uploads.sql` adds local authentication, preview, upload, rate-limit, and Our Universe v1 seed; `0003_local_test_payments.sql` adds the empty price catalog and payment-review/webhook fields; `0004_payment_webhook_recovery.sql` adds bounded-recovery metadata for verified webhook events; `0008_scheduled_maintenance.sql` adds a persistent Vercel lifecycle lease and run history; `0009_fulfillment_recovery_leases.sql` adds durable fulfillment leases, retry scheduling, and manual-review status while preserving existing jobs; `0010_asset_upload_leases.sql` adds persisted upload-session state and leases for deletion fencing. Business services use a provider-neutral database interface. D1-specific calls remain within the Cloudflare Worker boundary and D1 adapter. The generic `npm run db:migrate:turso` is intended for local files; the separate Vercel staging command requires staging-scoped credentials, explicit operator confirmation, an exact hostname pin, and validates the remote migration ledger before applying checksummed migrations. The Vercel adapter selects Turso using the staging-specific credential pair in Preview and Production-specific variables in Production. No remote Turso migration or D1 data transfer has occurred. Treat applied migrations as immutable.
 
 ## 1. Conventions
 
@@ -226,7 +226,7 @@ CREATE INDEX audit_actor_time ON audit_logs(actor_type, actor_id, created_at);
 
 The base schema deliberately leaves out security and operational tables that need their own retention/access policy:
 
-- `customer_sessions`, `login_tokens`, `asset_upload_sessions`, `preview_tokens`, and `auth_rate_limits` exist in local migration `0002`. Login, upload, and preview tokens are stored as hashes; production retention/cleanup and rate-limit policy still need operational review.
+- `customer_sessions`, `login_tokens`, `asset_upload_sessions`, `preview_tokens`, and `auth_rate_limits` exist in local migration `0002`. Login, upload, and preview tokens are stored as hashes; migration `0010` adds `asset_upload_sessions.status` and `lease_expires_at` so deletion can fence active upload work. Production retention/cleanup and rate-limit policy still need operational review.
 - `admin_users` or external identity mapping, `admin_sessions` only if Cloudflare Access alone is insufficient.
 - `payment_webhook_events(provider, event_id UNIQUE, received_at, processed_at, outcome, payload_hash)`; do not retain full sensitive webhook bodies unless necessary.
 - `coupon_redemptions(coupon_id, customer_id, order_id, redeemed_at)` with uniqueness policy to prevent duplicate redemption.
@@ -252,6 +252,8 @@ The base schema deliberately leaves out security and operational tables that nee
 `orders`: `DRAFT → AWAITING_PAYMENT → PAID → FULFILLING → FULFILLED`; alternate terminal/exception paths: `CANCELLED`, `EXPIRED`, `REFUND_PENDING → REFUNDED`. Provider failure leaves order awaiting payment or permits expiry; it does not mark the order paid.
 
 `payments`: `CREATED → PENDING → SUCCEEDED | FAILED | CANCELLED`; refund path `SUCCEEDED → REFUND_PENDING → REFUNDED`. Only a verified provider event or audited admin reconciliation may set success/refund state.
+
+`fulfillment_jobs`: `PENDING → PROCESSING → COMPLETED`; failed work becomes `FAILED` with a bounded exponential retry time, and exhausted retries become `MANUAL_REVIEW`. Claims use an atomic expiring lease with a per-claim fencing token. Fulfillment eligibility is independently rechecked against the settled payment and processed webhook evidence. Retry attempts never create or settle a payment.
 
 `assets`: `PENDING → QUARANTINED → READY` or `REJECTED`; deletion uses `DELETION_PENDING → DELETED`.
 
@@ -287,7 +289,13 @@ Migrations `0003_local_test_payments.sql` and `0004_payment_webhook_recovery.sql
 
 The local self-service order path snapshots the active template price and draft revision into the existing order/item/payment tables. Tests insert a clearly synthetic VND 50,000 price into disposable D1/Turso databases only. Migrations 0003–0004 insert no catalog rows, do not alter existing customer records, and have not been applied to remote D1/Turso.
 
-## 9. Local-only publication and delivery schema
+## 9. Fulfillment recovery schema
+
+Migration `0009_fulfillment_recovery_leases.sql` rebuilds `fulfillment_jobs` to add `MANUAL_REVIEW` and nullable `next_attempt_at`, `lease_token`, `lease_expires_at`, and `last_failure_at` columns. It copies all prior job identifiers, statuses, attempt counts, error codes, timestamps, and order references; existing `PROCESSING` jobs without a token are reclaimable by the new code. A recovery index covers status and due/lease timestamps. No migration is run against remote databases in this change. The migration is forward-only; if deployment reveals a problem, preserve the data and apply a reviewed forward repair rather than editing or reversing the applied migration.
+
+Automatic retry policy is eight attempts, starting at 30 seconds and doubling to a one-hour maximum delay. Expired claims are reclaimable, and a per-attempt random lease token prevents stale workers from finalizing a replaced claim. `last_error_code` stores only a fixed safe category, not raw exception messages. `MANUAL_REVIEW` remains visible through the order's fulfillment status and Worker scheduled-run counts. This schema does not add an operator recovery endpoint or enable a scheduler; deployed activation remains subject to existing environment and payment gates.
+
+## 10. Local-only publication and delivery schema
 
 Migration `0005_publication_delivery.sql` adds the local Phase 6 publication model. It rebuilds the earlier `publications` table to add the owning design/order, pinned template/schema/renderer versions, immutable snapshot JSON, status, lifecycle revision, optional expiry, and publication timestamps. Legacy rows are preserved as `UNPUBLISHED` with no public slug, empty snapshots, and renderer version `unsupported`; they cannot be served by the new renderer.
 
@@ -296,3 +304,7 @@ Migration `0005_publication_delivery.sql` adds the local Phase 6 publication mod
 `publication_assets` records per-publication, per-asset consent and derivative lifecycle (`PENDING`, `READY`, `CLEANUP_PENDING`, `DELETED`). The source `assets` object remains private. Consent withdrawal, unpublish/revoke, expiry, and design deletion deny access immediately; derivative cleanup failures remain marked for a later retry. Image bytes are never stored in D1.
 
 The migration seeds schema-v1 template/version metadata and defaults for Love Letter, Our Memories, Say Yes!, and Distance Means Nothing; Our Universe already has its registry entry. All five server validators and renderer mappings are code-owned. This migration and the publication mutation API have only been run in local test databases; do not infer staging or production readiness from local migration history.
+
+## 11. Upload/deletion coordination
+
+Migration `0010_asset_upload_leases.sql` adds the upload-session states `PENDING`, `UPLOADING`, `COMPLETE`, and `CANCELLED`, plus a lease expiry for in-flight storage writes. Upload grant creation, upload claims, storage-finalization metadata, and design deletion use conditional SQL writes and adapter batches. Deletion refuses to transition a design while an unexpired upload lease exists, and physical archival is conditional on every source asset being marked `DELETED`. Expired upload leases are cancelled during a deletion retry; the storage object is then cleaned through the existing idempotent retry path. D1 batches and Turso/libSQL write batches provide the SQLite transaction boundary used for these state changes. This migration is forward-only and has not been applied to any remote database.

@@ -196,6 +196,7 @@ export default {
         environment: runtimeEnv.ENVIRONMENT,
         counts: {
           completed: fulfillment.completed,
+          manual_review: fulfillment.manualReview,
           expired: lifecycle.expired,
           erased: lifecycle.erased,
           retryable: lifecycle.retryable,

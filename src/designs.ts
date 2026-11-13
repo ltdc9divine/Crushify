@@ -1,5 +1,6 @@
 import { requireCsrf, requireSession } from "./auth.ts";
 import { logSafeError } from "./logging.ts";
+import { cleanupAssets } from "./publications.ts";
 import { apiError, jsonResponse, nowIso, randomToken, readJson, safeId, sha256 } from "./http.ts";
 import { isJsonWithinLimit } from "./universe.ts";
 import {
@@ -13,6 +14,57 @@ import {
 import type { Env } from "./types.ts";
 
 const TOKEN_SECONDS = 15 * 60;
+
+const designHasProtectedHistory = `(
+  EXISTS (
+    SELECT 1 FROM orders o
+    WHERE o.design_id = designs.id
+      AND o.status IN ('PAID','FULFILLING','FULFILLED','REFUND_PENDING','REFUNDED')
+  ) OR EXISTS (
+    SELECT 1 FROM payments payment
+    JOIN orders o ON o.id = payment.order_id
+    WHERE o.design_id = designs.id
+      AND payment.status IN ('SUCCEEDED','REFUND_PENDING','REFUNDED')
+  ) OR EXISTS (
+    SELECT 1 FROM publications publication WHERE publication.design_id = designs.id
+  ) OR EXISTS (
+    SELECT 1 FROM storage_entitlements entitlement
+    JOIN publications publication ON publication.id = entitlement.publication_id
+    WHERE publication.design_id = designs.id
+  )
+)`;
+
+const noDesignDeletionInProgress = `NOT EXISTS (
+  SELECT 1 FROM orders o
+  WHERE o.design_id = designs.id
+    AND o.status IN ('DRAFT','AWAITING_PAYMENT','PAID','FULFILLING','REFUND_PENDING')
+) AND NOT EXISTS (
+  SELECT 1 FROM fulfillment_jobs job
+  JOIN orders o ON o.id = job.order_id
+  WHERE o.design_id = designs.id
+    AND job.status IN ('PENDING','PROCESSING','FAILED','MANUAL_REVIEW')
+)`;
+
+const noActiveUploadInProgress = `NOT EXISTS (
+  SELECT 1 FROM asset_upload_sessions upload
+  JOIN assets asset ON asset.id = upload.asset_id
+  WHERE asset.design_id = designs.id
+    AND upload.status = 'UPLOADING' AND upload.lease_expires_at > ?
+)`;
+
+const noSharedPublicationAsset = `NOT EXISTS (
+  SELECT 1 FROM assets source
+  JOIN publication_assets asset_ref ON asset_ref.asset_id = source.id
+    AND asset_ref.revoked_at IS NULL
+  JOIN publications other ON other.id = asset_ref.publication_id
+  WHERE source.design_id = designs.id
+    AND other.design_id <> designs.id
+    AND (
+      other.status IN ('PUBLISHED','UNPUBLISHED') OR
+      (other.status IN ('EXPIRED','REVOKED') AND
+        (other.retention_delete_after_at IS NULL OR other.retention_delete_after_at > ?))
+    )
+)`;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -164,75 +216,210 @@ async function deleteDesign(
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
-  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
 
   const ownerId = required.session!.customerId;
   const now = nowIso();
   const owned = await env.DB.prepare(
-    "SELECT id FROM designs WHERE id = ? AND customer_id = ? AND status IN ('DRAFT','DELETION_PENDING')",
-  ).bind(designId, ownerId).first<{ id: string }>();
+    "SELECT status FROM designs WHERE id = ? AND customer_id = ?",
+  ).bind(designId, ownerId).first<{ status: string }>();
   if (!owned) return apiError(requestId, 404, "NOT_FOUND", "Design not found");
-  await env.DB.prepare(
-    "UPDATE designs SET status = 'DELETION_PENDING', updated_at = ? WHERE id = ? AND customer_id = ?",
-  ).bind(now, designId, ownerId).run();
-
-  const derivatives = await env.DB.prepare(
-    `SELECT pa.id, pa.derivative_key
-     FROM publication_assets pa
-     JOIN publications p ON p.id = pa.publication_id
-     WHERE p.design_id = ? AND p.status IN ('PUBLISHED','UNPUBLISHED','REVOKED')
-       AND pa.derivative_key IS NOT NULL
-       AND pa.derivative_status IN ('READY','CLEANUP_PENDING')`,
-  ).bind(designId).all<{ id: string; derivative_key: string }>();
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE publications SET status = 'REVOKED', revoked_at = ?, unpublished_at = ?,
-         lifecycle_revision = lifecycle_revision + 1, updated_at = ?
-       WHERE design_id = ? AND status IN ('PUBLISHED','UNPUBLISHED')`,
-    ).bind(now, now, now, designId),
-    env.DB.prepare(
-      `UPDATE publication_assets SET revoked_at = COALESCE(revoked_at, ?),
-         derivative_status = CASE WHEN derivative_key IS NULL THEN 'DELETED' ELSE 'CLEANUP_PENDING' END,
-         updated_at = ?
-       WHERE publication_id IN (SELECT id FROM publications WHERE design_id = ? AND status = 'REVOKED')`,
-    ).bind(now, now, designId),
-  ]);
-  for (const derivative of derivatives.results) {
-    try {
-      await env.STORAGE.deletePublishedDerivative(derivative.derivative_key);
-      await env.DB.prepare(
-        `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'DELETED',
-           updated_at = ? WHERE id = ? AND derivative_key = ?`,
-      ).bind(nowIso(), derivative.id, derivative.derivative_key).run();
-    } catch (error) {
-      logSafeError("design.published_media_deletion_failed", "storage", error, { request_id: requestId });
-      return apiError(requestId, 503, "DELETION_PENDING", "Published media deletion will be retried");
+  if (!env.STORAGE) {
+    return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
+  }
+  if (owned.status === "ARCHIVED") {
+    const shared = await env.DB.prepare(
+      `SELECT id FROM designs
+       WHERE id = ? AND customer_id = ? AND NOT ${noSharedPublicationAsset}`,
+    ).bind(designId, ownerId, now).first<{ id: string }>();
+    if (shared) {
+      return apiError(requestId, 409, "ASSET_IN_USE",
+        "A design asset is still referenced by another active or retained website");
     }
+    const archivedAssets = await env.DB.prepare(
+      `SELECT id, object_key FROM assets
+       WHERE design_id = ? AND customer_id = ?`,
+    ).bind(designId, ownerId).all<{ id: string; object_key: string }>();
+    for (const asset of archivedAssets.results) {
+      try {
+        await env.STORAGE.delete(asset.object_key);
+        const deletedAt = nowIso();
+        await env.DB.prepare(
+          `UPDATE assets SET status = 'DELETED', deleted_at = COALESCE(deleted_at, ?), updated_at = ?
+           WHERE id = ? AND customer_id = ? AND status != 'DELETED'`,
+        ).bind(deletedAt, deletedAt, asset.id, ownerId).run();
+      } catch (error) {
+        logSafeError("design.media_deletion_failed", "storage", error, { request_id: requestId });
+        return apiError(requestId, 503, "DELETION_PENDING", "Design media cleanup will be retried");
+      }
+    }
+    return jsonResponse({ deleted: true }, 200, requestId);
+  }
+  if (owned.status !== "DRAFT" && owned.status !== "DELETION_PENDING") {
+    return apiError(requestId, 409, "DELETION_BLOCKED", "Design is not available for deletion");
+  }
+  const transition = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE designs SET status = 'DELETION_PENDING', updated_at = ?
+       WHERE id = ? AND customer_id = ? AND status IN ('DRAFT','DELETION_PENDING')
+         AND ${noDesignDeletionInProgress}
+         AND ${noActiveUploadInProgress}
+         AND NOT ${designHasProtectedHistory}
+         AND ${noSharedPublicationAsset}`,
+    ).bind(now, designId, ownerId, now, now),
+    env.DB.prepare(
+      `UPDATE designs SET status = 'DELETION_PENDING', updated_at = ?
+       WHERE id = ? AND customer_id = ? AND status IN ('DRAFT','DELETION_PENDING')
+         AND ${noDesignDeletionInProgress}
+         AND ${noActiveUploadInProgress}
+         AND ${designHasProtectedHistory}`,
+    ).bind(now, designId, ownerId, now),
+    env.DB.prepare(
+      `UPDATE assets SET status = 'DELETION_PENDING', updated_at = ?
+       WHERE design_id = ? AND customer_id = ? AND status != 'DELETED'
+         AND EXISTS (
+           SELECT 1 FROM designs
+           WHERE id = ? AND customer_id = ? AND status = 'DELETION_PENDING'
+             AND NOT ${designHasProtectedHistory}
+         )
+      `,
+    ).bind(now, designId, ownerId, designId, ownerId),
+    env.DB.prepare(
+      `UPDATE publications SET status = 'UNPUBLISHED', unpublished_at = ?,
+         lifecycle_revision = lifecycle_revision + 1, updated_at = ?
+       WHERE design_id = ? AND status = 'PUBLISHED'
+         AND EXISTS (
+           SELECT 1 FROM designs
+           WHERE id = ? AND customer_id = ? AND status = 'DELETION_PENDING'
+             AND ${designHasProtectedHistory}
+         )`,
+    ).bind(now, now, designId, designId, ownerId),
+    env.DB.prepare(
+      `UPDATE asset_upload_sessions
+       SET status = 'CANCELLED', lease_expires_at = NULL, used_at = COALESCE(used_at, ?)
+       WHERE status IN ('PENDING','UPLOADING')
+         AND (status = 'PENDING' OR lease_expires_at <= ?)
+         AND EXISTS (
+           SELECT 1 FROM assets a JOIN designs d ON d.id = a.design_id
+           WHERE a.id = asset_upload_sessions.asset_id AND d.id = ? AND d.customer_id = ?
+             AND d.status = 'DELETION_PENDING'
+         )`,
+    ).bind(now, now, designId, ownerId),
+  ]);
+  const physicalDeletionClaimed = transition[0]?.meta.changes === 1;
+  const protectedDeletionClaimed = transition[1]?.meta.changes === 1;
+  if (!physicalDeletionClaimed && !protectedDeletionClaimed) {
+    return apiError(requestId, 409, "DELETION_BLOCKED",
+      "Deletion is blocked while an upload, order, fulfillment, or shared publication is using this design");
+  }
+
+  if (protectedDeletionClaimed) {
+    const publications = await env.DB.prepare(
+      "SELECT id FROM publications WHERE design_id = ?",
+    ).bind(designId).all<{ id: string }>();
+    let cleanupSucceeded = true;
+    for (const publication of publications.results) {
+      if (!await cleanupAssets(env, publication.id)) cleanupSucceeded = false;
+    }
+    if (!cleanupSucceeded) {
+      return apiError(requestId, 503, "DELETION_PENDING",
+        "Public media cleanup is pending; payment and source data remain preserved");
+    }
+    return jsonResponse({
+      deleted: false,
+      deletion_requested: true,
+      public_access_revoked: true,
+      data_retained: true,
+    }, 202, requestId);
+  }
+
+  const sharedAsset = await env.DB.prepare(
+    `SELECT source.id FROM assets source
+     JOIN publication_assets asset_ref ON asset_ref.asset_id = source.id
+       AND asset_ref.revoked_at IS NULL
+     JOIN publications other ON other.id = asset_ref.publication_id
+     WHERE source.design_id = ? AND other.design_id <> ?
+       AND (
+         other.status IN ('PUBLISHED','UNPUBLISHED') OR
+         (other.status IN ('EXPIRED','REVOKED') AND
+           (other.retention_delete_after_at IS NULL OR other.retention_delete_after_at > ?))
+       )
+     LIMIT 1`,
+  ).bind(designId, designId, now).first<{ id: string }>();
+  if (sharedAsset) {
+    return apiError(requestId, 409, "ASSET_IN_USE",
+      "A design asset is still referenced by another active or retained website");
   }
 
   const assets = await env.DB.prepare(
-    "SELECT id, object_key FROM assets WHERE design_id = ? AND customer_id = ? AND status != 'DELETED'",
+    `SELECT id, object_key FROM assets
+     WHERE design_id = ? AND customer_id = ? AND status != 'DELETED'`,
   ).bind(designId, ownerId).all<{ id: string; object_key: string }>();
-  try {
-    for (const asset of assets.results) await env.STORAGE.delete(asset.object_key);
-  } catch (error) {
-    logSafeError("design.media_deletion_failed", "storage", error, { request_id: requestId });
-    return apiError(requestId, 503, "DELETION_PENDING", "Design deletion will be retried");
+  for (const asset of assets.results) {
+    try {
+      await env.STORAGE.delete(asset.object_key);
+      const deletedAt = nowIso();
+      const deleted = await env.DB.prepare(
+        `UPDATE assets SET status = 'DELETED', deleted_at = ?, updated_at = ?
+         WHERE id = ? AND customer_id = ? AND status = 'DELETION_PENDING'`,
+      ).bind(deletedAt, deletedAt, asset.id, ownerId).run();
+      if (deleted.meta.changes !== 1) {
+        const current = await env.DB.prepare(
+          "SELECT status FROM assets WHERE id = ? AND customer_id = ?",
+        ).bind(asset.id, ownerId).first<{ status: string }>();
+        if (current?.status !== "DELETED") {
+          return apiError(requestId, 503, "DELETION_PENDING",
+            "Design media cleanup is incomplete and will be retried");
+        }
+      }
+    } catch (error) {
+      logSafeError("design.media_deletion_failed", "storage", error, { request_id: requestId });
+      return apiError(requestId, 503, "DELETION_PENDING", "Design deletion will be retried");
+    }
   }
-  const statements = assets.results.map((asset) =>
+  const remainingAssets = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM assets
+     WHERE design_id = ? AND customer_id = ? AND status != 'DELETED'`,
+  ).bind(designId, ownerId).first<{ count: number }>();
+  if ((remainingAssets?.count ?? 0) > 0) {
+    return apiError(requestId, 503, "DELETION_PENDING",
+      "Design media cleanup is incomplete and will be retried");
+  }
+  await env.DB.batch([
     env.DB.prepare(
-      "UPDATE assets SET status = 'DELETED', deleted_at = ?, updated_at = ? WHERE id = ?",
-    ).bind(now, now, asset.id),
-  );
-  statements.push(
+      `UPDATE designs SET data_json = '{}', status = 'ARCHIVED', updated_at = ?
+       WHERE id = ? AND customer_id = ? AND status = 'DELETION_PENDING'
+         AND NOT ${designHasProtectedHistory}
+         AND ${noDesignDeletionInProgress}
+         AND ${noActiveUploadInProgress}
+         AND NOT EXISTS (
+           SELECT 1 FROM assets
+           WHERE design_id = designs.id AND customer_id = designs.customer_id
+             AND status != 'DELETED'
+         )
+         AND ${noSharedPublicationAsset}`,
+    ).bind(now, designId, ownerId, now, now),
     env.DB.prepare(
-      "UPDATE designs SET data_json = '{}', status = 'ARCHIVED', updated_at = ? WHERE id = ?",
-    ).bind(now, designId),
-    env.DB.prepare("DELETE FROM design_revisions WHERE design_id = ?").bind(designId),
-    env.DB.prepare("UPDATE preview_tokens SET revoked_at = ? WHERE design_id = ? AND revoked_at IS NULL")
-      .bind(now, designId),
-  );
-  await env.DB.batch(statements);
+      `DELETE FROM design_revisions
+       WHERE design_id = ? AND EXISTS (
+         SELECT 1 FROM designs
+         WHERE id = ? AND customer_id = ? AND status = 'ARCHIVED'
+       )`,
+    ).bind(designId, designId, ownerId),
+    env.DB.prepare(
+      `UPDATE preview_tokens SET revoked_at = ?
+       WHERE design_id = ? AND revoked_at IS NULL AND EXISTS (
+         SELECT 1 FROM designs
+         WHERE id = ? AND customer_id = ? AND status = 'ARCHIVED'
+       )`,
+    ).bind(now, designId, designId, ownerId),
+  ]);
+  const archived = await env.DB.prepare(
+    "SELECT status FROM designs WHERE id = ? AND customer_id = ?",
+  ).bind(designId, ownerId).first<{ status: string }>();
+  if (archived?.status !== "ARCHIVED") {
+    return apiError(requestId, 409, "DELETION_BLOCKED",
+      "Design data was retained because another operation still references it");
+  }
   return jsonResponse({ deleted: true }, 200, requestId);
 }
 

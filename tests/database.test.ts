@@ -30,7 +30,7 @@ describe("Turso/libSQL migrations", () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     try {
       const migrations = await loadMigrations();
-      assert.deepEqual(await applyMigrations(client, migrations), [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.deepEqual(await applyMigrations(client, migrations), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       assert.deepEqual(await applyMigrations(client, migrations), []);
 
       const ledger = await client.execute(
@@ -45,6 +45,8 @@ describe("Turso/libSQL migrations", () => {
         [6, "storage_entitlements"],
         [7, "love_letter_photos"],
         [8, "scheduled_maintenance"],
+        [9, "fulfillment_recovery_leases"],
+        [10, "asset_upload_leases"],
       ]);
 
       const foreignKeys = await client.execute("PRAGMA foreign_keys");
@@ -53,6 +55,9 @@ describe("Turso/libSQL migrations", () => {
       assert.equal(violations.rows.length, 0);
       const designForeignKeys = await client.execute("PRAGMA foreign_key_list('design_revisions')");
       assert.ok(designForeignKeys.rows.some((row) => row.table === "designs"));
+      const uploadSessionColumns = await client.execute("PRAGMA table_info('asset_upload_sessions')");
+      assert.ok(uploadSessionColumns.rows.some((row) => row.name === "status"));
+      assert.ok(uploadSessionColumns.rows.some((row) => row.name === "lease_expires_at"));
 
       const database = new TursoDatabaseAdapter(client);
       const customerIndexes = await client.execute("PRAGMA index_list('customers')");
@@ -117,6 +122,137 @@ describe("Turso/libSQL migrations", () => {
         () => database.prepare("SELECT ?").bind(undefined as never),
         /cannot be undefined/,
       );
+    } finally {
+      client.close();
+    }
+  });
+
+  it("backfills existing finalized upload sessions without changing pending uploads", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    try {
+      const migrations = await loadMigrations();
+      assert.deepEqual(await applyMigrations(client, migrations.slice(0, 9)),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      const timestamp = new Date().toISOString();
+      await client.execute({
+        sql: `INSERT INTO customers (
+          id, email, email_normalized, status, created_at, updated_at
+        ) VALUES ('upload-migration-customer', 'upload-migration@example.test',
+          'upload-migration@example.test', 'ACTIVE', ?, ?)`,
+        args: [timestamp, timestamp],
+      });
+      await client.execute({
+        sql: `INSERT INTO designs (
+          id, customer_id, template_id, schema_version, data_json, status, created_at, updated_at
+        ) VALUES ('upload-migration-design', 'upload-migration-customer',
+          'our-universe', 1, '{}', 'DRAFT', ?, ?)`,
+        args: [timestamp, timestamp],
+      });
+      await client.batch([
+        {
+          sql: `INSERT INTO assets (
+            id, customer_id, design_id, object_key, visibility, status, media_type,
+            byte_size, sha256, created_at, updated_at
+          ) VALUES ('upload-ready-asset', 'upload-migration-customer',
+            'upload-migration-design', 'private/upload-ready.png', 'PRIVATE', 'READY',
+            'image/png', 1, ?, ?, ?)`,
+          args: ["a".repeat(64), timestamp, timestamp],
+        },
+        {
+          sql: `INSERT INTO assets (
+            id, customer_id, design_id, object_key, visibility, status, media_type,
+            byte_size, sha256, created_at, updated_at
+          ) VALUES ('upload-pending-asset', 'upload-migration-customer',
+            'upload-migration-design', 'private/upload-pending.png', 'PRIVATE', 'PENDING',
+            'image/png', 1, '', ?, ?)`,
+          args: [timestamp, timestamp],
+        },
+        {
+          sql: `INSERT INTO asset_upload_sessions (
+            id, asset_id, customer_id, token_hash, expires_at, used_at, created_at
+          ) VALUES ('upload-ready-session', 'upload-ready-asset',
+            'upload-migration-customer', ?, ?, ?, ?)`,
+          args: ["b".repeat(64), timestamp, timestamp, timestamp],
+        },
+        {
+          sql: `INSERT INTO asset_upload_sessions (
+            id, asset_id, customer_id, token_hash, expires_at, used_at, created_at
+          ) VALUES ('upload-pending-session', 'upload-pending-asset',
+            'upload-migration-customer', ?, ?, NULL, ?)`,
+          args: ["c".repeat(64), timestamp, timestamp],
+        },
+      ]);
+
+      assert.deepEqual(await applyMigrations(client, migrations), [10]);
+      const sessions = await client.execute(
+        `SELECT id, status FROM asset_upload_sessions
+         WHERE id IN ('upload-ready-session','upload-pending-session') ORDER BY id`,
+      );
+      assert.deepEqual(sessions.rows, [
+        { id: "upload-pending-session", status: "PENDING" },
+        { id: "upload-ready-session", status: "COMPLETE" },
+      ]);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("preserves existing fulfillment jobs while adding durable recovery fields", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    try {
+      const migrations = await loadMigrations();
+      assert.deepEqual(await applyMigrations(client, migrations.slice(0, 8)), [
+        1, 2, 3, 4, 5, 6, 7, 8,
+      ]);
+      const timestamp = new Date().toISOString();
+      await client.execute({
+        sql: `INSERT INTO customers (
+          id, email, email_normalized, status, created_at, updated_at
+        ) VALUES (?, ?, ?, 'ACTIVE', ?, ?)`,
+        args: ["fulfillment-migration-customer", "fulfillment@example.test",
+          "fulfillment@example.test", timestamp, timestamp],
+      });
+      await client.execute({
+        sql: `INSERT INTO orders (
+          id, customer_id, order_type, status, currency, subtotal_minor,
+          discount_minor, total_minor, idempotency_key, created_at, updated_at
+        ) VALUES (?, ?, 'SELF_SERVICE', 'PAID', 'VND', 1, 0, 1, ?, ?, ?)`,
+        args: ["fulfillment-migration-order", "fulfillment-migration-customer",
+          "fulfillment-migration-key", timestamp, timestamp],
+      });
+      await client.execute({
+        sql: `INSERT INTO fulfillment_jobs (
+          id, order_id, status, attempts, last_error_code, started_at,
+          created_at, updated_at
+        ) VALUES (?, ?, 'FAILED', 3, ?, ?, ?, ?)`,
+        args: ["fulfillment-migration-job", "fulfillment-migration-order",
+          "PUBLICATION_FAILED", timestamp, timestamp, timestamp],
+      });
+
+      assert.deepEqual(await applyMigrations(client, migrations), [9, 10]);
+      const preserved = await client.execute(
+        `SELECT status, attempts, last_error_code, started_at, completed_at,
+                next_attempt_at, lease_token, lease_expires_at, last_failure_at
+         FROM fulfillment_jobs WHERE id = ?`,
+        ["fulfillment-migration-job"],
+      );
+      assert.deepEqual(preserved.rows[0], {
+        status: "FAILED",
+        attempts: 3,
+        last_error_code: "PUBLICATION_FAILED",
+        started_at: timestamp,
+        completed_at: null,
+        next_attempt_at: null,
+        lease_token: null,
+        lease_expires_at: null,
+        last_failure_at: null,
+      });
+      await client.execute(
+        "UPDATE fulfillment_jobs SET status = 'MANUAL_REVIEW' WHERE id = ?",
+        ["fulfillment-migration-job"],
+      );
+      const foreignKeyViolations = await client.execute("PRAGMA foreign_key_check");
+      assert.equal(foreignKeyViolations.rows.length, 0);
     } finally {
       client.close();
     }
