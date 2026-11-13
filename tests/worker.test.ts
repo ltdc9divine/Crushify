@@ -11,7 +11,7 @@ import { createStorageFromEnvironment } from "../src/storage/provider.ts";
 const noBindings = { DB: undefined } as never;
 
 describe("legacy Worker storage isolation", () => {
-  it("rejects staging Cloudinary at the shared provider factory and Worker API entry point", async () => {
+  it("rejects Worker staging before storage or database initialization", async () => {
     const unsafeStaging = {
       ENVIRONMENT: "staging",
       STORAGE_PROVIDER: "cloudinary",
@@ -25,21 +25,28 @@ describe("legacy Worker storage isolation", () => {
       /disabled in staging/,
     );
 
+    let databaseAccessed = false;
     const response = await worker.fetch(
       new Request("https://worker.example.test/api/v1/nonexistent"),
       {
         ...unsafeStaging,
         DATABASE_PROVIDER: "d1",
-        DB: {} as never,
+        DB: {
+          prepare() {
+            databaseAccessed = true;
+            throw new Error("Worker staging must not access the database");
+          },
+        } as never,
         ASSETS: { fetch: async () => new Response(null, { status: 404 }) } as never,
       } as never,
     );
-    assert.equal(response.status, 500);
+    assert.equal(response.status, 503);
     assert.equal((await response.json() as { error: { code: string } }).error.code,
-      "STORAGE_ISOLATION_ERROR");
+      "STAGING_RUNTIME_DISABLED");
+    assert.equal(databaseAccessed, false);
   });
 
-  it("preserves explicit R2 selection for staging Workers", () => {
+  it("keeps R2 selection explicit at the shared adapter factory", () => {
     const adapter = createStorageFromEnvironment({
       ENVIRONMENT: "staging",
       STORAGE_PROVIDER: "r2",
@@ -49,6 +56,85 @@ describe("legacy Worker storage isolation", () => {
       async delete() {},
     } as never);
     assert.equal(adapter.constructor.name, "R2StorageAdapter");
+  });
+
+  it("rejects missing and unknown Worker markers instead of treating them as local", async () => {
+    for (const environment of [undefined, "unknown"]) {
+      const response = await worker.fetch(
+        new Request("http://127.0.0.1/api/v1/nonexistent"),
+        {
+          ENVIRONMENT: environment,
+          LOCAL_TEST_MODE: "true",
+          DATABASE_PROVIDER: "d1",
+          DB: {} as never,
+          ASSETS: { fetch: async () => new Response(null, { status: 404 }) } as never,
+        } as never,
+      );
+      assert.equal(response.status, 500);
+      assert.equal((await response.json() as { error: { code: string } }).error.code,
+        "RUNTIME_CONFIGURATION_ERROR");
+    }
+  });
+
+  it("does not allow local-only flags in an explicitly Production Worker", async () => {
+    const response = await worker.fetch(
+      new Request("https://worker.example.test/api/v1/nonexistent"),
+      {
+        ENVIRONMENT: "production",
+        LOCAL_TEST_MODE: "true",
+        DATABASE_PROVIDER: "d1",
+        DB: {} as never,
+        ASSETS: { fetch: async () => new Response(null, { status: 404 }) } as never,
+      } as never,
+    );
+    assert.equal(response.status, 500);
+    assert.equal((await response.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR");
+  });
+
+  it("allows explicit local Worker execution only on a loopback request origin", async () => {
+    const localResponse = await worker.fetch(
+      new Request("http://127.0.0.1/api/v1/nonexistent"),
+      {
+        ENVIRONMENT: "local",
+        DATABASE_PROVIDER: "d1",
+        STORAGE_PROVIDER: "r2",
+        DB: {} as never,
+        MEDIA: {
+          put: async () => undefined,
+          get: async () => null,
+          delete: async () => undefined,
+        } as never,
+        ASSETS: { fetch: async () => new Response(null, { status: 404 }) } as never,
+      } as never,
+    );
+    assert.equal(localResponse.status, 404);
+
+    const nonLocalRequest = await worker.fetch(
+      new Request("https://worker.example.test/api/v1/nonexistent"),
+      {
+        ENVIRONMENT: "local",
+        DATABASE_PROVIDER: "d1",
+        DB: {} as never,
+        ASSETS: { fetch: async () => new Response(null, { status: 404 }) } as never,
+      } as never,
+    );
+    assert.equal(nonLocalRequest.status, 500);
+    assert.equal((await nonLocalRequest.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR");
+  });
+
+  it("requires an explicit Production scope for scheduled maintenance", async () => {
+    for (const environment of [undefined, "unknown", "staging", "local"]) {
+      await assert.rejects(
+        worker.scheduled({} as never, {
+          ENVIRONMENT: environment,
+          DATABASE_PROVIDER: "d1",
+          DB: {} as never,
+        } as never, { waitUntil() {} } as never),
+        /explicitly scoped Production Worker/,
+      );
+    }
   });
 });
 
@@ -68,7 +154,6 @@ describe("API foundation", () => {
     try {
       const mailer = createEmailService({
         ENVIRONMENT: "production",
-        LOCAL_TEST_MODE: "true",
         MAIL_PROVIDER: "resend",
         MAIL_API_KEY: "test-key",
         MAIL_FROM_EMAIL: "Crushify <noreply@example.test>",
@@ -176,7 +261,8 @@ describe("API foundation", () => {
   });
 
   it("adds a single restrictive policy to generated publication-shell responses", async () => {
-    const response = await worker.fetch(new Request("https://crushify.test/p/synthetic-slug"), {
+    const response = await worker.fetch(new Request("http://127.0.0.1/p/synthetic-slug"), {
+      ENVIRONMENT: "local",
       ASSETS: {
         fetch: async () => new Response("<!doctype html><title>Fixture</title>", {
           headers: { "content-type": "text/html" },

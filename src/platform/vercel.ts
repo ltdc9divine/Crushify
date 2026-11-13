@@ -12,6 +12,13 @@ import { MemoryStorageAdapter } from "../storage/mock.ts";
 import { runScheduledPublicationLifecycle } from "../scheduler.ts";
 import { logSafeError } from "../logging.ts";
 import type { Env } from "../types.ts";
+import {
+  classifyVercelEnvironment,
+  isLoopbackOrigin,
+  normalizeEnvironmentOrigin,
+  vercelHostOrigin,
+  type DeploymentEnvironment,
+} from "./environment.ts";
 
 export const VERCEL_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
 const allowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
@@ -41,6 +48,7 @@ export interface VercelEnvironment {
   APP_ORIGIN?: string;
   LOCAL_TEST_MODE?: string;
   LOCAL_TEST_CATALOG_OVERRIDE?: string;
+  LOCAL_TEST_PRICING_POLICY?: string;
   VERCEL_ENV?: string;
   VERCEL_URL?: string;
   VERCEL_BRANCH_URL?: string;
@@ -71,75 +79,73 @@ function requestId(): string {
   return crypto.randomUUID();
 }
 
-function normalizeOrigin(value: string, allowLocalHttp: boolean): string | null {
-  try {
-    const parsed = new URL(value);
-    const isLocalHost = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
-    if (parsed.origin !== value ||
-        (parsed.protocol !== "https:" &&
-          !(allowLocalHttp && parsed.protocol === "http:" && isLocalHost))) {
+export function resolveVercelOrigin(
+  environment: VercelEnvironment,
+  requestOrigin?: string,
+): string | null {
+  const runtime = classifyVercelEnvironment(environment.VERCEL_ENV, environment.ENVIRONMENT);
+  if (!runtime) return null;
+
+  const configuredOrigin = environment.APP_ORIGIN === undefined
+    ? undefined
+    : normalizeEnvironmentOrigin(environment.APP_ORIGIN, runtime);
+  if (environment.APP_ORIGIN !== undefined && !configuredOrigin) return null;
+
+  if (runtime === "local") {
+    if (configuredOrigin) return configuredOrigin;
+    if (!requestOrigin) return null;
+    const localRequestOrigin = normalizeEnvironmentOrigin(requestOrigin, "local");
+    return localRequestOrigin && isLoopbackOrigin(localRequestOrigin)
+      ? localRequestOrigin
+      : null;
+  }
+
+  const productionOrigin = environment.VERCEL_PROJECT_PRODUCTION_URL === undefined
+    ? undefined
+    : vercelHostOrigin(environment.VERCEL_PROJECT_PRODUCTION_URL);
+  if (environment.VERCEL_PROJECT_PRODUCTION_URL !== undefined && !productionOrigin) return null;
+
+  if (runtime === "staging") {
+    const deploymentOrigin = vercelHostOrigin(environment.VERCEL_URL);
+    if (!deploymentOrigin || deploymentOrigin === productionOrigin ||
+        (configuredOrigin && configuredOrigin !== deploymentOrigin)) {
       return null;
     }
-    return parsed.origin;
+    return deploymentOrigin;
+  }
+
+  if (configuredOrigin && productionOrigin && configuredOrigin !== productionOrigin) return null;
+  return configuredOrigin ?? productionOrigin ?? null;
+}
+
+function originFromEnvironment(environment: VercelEnvironment, request: Request): string | null {
+  let requestOrigin: string | undefined;
+  try {
+    requestOrigin = new URL(request.url).origin;
   } catch {
     return null;
   }
+  return resolveVercelOrigin(environment, requestOrigin);
 }
 
-function originFromEnvironment(environment: VercelEnvironment): string | null {
-  const configuredOrigin = environment.APP_ORIGIN
-    ? normalizeOrigin(environment.APP_ORIGIN, environment.VERCEL_ENV === "development")
-    : null;
-  const productionOrigin = environment.VERCEL_PROJECT_PRODUCTION_URL
-    ? normalizeOrigin(
-        /^https?:\/\//i.test(environment.VERCEL_PROJECT_PRODUCTION_URL)
-          ? environment.VERCEL_PROJECT_PRODUCTION_URL
-          : `https://${environment.VERCEL_PROJECT_PRODUCTION_URL}`,
-        false,
-      )
-    : null;
-
-  if (configuredOrigin && productionOrigin &&
-      (environment.VERCEL_ENV === "production" || environment.ENVIRONMENT === "production") &&
-      configuredOrigin !== productionOrigin) {
-    return null;
-  }
-  if (configuredOrigin) return configuredOrigin;
-  if (productionOrigin) return productionOrigin;
-  if (environment.VERCEL_ENV === "preview" && environment.VERCEL_URL &&
-      /^[A-Za-z0-9.-]+$/.test(environment.VERCEL_URL)) {
-    return `https://${environment.VERCEL_URL}`;
-  }
-  return null;
-}
-
-function runtimeEnvironment(environment: VercelEnvironment): Env["ENVIRONMENT"] {
-  if (environment.ENVIRONMENT === "staging" && environment.VERCEL_ENV === "preview") {
-    return "staging";
-  }
-  if (environment.ENVIRONMENT === "local" && environment.VERCEL_ENV === "development") {
-    return "local";
-  }
-  if (environment.ENVIRONMENT === "production" && environment.VERCEL_ENV === "production") {
-    return "production";
-  }
-  if (environment.VERCEL_ENV === "production") return "production";
-  if (environment.VERCEL_ENV === "preview") return "staging";
-  return "local";
-}
-
-function validateEnvironmentOverride(environment: VercelEnvironment): boolean {
-  if (environment.VERCEL_ENV === "preview") {
-    return environment.ENVIRONMENT === "staging";
-  }
-  if (environment.ENVIRONMENT === undefined) return true;
-  if (environment.ENVIRONMENT === "staging") return false;
-  if (environment.ENVIRONMENT === "production") return environment.VERCEL_ENV === "production";
-  if (environment.ENVIRONMENT === "local") return environment.VERCEL_ENV === "development";
-  return false;
+function runtimeEnvironment(environment: VercelEnvironment): DeploymentEnvironment {
+  const runtime = classifyVercelEnvironment(environment.VERCEL_ENV, environment.ENVIRONMENT);
+  if (!runtime) throw new TypeError("Vercel deployment environment is not explicitly classified");
+  return runtime;
 }
 
 function validateCredentialScope(environment: VercelEnvironment): boolean {
+  const hasLocalOnlyConfiguration = [
+    environment.LOCAL_TEST_MODE,
+    environment.LOCAL_TEST_CATALOG_OVERRIDE,
+    environment.LOCAL_TEST_PRICING_POLICY,
+    environment.LOCAL_TEST_MAIL_SINK_URL,
+    environment.PAYMENT_MODE,
+    environment.SEPAY_WEBHOOK_SECRET,
+    environment.SEPAY_BANK_CODE,
+    environment.SEPAY_BANK_ACCOUNT,
+    environment.SEPAY_ACCOUNT_NAME,
+  ].some((value) => value !== undefined);
   const previewHasProductionCredentials = environment.VERCEL_ENV === "preview" &&
     [
       environment.TURSO_DATABASE_URL,
@@ -157,6 +163,7 @@ function validateCredentialScope(environment: VercelEnvironment): boolean {
       environment.SEPAY_ACCOUNT_NAME,
       environment.LOCAL_TEST_MODE,
       environment.LOCAL_TEST_CATALOG_OVERRIDE,
+      environment.LOCAL_TEST_PRICING_POLICY,
       environment.LOCAL_TEST_MAIL_SINK_URL,
     ].some((value) => value !== undefined);
   const productionHasStagingCredentials = environment.VERCEL_ENV === "production" &&
@@ -168,27 +175,57 @@ function validateCredentialScope(environment: VercelEnvironment): boolean {
       environment.CLOUDINARY_STAGING_API_SECRET,
       environment.PREVIEW_EMAIL_SINK,
       environment.LOCAL_TEST_MAIL_SINK_URL,
+      environment.LOCAL_TEST_MODE,
+      environment.LOCAL_TEST_CATALOG_OVERRIDE,
+      environment.LOCAL_TEST_PRICING_POLICY,
+      environment.PAYMENT_MODE,
+      environment.SEPAY_WEBHOOK_SECRET,
+      environment.SEPAY_BANK_CODE,
+      environment.SEPAY_BANK_ACCOUNT,
+      environment.SEPAY_ACCOUNT_NAME,
     ].some((value) => value !== undefined);
-  return !previewHasProductionCredentials && !productionHasStagingCredentials;
+  const localHasRemoteCredentials = environment.VERCEL_ENV === "development" &&
+    [
+      environment.TURSO_STAGING_DATABASE_URL,
+      environment.TURSO_STAGING_AUTH_TOKEN,
+      environment.CLOUDINARY_CLOUD_NAME,
+      environment.CLOUDINARY_API_KEY,
+      environment.CLOUDINARY_API_SECRET,
+      environment.CLOUDINARY_STAGING_CLOUD_NAME,
+      environment.CLOUDINARY_STAGING_API_KEY,
+      environment.CLOUDINARY_STAGING_API_SECRET,
+      environment.CLOUDINARY_PRODUCTION_CLOUD_NAME,
+      environment.MAIL_PROVIDER,
+      environment.MAIL_API_KEY,
+      environment.MAIL_FROM_EMAIL,
+      environment.PREVIEW_EMAIL_SINK,
+    ].some((value) => value !== undefined) ||
+    (environment.VERCEL_ENV === "development" && environment.STORAGE_PROVIDER === "cloudinary");
+  const localFlagsOutsideDevelopment = environment.VERCEL_ENV !== "development" &&
+    hasLocalOnlyConfiguration;
+  return !previewHasProductionCredentials &&
+    !productionHasStagingCredentials &&
+    !localHasRemoteCredentials &&
+    !localFlagsOutsideDevelopment;
 }
 
 export function validateVercelEnvironment(environment: VercelEnvironment): string | null {
-  if (!["development", "preview", "production"].includes(environment.VERCEL_ENV ?? "")) {
+  const runtime = classifyVercelEnvironment(environment.VERCEL_ENV, environment.ENVIRONMENT);
+  if (!runtime || !validateCredentialScope(environment)) {
     return "RUNTIME_CONFIGURATION_ERROR";
   }
-  if (!validateEnvironmentOverride(environment) || !validateCredentialScope(environment)) {
+  if (environment.APP_ORIGIN !== undefined &&
+      !normalizeEnvironmentOrigin(environment.APP_ORIGIN, runtime)) {
     return "RUNTIME_CONFIGURATION_ERROR";
   }
-  if (environment.APP_ORIGIN &&
-      !normalizeOrigin(environment.APP_ORIGIN, environment.VERCEL_ENV === "development")) {
-    return "RUNTIME_CONFIGURATION_ERROR";
+  if (runtime === "staging" || runtime === "production") {
+    if (!resolveVercelOrigin(environment)) return "RUNTIME_CONFIGURATION_ERROR";
   }
-  if (environment.VERCEL_ENV === "preview") {
+  if (runtime === "staging") {
     if (environment.PREVIEW_EMAIL_SINK !== undefined &&
         environment.PREVIEW_EMAIL_SINK !== "discard") {
       return "RUNTIME_CONFIGURATION_ERROR";
     }
-    if (!originFromEnvironment(environment)) return "RUNTIME_CONFIGURATION_ERROR";
     if (environment.STORAGE_PROVIDER === "cloudinary" ||
         environment.CLOUDINARY_STAGING_CLOUD_NAME !== undefined ||
         environment.CLOUDINARY_STAGING_API_KEY !== undefined ||
@@ -258,9 +295,12 @@ function validateDatabaseConfiguration(environment: VercelEnvironment): string |
   if (parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
     return "DATABASE_CONFIGURATION_ERROR";
   }
-  if (protocol === "file:" && environment.VERCEL_ENV !== "development") {
+  const runtime = runtimeEnvironment(environment);
+  if ((runtime === "local" && protocol !== "file:") ||
+      (runtime !== "local" && protocol === "file:")) {
     return "DATABASE_CONFIGURATION_ERROR";
   }
+  if (runtime === "local" && authToken?.trim()) return "DATABASE_CONFIGURATION_ERROR";
   if (protocol !== "file:" && !authToken?.trim()) {
     return "DATABASE_CONFIGURATION_ERROR";
   }
@@ -268,11 +308,11 @@ function validateDatabaseConfiguration(environment: VercelEnvironment): string |
     return "DATABASE_CONFIGURATION_ERROR";
   }
   const isStagingDatabase = stagingTursoHostname.test(parsedUrl.hostname);
-  if (runtimeEnvironment(environment) === "staging" &&
+  if (runtime === "staging" &&
       (protocol === "file:" || !isStagingDatabase)) {
     return "DATABASE_CONFIGURATION_ERROR";
   }
-  if (runtimeEnvironment(environment) === "production" && isStagingDatabase) {
+  if (runtime === "production" && isStagingDatabase) {
     return "DATABASE_CONFIGURATION_ERROR";
   }
   return null;
@@ -314,6 +354,9 @@ function createStorage(
   dependencies: VercelRuntimeDependencies,
 ): Storage {
   if (environment.STORAGE_PROVIDER === "cloudinary") {
+    if (runtimeEnvironment(environment) !== "production") {
+      throw new TypeError("Cloudinary is not configured for this runtime");
+    }
     const config = resolveCloudinaryConfiguration({
       ...environment,
       ENVIRONMENT: runtimeEnvironment(environment),
@@ -380,10 +423,9 @@ export function createVercelApiHandler(
       )) {
         return apiError(requestId(), 401, "UNAUTHENTICATED", "Scheduled request is not authorized");
       }
-      const stagingPreview = environment.ENVIRONMENT === "staging" &&
-        environment.VERCEL_ENV === "preview";
-      const production = environment.ENVIRONMENT === "production" &&
-        environment.VERCEL_ENV === "production";
+      const runtime = classifyVercelEnvironment(environment.VERCEL_ENV, environment.ENVIRONMENT);
+      const stagingPreview = runtime === "staging";
+      const production = runtime === "production";
       if (!stagingPreview && !production) {
         return apiError(requestId(), 404, "NOT_FOUND", "Route not found");
       }
@@ -430,7 +472,12 @@ export function createVercelApiHandler(
       }
     }
 
-    const origin = originFromEnvironment(environment);
+    const scopeError = validateVercelEnvironment(environment);
+    if (scopeError) {
+      return apiError(requestId(), 500, scopeError, "Application environment or credentials do not match the Vercel deployment");
+    }
+
+    const origin = originFromEnvironment(environment, request);
     const requestOrigin = request.headers.get("origin");
 
     if (request.method === "OPTIONS") {
@@ -449,12 +496,8 @@ export function createVercelApiHandler(
       return withCors(await handleApiRequest(request, { DB: livenessDatabase }), request, origin);
     }
 
-    if (!["development", "preview", "production"].includes(environment.VERCEL_ENV ?? "") || !origin) {
+    if (!origin) {
       return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Application origin is not configured for this runtime");
-    }
-    const scopeError = validateVercelEnvironment(environment);
-    if (scopeError) {
-      return apiError(requestId(), 500, scopeError, "Application environment or credentials do not match the Vercel deployment");
     }
 
     const databaseError = validateDatabaseConfiguration(environment);

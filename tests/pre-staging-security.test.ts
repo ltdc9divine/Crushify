@@ -32,6 +32,7 @@ const previewEnvironment = {
   ENVIRONMENT: "staging",
   APP_ORIGIN: "https://preview.crushify.test",
   VERCEL_ENV: "preview",
+  VERCEL_URL: "preview.crushify.test",
 } as const;
 
 describe("pre-staging environment and storage isolation", () => {

@@ -1,5 +1,6 @@
 import { requireCsrf, requireSession } from "./auth.ts";
 import { logSafeError } from "./logging.ts";
+import { normalizeEnvironmentOrigin } from "./platform/environment.ts";
 import { DatabaseError } from "./database.ts";
 import {
   apiError,
@@ -72,8 +73,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function localPublishingEnabled(env: Env): boolean {
-  return env.LOCAL_TEST_MODE === "true" &&
-    (env.ENVIRONMENT === undefined || env.ENVIRONMENT === "local");
+  return env.LOCAL_TEST_MODE === "true" && env.ENVIRONMENT === "local";
 }
 
 async function requireLocalPublishing(requestId: string, env: Env): Promise<Response | null> {
@@ -90,8 +90,27 @@ function publicationSlug(): string {
   return `g${randomToken(16)}`;
 }
 
-function urlForPublication(request: Request, slug: string): string {
-  return new URL(`/p/${encodeURIComponent(slug)}`, request.url).toString();
+function applicationOrigin(request: Request, env: Env): string {
+  const runtime = env.ENVIRONMENT;
+  if (runtime !== "local" && runtime !== "staging" && runtime !== "production") {
+    throw new TypeError("Application origin requires an explicitly classified environment");
+  }
+  if (env.APP_ORIGIN !== undefined) {
+    const configuredOrigin = normalizeEnvironmentOrigin(env.APP_ORIGIN, runtime);
+    if (!configuredOrigin) throw new TypeError("Application origin is invalid for this environment");
+    return configuredOrigin;
+  }
+  if (runtime === "staging") {
+    throw new TypeError("Staging publication links require a validated application origin");
+  }
+  const requestOrigin = new URL(request.url).origin;
+  const validatedRequestOrigin = normalizeEnvironmentOrigin(requestOrigin, runtime);
+  if (!validatedRequestOrigin) throw new TypeError("Request origin is invalid for this environment");
+  return validatedRequestOrigin;
+}
+
+export function createPublicationUrl(request: Request, slug: string, env: Env): string {
+  return new URL(`/p/${encodeURIComponent(slug)}`, applicationOrigin(request, env)).toString();
 }
 
 async function paidOrderForOwner(
@@ -308,7 +327,7 @@ async function insertPublication(
         publication_id: publicationId,
         status: "UNPUBLISHED",
         lifecycle_revision: 1,
-        url: urlForPublication(request, slug),
+        url: createPublicationUrl(request, slug, env),
       }, 201, requestId);
     } catch (error) {
       if (!(error instanceof DatabaseError) || error.code !== "CONSTRAINT") throw error;
@@ -655,7 +674,7 @@ async function publish(
   return jsonResponse({
     status: "PUBLISHED",
     lifecycle_revision: expectedLifecycle + 1,
-    url: row.slug ? urlForPublication(request, row.slug) : null,
+    url: row.slug ? createPublicationUrl(request, row.slug, env) : null,
     published_at: row.status === "PUBLISHED" ? undefined : now,
   }, 200, requestId);
 }
@@ -1031,7 +1050,7 @@ async function listCustomerWebsites(
     list.push(consent.asset_id);
     consentedByPublication.set(consent.publication_id, list);
   }
-  const origin = new URL(request.url).origin;
+  const origin = applicationOrigin(request, env);
   return jsonResponse({
     websites: rows.results.map((row) => ({
       ...row,
@@ -1565,7 +1584,7 @@ export async function handlePublicationRoutes(
       design_revision: row.published_revision,
       status: row.status,
       lifecycle_revision: row.lifecycle_revision,
-      url: row.slug ? urlForPublication(request, row.slug) : null,
+      url: row.slug ? createPublicationUrl(request, row.slug, env) : null,
       expires_at: row.expires_at,
     }, 200, requestId);
   }

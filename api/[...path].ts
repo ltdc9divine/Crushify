@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { apiError, MAX_IMAGE_BYTES, MAX_JSON_BYTES } from "../src/http.ts";
-import { createVercelApiHandler, VERCEL_UPLOAD_MAX_BYTES } from "../src/platform/vercel.ts";
+import {
+  createVercelApiHandler,
+  resolveVercelOrigin,
+  VERCEL_UPLOAD_MAX_BYTES,
+} from "../src/platform/vercel.ts";
 
 const supportedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
 const apiHandler = createVercelApiHandler(process.env);
@@ -135,7 +139,12 @@ export default async function handler(
     return;
   }
 
-  const url = new URL(path, "https://vercel.invalid");
+  const localRequestOrigin = process.env.VERCEL_ENV === "development" &&
+      typeof request.headers.host === "string"
+    ? `http://${request.headers.host}`
+    : undefined;
+  const requestOrigin = resolveVercelOrigin(process.env, localRequestOrigin) ?? "https://vercel.invalid";
+  const url = new URL(path, requestOrigin);
   const init: RequestInit & { duplex?: "half" } = { method, headers };
   if (body && body.byteLength > 0) {
     const ownedBody = new Uint8Array(body.byteLength);

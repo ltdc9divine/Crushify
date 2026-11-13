@@ -57,6 +57,7 @@ describe("Vercel scheduled publication lifecycle", () => {
       CLOUDINARY_API_SECRET: "synthetic-api-secret",
       ENVIRONMENT: "production",
       VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
       CRON_SECRET: secret,
     };
     const request = (authorization = `Bearer ${secret}`) => new Request(
@@ -172,6 +173,7 @@ describe("Vercel scheduled publication lifecycle", () => {
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
       APP_ORIGIN: "https://crushify-staging.vercel.app",
+      VERCEL_URL: "crushify-staging.vercel.app",
       CRON_SECRET: secret,
     };
     const handler = createVercelApiHandler(environment, {

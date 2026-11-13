@@ -6,7 +6,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --local --var ENVIRONMENT:local",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "db:apply:local": "wrangler d1 migrations apply crushify-local --local",

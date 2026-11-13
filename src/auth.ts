@@ -1,5 +1,6 @@
 import { apiError, getCookie, isAllowedOrigin, jsonResponse, nowIso, randomToken, readJson, safeId, sha256 } from "./http.ts";
 import { logSafeError, logSafeInfo } from "./logging.ts";
+import { normalizeEnvironmentOrigin } from "./platform/environment.ts";
 import type { Env, Session } from "./types.ts";
 
 const SESSION_COOKIE = "crushify_session";
@@ -111,7 +112,7 @@ export function createEmailService(env: Env, _origin: string): EmailService | nu
       : null;
   }
   const isLocalTest = env.LOCAL_TEST_MODE === "true" &&
-    (env.ENVIRONMENT === undefined || env.ENVIRONMENT === "local");
+    env.ENVIRONMENT === "local";
   if (isLocalTest) {
     const sinkUrl = env.LOCAL_TEST_MAIL_SINK_URL;
     if (sinkUrl) {
@@ -130,6 +131,7 @@ export function createEmailService(env: Env, _origin: string): EmailService | nu
     }
     return new LocalTestingEmailService(env.LOCAL_TEST_EMAIL_SINK, sinkUrl);
   }
+  if (env.ENVIRONMENT !== "production") return null;
   if (env.MAIL_PROVIDER === "resend" && env.MAIL_API_KEY && env.MAIL_FROM_EMAIL) {
     return new ResendEmailService(env.MAIL_API_KEY, env.MAIL_FROM_EMAIL);
   }
@@ -140,24 +142,22 @@ export function createEmailService(env: Env, _origin: string): EmailService | nu
 }
 
 function isLocalTestMode(env: Env): boolean {
-  return env.LOCAL_TEST_MODE === "true" &&
-    (env.ENVIRONMENT === undefined || env.ENVIRONMENT === "local");
+  return env.LOCAL_TEST_MODE === "true" && env.ENVIRONMENT === "local";
 }
 
 function getAppOrigin(request: Request, env: Env): string | null {
+  const runtime = env.ENVIRONMENT;
+  if (runtime !== "local" && runtime !== "staging" && runtime !== "production") return null;
   const configured = env.APP_ORIGIN;
   if (configured) {
-    try {
-      const url = new URL(configured);
-      if (url.origin !== configured || (url.protocol !== "https:" && !isLocalTestMode(env))) {
-        return null;
-      }
-      return url.origin;
-    } catch {
-      return null;
-    }
+    return normalizeEnvironmentOrigin(configured, runtime);
   }
-  return isLocalTestMode(env) ? new URL(request.url).origin : null;
+  if (runtime !== "local" || !isLocalTestMode(env)) return null;
+  try {
+    return normalizeEnvironmentOrigin(new URL(request.url).origin, "local");
+  } catch {
+    return null;
+  }
 }
 
 function cookieOptions(env: Env, maxAge: number): string {

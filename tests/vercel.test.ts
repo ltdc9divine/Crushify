@@ -92,9 +92,9 @@ describe("Vercel API runtime adapter", () => {
       TURSO_AUTH_TOKEN: "synthetic-test-only",
     }, dependencies);
     const remoteResponse = await remoteDatabase(webhook());
-    assert.equal(remoteResponse.status, 503);
+    assert.equal(remoteResponse.status, 500);
     assert.equal((await remoteResponse.json() as { error: { code: string } }).error.code,
-      "PAYMENTS_DISABLED");
+      "DATABASE_CONFIGURATION_ERROR");
 
     const cloudStorage = createVercelApiHandler({
       ...local,
@@ -104,9 +104,9 @@ describe("Vercel API runtime adapter", () => {
       CLOUDINARY_API_SECRET: "synthetic-test-only",
     }, dependencies);
     const cloudStorageResponse = await cloudStorage(webhook());
-    assert.equal(cloudStorageResponse.status, 503);
+    assert.equal(cloudStorageResponse.status, 500);
     assert.equal((await cloudStorageResponse.json() as { error: { code: string } }).error.code,
-      "PAYMENTS_DISABLED");
+      "RUNTIME_CONFIGURATION_ERROR");
 
     const preview = createVercelApiHandler({
       ...local,
@@ -125,6 +125,7 @@ describe("Vercel API runtime adapter", () => {
       LOCAL_TEST_PRICING_POLICY: undefined,
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
+      VERCEL_URL: "crushify.test",
     }, dependencies);
     const previewResponse = await preview(webhook());
     assert.equal(previewResponse.status, 503);
@@ -142,6 +143,13 @@ describe("Vercel API runtime adapter", () => {
       ENVIRONMENT: "production",
       VERCEL_ENV: "production",
       VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+      LOCAL_TEST_MODE: undefined,
+      LOCAL_TEST_CATALOG_OVERRIDE: undefined,
+      PAYMENT_MODE: undefined,
+      SEPAY_WEBHOOK_SECRET: undefined,
+      SEPAY_BANK_CODE: undefined,
+      SEPAY_BANK_ACCOUNT: undefined,
+      SEPAY_ACCOUNT_NAME: undefined,
     }, dependencies);
     const productionResponse = await production(webhook());
     assert.equal(productionResponse.status, 503);
@@ -187,6 +195,7 @@ describe("Vercel API runtime adapter", () => {
       CLOUDINARY_API_SECRET: "synthetic-test-only",
       APP_ORIGIN: "https://preview.crushify.test",
       VERCEL_ENV: "preview",
+      VERCEL_URL: "preview.crushify.test",
     }, dependencies);
     const implicitPreviewResponse = await implicitPreviewEnvironment(
       new Request("https://preview.crushify.test/api/v1/customers/me"),
@@ -203,6 +212,7 @@ describe("Vercel API runtime adapter", () => {
       ENVIRONMENT: "staging",
       APP_ORIGIN: "https://preview.crushify.test",
       VERCEL_ENV: "preview",
+      VERCEL_URL: "preview.crushify.test",
     }, dependencies);
     const productionDatabasePreviewResponse = await productionDatabaseInPreview(
       new Request("https://preview.crushify.test/api/v1/customers/me"),
@@ -222,6 +232,7 @@ describe("Vercel API runtime adapter", () => {
       APP_ORIGIN: "https://preview.crushify.test",
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
+      VERCEL_URL: "preview.crushify.test",
     }, dependencies);
     const genericCredentialsResponse = await genericCredentialsInPreview(
       new Request("https://preview.crushify.test/api/v1/customers/me"),
@@ -241,6 +252,7 @@ describe("Vercel API runtime adapter", () => {
       APP_ORIGIN: "https://preview.crushify.test",
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
+      VERCEL_URL: "preview.crushify.test",
     }, dependencies);
     const genericCloudinaryResponse = await genericCloudinaryCredentialsInPreview(
       new Request("https://preview.crushify.test/api/v1/customers/me"),
@@ -289,6 +301,7 @@ describe("Vercel API runtime adapter", () => {
       ENVIRONMENT: "staging",
       APP_ORIGIN: "https://preview.crushify.test",
       VERCEL_ENV: "preview",
+      VERCEL_URL: "preview.crushify.test",
     }, dependencies);
     const productionCloudPreviewResponse = await productionCloudInPreview(
       new Request("https://preview.crushify.test/api/v1/customers/me"),
@@ -389,6 +402,7 @@ describe("Vercel API runtime adapter", () => {
       PREVIEW_EMAIL_SINK: "discard",
       APP_ORIGIN: "https://preview.crushify.test",
       VERCEL_ENV: "preview",
+      VERCEL_URL: "preview.crushify.test",
     }, {
       async connectDatabase() {
         return { database, close: () => undefined };
@@ -1051,8 +1065,7 @@ describe("Vercel API runtime adapter", () => {
     let attempts = 0;
     const handler = createVercelApiHandler({
       DATABASE_PROVIDER: "turso",
-      TURSO_DATABASE_URL: "libsql://test.turso.io",
-      TURSO_AUTH_TOKEN: "test-token",
+      TURSO_DATABASE_URL: "file:local-test.db",
       STORAGE_PROVIDER: "mock",
       LOCAL_TEST_MODE: "true",
       APP_ORIGIN: "https://crushify.test",
