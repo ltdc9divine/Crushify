@@ -30,10 +30,16 @@ export function resolveCloudinaryConfiguration(
       "Cloudinary storage is disabled in staging until account isolation is independently verified",
     );
   }
-  if (environment.ENVIRONMENT !== "local" && environment.ENVIRONMENT !== "production") {
+  if (environment.ENVIRONMENT === "local") {
+    throw new CloudinaryConfigurationError(
+      "STORAGE_ISOLATION_ERROR",
+      "Cloudinary storage is disabled in local development; use local mock storage",
+    );
+  }
+  if (environment.ENVIRONMENT !== "production") {
     throw new CloudinaryConfigurationError(
       "STORAGE_CONFIGURATION_ERROR",
-      "Cloudinary storage requires an explicitly identified local or production environment",
+      "Cloudinary storage requires an explicitly identified Production environment",
     );
   }
   if (environment.CLOUDINARY_STAGING_CLOUD_NAME !== undefined ||

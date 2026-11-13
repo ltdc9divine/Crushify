@@ -168,6 +168,83 @@ describe("CloudinaryStorageAdapter", () => {
     assert.equal(deleteRequest.get("public_id"), key);
     assert.equal(JSON.stringify([...deleteRequest.entries()]).includes(secret), false);
   });
+
+  it("uses the signed private source and constrained published-derivative operations", async () => {
+    const derivativeKey = `published/${"c".repeat(43)}-png`;
+    const requests: Array<{ url: string; method: string; body?: FormData }> = [];
+    const adapter = new CloudinaryStorageAdapter({
+      cloudName: "local-cloud",
+      apiKey: "local-api-key",
+      apiSecret: secret,
+      now: () => now,
+      fetcher: async (input, init) => {
+        const url = String(input);
+        const body = init?.body instanceof FormData ? init.body : undefined;
+        requests.push({ url, method: init?.method ?? "GET", body });
+        if (url.includes("/image/private_download")) {
+          return new Response(bytes, {
+            headers: { "Content-Type": "image/png", "Content-Length": String(bytes.length) },
+          });
+        }
+        if (url.endsWith("/image/upload")) {
+          return Response.json({
+            public_id: derivativeKey,
+            bytes: bytes.byteLength,
+            format: "png",
+            resource_type: "image",
+            type: "upload",
+          });
+        }
+        if (url.endsWith("/image/destroy")) return Response.json({ result: "ok" });
+        if (url.includes("/image/upload/published/")) {
+          return new Response(bytes, {
+            headers: { "Content-Type": "image/png", "Content-Length": String(bytes.length) },
+          });
+        }
+        throw new Error("Unexpected mocked Cloudinary operation");
+      },
+    });
+
+    await adapter.createPublishedDerivative(key, derivativeKey);
+    const derivativeUpload = requests.find((request) => request.url.endsWith("/image/upload"));
+    assert.ok(derivativeUpload);
+    assert.equal(derivativeUpload.method, "POST");
+    assert.equal(derivativeUpload.body?.get("public_id"), derivativeKey);
+    assert.equal(derivativeUpload.body?.get("type"), "upload");
+    assert.equal(derivativeUpload.body?.get("overwrite"), "true");
+    assert.equal(
+      derivativeUpload.body?.get("signature"),
+      await expectedSignature({
+        overwrite: "true",
+        public_id: derivativeKey,
+        timestamp: String(Math.floor(now / 1000)),
+        type: "upload",
+        unique_filename: "false",
+      }),
+    );
+
+    const delivered = await adapter.getPublishedDerivative(derivativeKey);
+    assert.equal(delivered?.contentType, "image/png");
+    assert.deepEqual(new Uint8Array(await delivered!.arrayBuffer()), bytes);
+    const delivery = requests.find((request) => request.url.includes("/image/upload/published/"));
+    assert.equal(new URL(delivery!.url).hostname, "res.cloudinary.com");
+
+    await adapter.deletePublishedDerivative(derivativeKey);
+    const deletion = requests.find((request) => request.url.endsWith("/image/destroy"));
+    assert.equal(deletion?.body?.get("public_id"), derivativeKey);
+    assert.equal(deletion?.body?.get("type"), "upload");
+    assert.equal(
+      deletion?.body?.get("signature"),
+      await expectedSignature({
+        public_id: derivativeKey,
+        timestamp: String(Math.floor(now / 1000)),
+        type: "upload",
+      }),
+    );
+    const requestCount = requests.length;
+    await assert.rejects(adapter.deletePublishedDerivative(`private/${"d".repeat(43)}-png`), /published derivative/);
+    assert.equal(requests.length, requestCount, "invalid derivative keys must not reach Cloudinary");
+  });
 });
 
 describe("storage provider selection and R2 adapter", () => {
@@ -179,11 +256,11 @@ describe("storage provider selection and R2 adapter", () => {
     );
     assert.throws(
       () => createStorageFromEnvironment({ STORAGE_PROVIDER: "cloudinary" }),
-      /explicitly identified local or production environment/,
+      /explicitly identified Production environment/,
     );
   });
 
-  it("rejects Cloudinary staging, incomplete configuration, and unidentified environments", () => {
+  it("rejects staging, local, incomplete Cloudinary configuration, and unidentified environments", () => {
     const unsafeStagingConfigurations = [
       { ENVIRONMENT: "staging", STORAGE_PROVIDER: "cloudinary" },
       {
@@ -216,12 +293,22 @@ describe("storage provider selection and R2 adapter", () => {
 
     assert.throws(
       () => createStorageFromEnvironment({
+        ENVIRONMENT: "local",
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_CLOUD_NAME: "synthetic-production-cloud",
+        CLOUDINARY_API_KEY: "synthetic-production-key",
+        CLOUDINARY_API_SECRET: "synthetic-production-secret",
+      }),
+      /disabled in local development/,
+    );
+    assert.throws(
+      () => createStorageFromEnvironment({
         STORAGE_PROVIDER: "cloudinary",
         CLOUDINARY_CLOUD_NAME: "synthetic-cloud",
         CLOUDINARY_API_KEY: "synthetic-key",
         CLOUDINARY_API_SECRET: "synthetic-secret",
       }),
-      /explicitly identified local or production environment/,
+      /explicitly identified Production environment/,
     );
     assert.throws(
       () => createStorageFromEnvironment({

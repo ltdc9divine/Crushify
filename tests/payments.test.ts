@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
+import { recoverPendingSePayWebhookEvents } from "../src/payments.ts";
 import {
   createOrderReference,
   createPaymentReference,
@@ -10,6 +11,9 @@ import {
   verifySePaySignature,
 } from "../src/payments/sepay.ts";
 import { handleApiRequest } from "../src/index.ts";
+import { createVercelApiHandler, validateVercelEnvironment } from "../src/platform/vercel.ts";
+import { resolvePaymentEnvironmentPolicy } from "../src/payments/policy.ts";
+import { handleFulfillmentForOrder, recoverPendingFulfillments } from "../src/publications.ts";
 import type { Database } from "../src/database.ts";
 
 describe("SePay local-only payment safeguards", () => {
@@ -117,6 +121,168 @@ describe("SePay local-only payment safeguards", () => {
     assert.equal(sepayPaymentProvider.mapStatus({ ...transaction, direction: "out" }), "MANUAL_REVIEW");
   });
 
+  it("selects mock only for Preview and disables unknown payment environments", () => {
+    const production = resolvePaymentEnvironmentPolicy({ ENVIRONMENT: "production" });
+    assert.equal(production.provider, "SEPAY");
+    assert.equal(production.orderCreationEnabled, false);
+    assert.equal(production.sepayWebhookEnabled, false);
+
+    const preview = resolvePaymentEnvironmentPolicy({
+      ENVIRONMENT: "staging",
+      PAYMENT_MODE: "sepay-test",
+    });
+    assert.equal(preview.provider, "MOCK");
+    assert.equal(preview.mode, "mock");
+    assert.equal(preview.sepayWebhookEnabled, false);
+    assert.equal(preview.fulfillmentEnabled, false);
+
+    const localMock = resolvePaymentEnvironmentPolicy({
+      ENVIRONMENT: "local",
+      LOCAL_TEST_MODE: "true",
+      PAYMENT_MODE: "mock",
+    });
+    assert.equal(localMock.mode, "mock");
+    assert.equal(localMock.sepayWebhookEnabled, true);
+    assert.equal(resolvePaymentEnvironmentPolicy({
+      ENVIRONMENT: "local",
+      LOCAL_TEST_MODE: "true",
+      PAYMENT_MODE: "sepay-test",
+    }).provider, "SEPAY");
+    assert.equal(resolvePaymentEnvironmentPolicy({
+      ENVIRONMENT: "local",
+      PAYMENT_MODE: "sepay-test",
+    }).provider, null);
+    assert.equal(resolvePaymentEnvironmentPolicy({}).provider, null);
+  });
+
+  it("maps Vercel Preview to mock payments without opening checkout while Preview auth is disabled", async () => {
+    let queries = 0;
+    const unusedDatabase: Database = {
+      prepare() {
+        queries++;
+        throw new Error("database must not be accessed");
+      },
+      async batch() {
+        queries++;
+        throw new Error("database must not be accessed");
+      },
+    };
+    const previewEnvironment = {
+      VERCEL_ENV: "preview",
+      ENVIRONMENT: "staging",
+      VERCEL_URL: "crushify-preview.vercel.app",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.vercel.app",
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-synthetic.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-staging-token",
+      STORAGE_PROVIDER: "mock",
+    };
+    assert.equal(validateVercelEnvironment(previewEnvironment), null);
+    assert.equal(validateVercelEnvironment({
+      ...previewEnvironment,
+      PAYMENT_MODE: "sepay-test",
+    }), "RUNTIME_CONFIGURATION_ERROR");
+    assert.equal(validateVercelEnvironment({
+      ...previewEnvironment,
+      SEPAY_WEBHOOK_SECRET: "synthetic-preview-secret",
+    }), "RUNTIME_CONFIGURATION_ERROR");
+
+    const handler = createVercelApiHandler(previewEnvironment, {
+      async connectDatabase() {
+        return { database: unusedDatabase, close() {} };
+      },
+    });
+    const response = await handler(new Request(
+      "https://crushify-preview.vercel.app/api/v1/orders",
+      {
+        method: "POST",
+        headers: {
+          Origin: "https://crushify-preview.vercel.app",
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      },
+    ));
+    assert.equal(response.status, 503);
+    assert.equal((await response.json() as { error: { code: string } }).error.code, "AUTH_UNAVAILABLE");
+    assert.equal(queries, 0);
+  });
+
+  it("rejects a correctly signed SePay webhook in Preview before verification or database access", async () => {
+    let queries = 0;
+    const unusedDatabase: Database = {
+      prepare() {
+        queries++;
+        throw new Error("database must not be accessed");
+      },
+      async batch() {
+        queries++;
+        throw new Error("database must not be accessed");
+      },
+    };
+    const secret = "synthetic-preview-webhook-secret";
+    const timestamp = Math.floor(Date.now() / 1000);
+    const rawBody = JSON.stringify({
+      id: 123,
+      accountNumber: "1234567890",
+      code: "CRP1234567890ABCDEF",
+      transferType: "in",
+      transferAmount: 50_000,
+    });
+    const signature = createHmac("sha256", secret)
+      .update(`${timestamp}.${rawBody}`)
+      .digest("hex");
+    const response = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/payments/sepay/webhook", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-SePay-Timestamp": String(timestamp),
+          "X-SePay-Signature": `sha256=${signature}`,
+        },
+        body: rawBody,
+      }),
+      {
+        DB: unusedDatabase,
+        ENVIRONMENT: "staging",
+        PAYMENT_MODE: "sepay-test",
+        SEPAY_WEBHOOK_SECRET: secret,
+        SEPAY_BANK_ACCOUNT: "1234567890",
+      },
+    );
+    assert.equal(response.status, 503);
+    assert.equal((await response.json() as { error: { code: string } }).error.code,
+      "MOCK_SETTLEMENT_UNAVAILABLE");
+    assert.equal(queries, 0);
+  });
+
+  it("keeps Preview mock confirmation and fulfillment unavailable rather than treating mock state as SePay", async () => {
+    let queries = 0;
+    const unusedDatabase: Database = {
+      prepare() {
+        queries++;
+        throw new Error("database must not be accessed");
+      },
+      async batch() {
+        queries++;
+        throw new Error("database must not be accessed");
+      },
+    };
+    const env = { DB: unusedDatabase, ENVIRONMENT: "staging" as const, PAYMENT_MODE: "mock" as const };
+    const confirmation = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/payments/mock/confirm", { method: "POST" }),
+      env,
+    );
+    assert.equal(confirmation.status, 404);
+    await assert.rejects(() => handleFulfillmentForOrder(env, crypto.randomUUID()),
+      /fulfillment is disabled/);
+    await assert.rejects(() => recoverPendingFulfillments(env),
+      /fulfillment recovery is disabled/);
+    await assert.rejects(() => recoverPendingSePayWebhookEvents(env),
+      /SePay webhook recovery is disabled/);
+    assert.equal(queries, 0);
+  });
+
   it("disables order creation outside local test mode before touching the database", async () => {
     const unusedDatabase: Database = {
       prepare() {
@@ -144,7 +310,7 @@ describe("SePay local-only payment safeguards", () => {
     assert.equal((await response.json() as { error: { code: string } }).error.code, "PAYMENTS_DISABLED");
   });
 
-  it("allows local mock checkout without SePay webhook credentials but keeps webhook settlement disabled", async () => {
+  it("preserves local mock webhook signature verification", async () => {
     const unusedDatabase: Database = {
       prepare() {
         throw new Error("database must not be accessed");
@@ -158,6 +324,7 @@ describe("SePay local-only payment safeguards", () => {
       ENVIRONMENT: "local" as const,
       LOCAL_TEST_MODE: "true",
       PAYMENT_MODE: "mock" as const,
+      SEPAY_WEBHOOK_SECRET: "synthetic-local-webhook-secret",
     };
 
     const checkout = await handleApiRequest(
@@ -188,10 +355,10 @@ describe("SePay local-only payment safeguards", () => {
       }),
       env,
     );
-    assert.equal(webhook.status, 503);
+    assert.equal(webhook.status, 401);
     assert.equal(
       (await webhook.json() as { error: { code: string } }).error.code,
-      "PAYMENT_CONFIGURATION_ERROR",
+      "INVALID_WEBHOOK_SIGNATURE",
     );
   });
 });

@@ -10,6 +10,10 @@ import {
   type SePayWebhookPayload,
 } from "./payments/sepay.ts";
 import type { NormalizedPaymentTransaction } from "./payments/provider.ts";
+import {
+  resolvePaymentEnvironmentPolicy,
+  type PaymentProviderId,
+} from "./payments/policy.ts";
 import { assetReferences, type TemplateData } from "./template-registry.ts";
 import { handleFulfillmentForOrder } from "./publications.ts";
 import {
@@ -18,17 +22,21 @@ import {
   standardProduct,
   standardPriceSnapshot,
   standardPriceSnapshotForTerm,
+  standardRenewalAmountMinor,
   standardStoragePlanForTerm,
   storageDuration,
   STANDARD_CATALOG_ENABLED,
+  STANDARD_HOSTING_MONTHLY_ADDITION_MINOR,
+  STANDARD_PRICING_VERSION,
   STORAGE_DURATIONS,
   type StandardHostingTerm,
   type StandardPriceSnapshot,
 } from "./product-catalog.ts";
+import { entitlementExpiry } from "./storage-plans.ts";
 import type { Env } from "./types.ts";
 
 const ORDER_LIFETIME_MINUTES = 15;
-const PAYMENT_PROVIDER = sepayPaymentProvider.id;
+const SEPAY_PROVIDER = sepayPaymentProvider.id;
 
 interface OrderRow {
   id: string;
@@ -80,10 +88,10 @@ interface WebhookReviewDetails {
   preserveOutcome?: boolean;
 }
 
-function isLocalPaymentEnabled(env: Env): boolean {
-  return env.LOCAL_TEST_MODE === "true" &&
-    env.ENVIRONMENT === "local" &&
-    (env.PAYMENT_MODE === "mock" || env.PAYMENT_MODE === "sepay-test");
+function selectedPaymentProvider(env: Env): PaymentProviderId {
+  const provider = resolvePaymentEnvironmentPolicy(env).provider;
+  if (!provider) throw new Error("Payment provider is unavailable for this runtime");
+  return provider;
 }
 
 function paymentModeError(
@@ -91,14 +99,25 @@ function paymentModeError(
   env: Env,
   requiresWebhookSecret = false,
 ): Response | null {
-  if (!isLocalPaymentEnabled(env)) {
-    return apiError(requestId, 503, "PAYMENTS_DISABLED", "Payments are available only in local test mode");
+  const policy = resolvePaymentEnvironmentPolicy(env);
+  if (!policy.orderCreationEnabled) {
+    return apiError(requestId, 503, "PAYMENTS_DISABLED", "Payments are disabled for this runtime");
   }
-  if ((requiresWebhookSecret || env.PAYMENT_MODE === "sepay-test") &&
+  if (requiresWebhookSecret && !policy.sepayWebhookEnabled) {
+    return apiError(
+      requestId,
+      503,
+      policy.provider === "MOCK" ? "MOCK_SETTLEMENT_UNAVAILABLE" : "PAYMENTS_DISABLED",
+      policy.provider === "MOCK"
+        ? "Mock payments cannot be settled through the SePay webhook"
+        : "SePay webhook processing is disabled for this runtime",
+    );
+  }
+  if ((requiresWebhookSecret || policy.mode === "sepay-test") &&
       (!env.SEPAY_WEBHOOK_SECRET || env.SEPAY_WEBHOOK_SECRET.length < 16)) {
     return apiError(requestId, 503, "PAYMENT_CONFIGURATION_ERROR", "Local webhook verification is not configured");
   }
-  if (env.PAYMENT_MODE === "sepay-test" &&
+  if (policy.mode === "sepay-test" &&
       (!env.SEPAY_BANK_CODE || !/^[A-Z0-9]{2,20}$/i.test(env.SEPAY_BANK_CODE) ||
        !env.SEPAY_BANK_ACCOUNT || !/^\d{5,20}$/.test(env.SEPAY_BANK_ACCOUNT))) {
     return apiError(requestId, 503, "PAYMENT_CONFIGURATION_ERROR", "SePay Test mode bank settings are incomplete");
@@ -127,9 +146,10 @@ function termFromPlan(planId: string): StandardHostingTerm | null {
 }
 
 function paymentInstructions(env: Env, amount: number, reference: string) {
-  if (env.PAYMENT_MODE !== "mock" && env.PAYMENT_MODE !== "sepay-test") return null;
+  const mode = resolvePaymentEnvironmentPolicy(env).mode;
+  if (mode !== "sepay-test") return null;
   return sepayPaymentProvider.createInstructions({
-    mode: env.PAYMENT_MODE,
+    mode,
     amountMinor: amount,
     reference,
     bankCode: env.SEPAY_BANK_CODE,
@@ -139,6 +159,8 @@ function paymentInstructions(env: Env, amount: number, reference: string) {
 }
 
 function responseOrder(row: OrderRow, env: Env) {
+  const policy = resolvePaymentEnvironmentPolicy(env);
+  const provider = selectedPaymentProvider(env);
   const status = row.payment_review_required || row.payment_review_required_item
     ? "MANUAL_REVIEW"
     : row.status;
@@ -171,10 +193,10 @@ function responseOrder(row: OrderRow, env: Env) {
       : null,
     fulfillment_status: row.fulfillment_status,
     payment: {
-      provider: PAYMENT_PROVIDER,
+      provider,
       status: paymentStatus,
       reference: row.payment_reference,
-      mock_mode: env.PAYMENT_MODE === "mock",
+      mock_mode: policy.mode === "mock",
       qr_url: instructions?.qrUrl ?? null,
       instructions: instructions
         ? {
@@ -195,6 +217,8 @@ async function loadOrder(
   customerId: string,
   orderId: string,
 ): Promise<OrderRow | null> {
+  const provider = resolvePaymentEnvironmentPolicy(env).provider;
+  if (!provider) return null;
   return env.DB.prepare(
     `SELECT o.id, o.order_reference, o.status, o.payment_review_required,
             o.currency, o.total_minor, o.expires_at, o.created_at, o.design_id,
@@ -216,7 +240,7 @@ async function loadOrder(
        AND json_extract(storage_item.metadata_json, '$.kind') = 'STORAGE_PLAN'
      LEFT JOIN fulfillment_jobs fj ON fj.order_id = o.id
      WHERE o.id = ? AND o.customer_id = ?`,
-  ).bind(PAYMENT_PROVIDER, orderId, customerId).first<OrderRow>();
+  ).bind(provider, orderId, customerId).first<OrderRow>();
 }
 
 async function loadOwnedOrderFromRoute(
@@ -311,7 +335,6 @@ async function createOrder(
   if (!requestedPlan) {
     return apiError(requestId, 400, "VALIDATION_ERROR", "Invalid storage plan");
   }
-  const localPolicyPricing = !legacyPlanRequest && localApprovedPricingEnabled(env);
   if (!legacyPlanRequest && !isStandardPricingEnabled(env)) {
     return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Standard hosting pricing is not enabled");
   }
@@ -336,7 +359,7 @@ async function createOrder(
   const renewalRequestedAt = nowIso();
   const renewal = body.renewal_publication_id
     ? await env.DB.prepare(
-      `SELECT p.id, p.design_id, p.status,
+      `SELECT p.id, p.design_id, p.status, p.expires_at,
          (SELECT e.status FROM storage_entitlements e
           WHERE e.publication_id = p.id ORDER BY e.created_at DESC LIMIT 1) AS entitlement_status
        FROM publications p
@@ -348,10 +371,11 @@ async function createOrder(
       id: string;
       design_id: string;
       status: string;
+      expires_at: string | null;
       entitlement_status: string | null;
     }>()
     : await env.DB.prepare(
-      `SELECT p.id, p.design_id, p.status,
+      `SELECT p.id, p.design_id, p.status, p.expires_at,
          (SELECT e.status FROM storage_entitlements e
           WHERE e.publication_id = p.id ORDER BY e.created_at DESC LIMIT 1) AS entitlement_status
        FROM publications p
@@ -363,6 +387,7 @@ async function createOrder(
       id: string;
       design_id: string;
       status: string;
+      expires_at: string | null;
       entitlement_status: string | null;
     }>();
   const renewalPublicationId = renewal?.id ?? null;
@@ -371,6 +396,23 @@ async function createOrder(
   }
   if (renewal?.entitlement_status === "LIFETIME") {
     return apiError(requestId, 409, "LIFETIME_ACTIVE", "Lifetime storage does not require renewal");
+  }
+  if (renewalPublicationId && term.type === "lifetime" && !localFixturePricing) {
+    return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Lifetime upgrades are not available for renewal");
+  }
+  if (term.type === "monthly") {
+    const latestActivation = new Date(Date.now() + ORDER_LIFETIME_MINUTES * 60_000);
+    const currentExpiry = renewal?.expires_at ? Date.parse(renewal.expires_at) : NaN;
+    if (Number.isFinite(currentExpiry) && currentExpiry > latestActivation.getTime()) {
+      latestActivation.setTime(currentExpiry);
+    }
+    try {
+      entitlementExpiry(requestedPlan, latestActivation);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      return apiError(requestId, 422, "PRICE_UNAVAILABLE",
+        "Hosting duration exceeds the supported calendar range");
+    }
   }
   const fingerprint = await sha256(JSON.stringify({
     design_id: body.design_id,
@@ -393,7 +435,7 @@ async function createOrder(
     return jsonResponse(responseOrder(row, env), 200, requestId);
   }
 
-  if (localPolicyPricing && requestedPlan.id.startsWith("custom-") && term.type === "monthly") {
+  if (requestedPlan.id.startsWith("custom-") && term.type === "monthly") {
     const ownedDesign = await env.DB.prepare(
       `SELECT template_id FROM designs
        WHERE id = ? AND customer_id = ? AND status = 'DRAFT'`,
@@ -401,6 +443,18 @@ async function createOrder(
     if (!ownedDesign) return apiError(requestId, 404, "NOT_FOUND", "Design not found");
     if (!standardProduct(ownedDesign.template_id)) {
       return apiError(requestId, 422, "PRICE_UNAVAILABLE", "This product is not in the standard catalog");
+    }
+    if (renewalPublicationId) {
+      if (standardRenewalAmountMinor(requestedPlan) === null) {
+        return apiError(requestId, 422, "PRICE_UNAVAILABLE", "The renewal amount is invalid");
+      }
+    } else {
+      try {
+        standardPriceSnapshotForTerm(ownedDesign.template_id, term);
+      } catch (error) {
+        if (!(error instanceof CatalogPriceUnavailableError)) throw error;
+        return apiError(requestId, 422, "PRICE_UNAVAILABLE", error.message);
+      }
     }
     const createdAt = nowIso();
     await env.DB.prepare(
@@ -410,9 +464,14 @@ async function createOrder(
     ).bind(requestedPlan.id, requestedPlan.title, term.type === "monthly" ? term.months : null,
       createdAt, createdAt).run();
     const storedPlan = await env.DB.prepare(
-      "SELECT duration_months, is_lifetime FROM storage_plans WHERE id = ?",
-    ).bind(requestedPlan.id).first<{ duration_months: number | null; is_lifetime: number }>();
-    if (!storedPlan || storedPlan.duration_months !== term.months || storedPlan.is_lifetime !== 0) {
+      "SELECT duration_months, is_lifetime, status FROM storage_plans WHERE id = ?",
+    ).bind(requestedPlan.id).first<{
+      duration_months: number | null;
+      is_lifetime: number;
+      status: string;
+    }>();
+    if (!storedPlan || storedPlan.duration_months !== term.months ||
+        storedPlan.is_lifetime !== 0 || storedPlan.status !== "ACTIVE") {
       return apiError(requestId, 409, "STORAGE_PLAN_CONFLICT", "The requested storage plan is inconsistent");
     }
   }
@@ -478,6 +537,8 @@ async function createOrder(
     : null;
   const storageAmount = localFixturePricing
     ? design.storage_amount_minor
+    : renewalPublicationId
+      ? standardRenewalAmountMinor(duration)
     : policySnapshot
       ? policySnapshot.total_minor - (templateAmount ?? 0)
       : duration.amountMinor;
@@ -489,6 +550,7 @@ async function createOrder(
     return apiError(requestId, 422, "PRICE_UNAVAILABLE", "Product or hosting duration has no valid server-side price");
   }
   const resolvedTemplateAmount = templateAmount ?? 0;
+  const resolvedStorageAmount = storageAmount ?? 0;
   let authoritativeTotal: number;
   let pricingSnapshot: StandardPriceSnapshot | {
     template_id: string;
@@ -508,7 +570,7 @@ async function createOrder(
   };
   try {
     if (localFixturePricing) {
-      authoritativeTotal = (templateAmount as number) + (storageAmount as number);
+      authoritativeTotal = resolvedTemplateAmount + resolvedStorageAmount;
       pricingSnapshot = {
         template_id: design.template_id as StandardPriceSnapshot["template_id"],
         storage_plan_id: duration.id,
@@ -518,7 +580,7 @@ async function createOrder(
         included_hosting_months: term.type === "monthly" ? 1 : null,
         additional_hosting_months: term.type === "monthly" ? Math.max(0, term.months - 1) : null,
         additional_monthly_price_minor: 0,
-        hosting_charge_minor: term.type === "monthly" ? storageAmount as number : null,
+        hosting_charge_minor: term.type === "monthly" ? resolvedStorageAmount : null,
         lifetime_price_minor: term.type === "lifetime" ? authoritativeTotal : null,
         total_minor: authoritativeTotal,
         currency: "VND",
@@ -526,7 +588,7 @@ async function createOrder(
         calculated_at: nowIso(),
       };
     } else if (renewalPublicationId) {
-      authoritativeTotal = duration.amountMinor!;
+      authoritativeTotal = resolvedStorageAmount;
       pricingSnapshot = {
         template_id: design.template_id as StandardPriceSnapshot["template_id"],
         storage_plan_id: duration.id,
@@ -535,12 +597,12 @@ async function createOrder(
         hosting_months: term.type === "monthly" ? term.months : null,
         included_hosting_months: null,
         additional_hosting_months: term.type === "monthly" ? term.months : null,
-        additional_monthly_price_minor: duration.amountMinor!,
-        hosting_charge_minor: duration.amountMinor!,
+        additional_monthly_price_minor: STANDARD_HOSTING_MONTHLY_ADDITION_MINOR,
+        hosting_charge_minor: resolvedStorageAmount,
         lifetime_price_minor: null,
         total_minor: authoritativeTotal,
         currency: "VND",
-        pricing_version: "legacy-renewal",
+        pricing_version: STANDARD_PRICING_VERSION,
         calculated_at: nowIso(),
       };
     } else {
@@ -646,7 +708,7 @@ async function createOrder(
        )
        SELECT ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, 0
        WHERE EXISTS (SELECT 1 FROM orders WHERE id = ?)`,
-    ).bind(paymentId, orderId, PAYMENT_PROVIDER, amount, "VND", `order:${orderId}`,
+    ).bind(paymentId, orderId, selectedPaymentProvider(env), amount, "VND", `order:${orderId}`,
       now, now, paymentReference, orderId),
   ];
   try {
@@ -695,30 +757,26 @@ async function listOrders(
 }
 
 async function listStoragePlans(env: Env, requestId: string): Promise<Response> {
-  if (localApprovedPricingEnabled(env)) {
-    const catalog = publicProductCatalog({ catalogEnabled: true });
-    return jsonResponse({
-      plans: catalog.storage_durations.map((plan) => ({
-        ...plan,
-        available: plan.enabled && plan.price_configured,
-      })),
-    }, 200, requestId, { "Cache-Control": "no-store" });
-  }
   const localFixturePricing = env.ENVIRONMENT === "local" &&
     env.LOCAL_TEST_MODE === "true" &&
     env.LOCAL_TEST_CATALOG_OVERRIDE === "true";
   if (!localFixturePricing) {
     return jsonResponse({
-      plans: STORAGE_DURATIONS.map((plan) => ({
-        id: plan.id,
-        title: plan.title,
-        duration_months: plan.durationMonths,
-        lifetime: plan.lifetime,
-        amount_minor: plan.amountMinor,
-        currency: plan.currency,
-        available: plan.enabled && plan.amountMinor !== null,
-        price_configured: plan.amountMinor !== null && plan.enabled,
-      })),
+      checkout_enabled: resolvePaymentEnvironmentPolicy(env).orderCreationEnabled,
+      renewal_month_price_minor: STANDARD_HOSTING_MONTHLY_ADDITION_MINOR,
+      plans: STORAGE_DURATIONS.map((plan) => {
+        const amountMinor = standardRenewalAmountMinor(plan);
+        return {
+          id: plan.id,
+          title: plan.title,
+          duration_months: plan.durationMonths,
+          lifetime: plan.lifetime,
+          amount_minor: amountMinor,
+          currency: plan.currency,
+          available: amountMinor !== null,
+          price_configured: amountMinor !== null,
+        };
+      }),
     }, 200, requestId, { "Cache-Control": "no-store" });
   }
   const rows = await env.DB.prepare(
@@ -739,6 +797,10 @@ async function listStoragePlans(env: Env, requestId: string): Promise<Response> 
     currency: string | null;
   }>();
   return jsonResponse({
+    checkout_enabled: resolvePaymentEnvironmentPolicy(env).orderCreationEnabled,
+    ...(!localApprovedPricingEnabled(env)
+      ? { renewal_month_price_minor: STANDARD_HOSTING_MONTHLY_ADDITION_MINOR }
+      : {}),
     plans: rows.results.map((plan) => ({
       id: plan.id,
       title: plan.title,
@@ -815,7 +877,7 @@ async function markWebhookReview(
       details.orderReference ?? payment?.order_reference ?? null,
       details.expectedAmountMinor ?? payment?.amount_minor ?? null,
       details.actualAmountMinor ?? null,
-      PAYMENT_PROVIDER, eventId, details.preserveOutcome ? 1 : 0),
+      SEPAY_PROVIDER, eventId, details.preserveOutcome ? 1 : 0),
   );
   await env.DB.batch(statements);
 }
@@ -832,12 +894,12 @@ async function processWebhookEvent(
     `UPDATE payment_webhook_events
      SET processing_attempts = processing_attempts + 1, last_attempt_at = ?
      WHERE provider = ? AND event_id = ? AND outcome = 'RECEIVED'`,
-  ).bind(attemptAt, PAYMENT_PROVIDER, eventId).run();
+  ).bind(attemptAt, SEPAY_PROVIDER, eventId).run();
   if (attempt.meta.changes !== 1) return;
   const stored = await env.DB.prepare(
     `SELECT outcome, raw_payload FROM payment_webhook_events
      WHERE provider = ? AND event_id = ?`,
-  ).bind(PAYMENT_PROVIDER, eventId).first<{ outcome: string | null; raw_payload: string }>();
+  ).bind(SEPAY_PROVIDER, eventId).first<{ outcome: string | null; raw_payload: string }>();
   if (!stored || stored.outcome !== "RECEIVED") return;
   if (!transactionId || !payload || reviewReason) {
     await markWebhookReview(env, eventId, reviewReason ?? "Webhook payload is incomplete", undefined, {
@@ -861,7 +923,7 @@ async function processWebhookEvent(
                FROM order_items i WHERE i.order_id = o.id AND i.item_type = 'ADD_ON') AS snapshot_total_minor
        FROM payments p JOIN orders o ON o.id = p.order_id
        WHERE p.provider = ? AND p.payment_reference = ?`,
-    ).bind(PAYMENT_PROVIDER, transaction.paymentReference).first<PaymentRow>()
+    ).bind(SEPAY_PROVIDER, transaction.paymentReference).first<PaymentRow>()
     : null;
   if (!payment) {
     await markWebhookReview(env, eventId, "No order matches this payment reference", undefined, {
@@ -929,7 +991,7 @@ async function processWebhookEvent(
          WHERE provider = ? AND event_id = ? AND outcome = 'RECEIVED'`,
       ).bind(payment.order_id, payment.id, transactionId,
         payment.order_id, payment.id, transactionId, now, payment.order_reference,
-        payment.amount_minor, transaction.amountMinor, PAYMENT_PROVIDER, eventId),
+        payment.amount_minor, transaction.amountMinor, SEPAY_PROVIDER, eventId),
       env.DB.prepare(
         `INSERT INTO fulfillment_jobs (id, order_id, status, created_at, updated_at)
          SELECT ?, ?, 'PENDING', ?, ?
@@ -949,7 +1011,7 @@ async function processWebhookEvent(
     if (!(error instanceof DatabaseError) || error.code !== "CONSTRAINT") throw error;
     const existingTransaction = await env.DB.prepare(
       "SELECT id FROM payments WHERE provider = ? AND provider_payment_id = ?",
-    ).bind(PAYMENT_PROVIDER, transactionId).first<{ id: string }>();
+    ).bind(SEPAY_PROVIDER, transactionId).first<{ id: string }>();
     if (!existingTransaction) throw error;
     await markWebhookReview(
       env,
@@ -961,7 +1023,7 @@ async function processWebhookEvent(
   }
   const processed = await env.DB.prepare(
     `SELECT outcome FROM payment_webhook_events WHERE provider = ? AND event_id = ?`,
-  ).bind(PAYMENT_PROVIDER, eventId).first<{ outcome: string }>();
+  ).bind(SEPAY_PROVIDER, eventId).first<{ outcome: string }>();
   if (processed?.outcome === "PROCESSED") {
     await handleFulfillmentForOrder(env, payment.order_id);
   }
@@ -984,7 +1046,7 @@ async function reviewWebhookCollision(
                FROM order_items i WHERE i.order_id = o.id AND i.item_type = 'ADD_ON') AS snapshot_total_minor
        FROM payments p JOIN orders o ON o.id = p.order_id
        WHERE p.provider = ? AND p.payment_reference = ?`,
-    ).bind(PAYMENT_PROVIDER, transaction.paymentReference).first<PaymentRow>()
+    ).bind(SEPAY_PROVIDER, transaction.paymentReference).first<PaymentRow>()
     : null;
   await markWebhookReview(
     env,
@@ -1005,11 +1067,14 @@ export async function recoverPendingSePayWebhookEvents(
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new RangeError("Recovery batch size must be between 1 and 100");
   }
+  if (!resolvePaymentEnvironmentPolicy(env).sepayWebhookEnabled) {
+    throw new Error("SePay webhook recovery is disabled for this runtime");
+  }
   const events = await env.DB.prepare(
     `SELECT event_id, raw_payload FROM payment_webhook_events
      WHERE provider = ? AND outcome = 'RECEIVED'
      ORDER BY received_at LIMIT ?`,
-  ).bind(PAYMENT_PROVIDER, limit).all<{ event_id: string; raw_payload: string }>();
+  ).bind(SEPAY_PROVIDER, limit).all<{ event_id: string; raw_payload: string }>();
   for (const event of events.results) {
     const parsed = await sepayPaymentProvider.parseWebhook(new TextEncoder().encode(event.raw_payload));
     await processWebhookEvent(
@@ -1023,7 +1088,7 @@ export async function recoverPendingSePayWebhookEvents(
   const pending = await env.DB.prepare(
     `SELECT COUNT(*) AS count FROM payment_webhook_events
      WHERE provider = ? AND outcome = 'RECEIVED'`,
-  ).bind(PAYMENT_PROVIDER).first<{ count: number }>();
+  ).bind(SEPAY_PROVIDER).first<{ count: number }>();
   return { attempted: events.results.length, pending: Number(pending?.count ?? 0) };
 }
 
@@ -1066,7 +1131,7 @@ async function handleSepayWebhook(
        provider_transaction_id, actual_amount_minor
      ) VALUES (?, ?, ?, ?, ?, 'RECEIVED', ?, NULL, ?, ?)
      ON CONFLICT(provider, event_id) DO NOTHING`,
-  ).bind(safeId(), PAYMENT_PROVIDER, parsed.eventId, payloadHash, nowIso(),
+  ).bind(safeId(), SEPAY_PROVIDER, parsed.eventId, payloadHash, nowIso(),
     new TextDecoder().decode(rawBody), parsed.transactionId,
     typeof parsed.payload?.transferAmount === "number" &&
         Number.isSafeInteger(parsed.payload.transferAmount)
@@ -1076,7 +1141,7 @@ async function handleSepayWebhook(
   const prior = await env.DB.prepare(
     `SELECT payload_hash, outcome FROM payment_webhook_events
      WHERE provider = ? AND event_id = ?`,
-  ).bind(PAYMENT_PROVIDER, parsed.eventId).first<{ payload_hash: string; outcome: string | null }>();
+  ).bind(SEPAY_PROVIDER, parsed.eventId).first<{ payload_hash: string; outcome: string | null }>();
   if (!prior) throw new Error("Webhook event was not persisted");
   if (prior.payload_hash !== payloadHash) {
     await reviewWebhookCollision(env, parsed.eventId, parsed.payload);
@@ -1095,7 +1160,10 @@ export async function handlePaymentRoutes(
   if (path === "/api/v1/catalog") {
     if (request.method !== "GET") return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");
     return jsonResponse(
-      publicProductCatalog({ catalogEnabled: isStandardPricingEnabled(env) }),
+      {
+        ...publicProductCatalog({ catalogEnabled: isStandardPricingEnabled(env) }),
+        checkout_enabled: resolvePaymentEnvironmentPolicy(env).orderCreationEnabled,
+      },
       200,
       requestId,
       { "Cache-Control": "no-store" },

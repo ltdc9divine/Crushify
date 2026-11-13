@@ -34,6 +34,7 @@ export async function runPaymentContract({
   setPublicationExpiry,
   deactivateTemplatePrice,
   inspectEntitlement,
+  inspectStoragePlan,
   inspectOrderArtifacts,
   inspectOrderPricingSnapshot,
   tamperOrderPricingSnapshot,
@@ -49,6 +50,27 @@ export async function runPaymentContract({
   label,
 }) {
   const idempotencyKey = `payment-test-${randomUUID()}`;
+  if (testStandardPricing) {
+    const catalog = await request("/catalog", null);
+    assert.equal(catalog.response.status, 200, `${label}: public catalog is available`);
+    assert.equal(catalog.body.pricing_policy.catalog_enabled, true);
+    assert.equal(catalog.body.checkout_enabled, true,
+      `${label}: local integration profile explicitly enables test checkout`);
+    assert.deepEqual(catalog.body.products.map((product) => product.id).sort(), [
+      "distance-means-nothing",
+      "love-letter",
+      "our-memories",
+      "our-universe",
+      "say-yes",
+    ]);
+    assert.ok(catalog.body.products.every((product) => product.available));
+    const storageCatalog = await request("/storage-plans", owner);
+    assert.equal(storageCatalog.response.status, 200);
+    assert.equal(storageCatalog.body.renewal_month_price_minor, 10_000);
+    assert.deepEqual(catalog.body.storage_durations.map((plan) => plan.amount_minor), [
+      59_000, 79_000, 109_000, 169_000, 199_000,
+    ]);
+  }
   const createRequest = (key = idempotencyKey, id = designId, extra = {}) => request(
     "/orders",
     owner,
@@ -118,13 +140,19 @@ export async function runPaymentContract({
   assert.equal(unsupportedDuration.response.status, 400,
     `${label}: reject unsupported duration type`);
 
-  const tampered = await createRequest(`tampered-${randomUUID()}`, designId, { amount: 1 });
+  const tampered = await createRequest(`tampered-${randomUUID()}`, designId, {
+    amount: 1,
+    total_minor: 1,
+    currency: "USD",
+  });
   assert.equal(tampered.response.status, 400, `${label}: client cannot set amount`);
   const forgedPayment = await createRequest(`forged-payment-${randomUUID()}`, designId, {
     paid: true,
     status: "PAID",
     payment_verified: true,
     amount_paid: TEST_TOTAL_VND,
+    provider: "MOCK",
+    payment_provider: "SEPAY",
   });
   assert.equal(forgedPayment.response.status, 400,
     `${label}: customer-supplied payment claims are rejected`);
@@ -138,6 +166,7 @@ export async function runPaymentContract({
   assert.equal(created.body.currency, "VND");
   assert.equal(created.body.status, "AWAITING_PAYMENT");
   assert.equal(created.body.payment.status, "PENDING");
+  assert.equal(created.body.payment.provider, "SEPAY");
   const previewCapability = await request(`/designs/${designId}/preview`, owner, {
     method: "POST",
     mutating: true,
@@ -193,8 +222,12 @@ export async function runPaymentContract({
       [1, 59_000],
       [2, 69_000],
       [3, 79_000],
+      [4, 89_000],
+      [5, 99_000],
       [6, 109_000],
+      [7, 119_000],
       [12, 169_000],
+      [24, 289_000],
     ];
     for (const [months, total] of termCases) {
       const result = await request("/orders", owner, {
@@ -215,10 +248,26 @@ export async function runPaymentContract({
       assert.equal(result.body.total_minor, total, `${label}: calculate ${months}-month policy price`);
       assert.equal(result.body.pricing_snapshot.total_minor, total);
       assert.equal(result.body.pricing_snapshot.hosting_months, months);
+      assert.equal(result.body.pricing_snapshot.currency, "VND");
       assert.equal(result.body.pricing_snapshot.pricing_version, "standard-v1");
+      const expectedPlanId = [1, 3, 6, 12].includes(months)
+        ? months === 1 ? "1-month" : `${months}-months`
+        : `custom-${months}-months`;
+      assert.equal(result.body.storage_plan.id, expectedPlanId);
+      assert.equal(result.body.storage_plan.duration_months, months);
+      assert.equal(result.body.storage_plan.lifetime, false);
       const reloaded = await request(`/orders/${result.body.order_id}/status`, owner);
       assert.deepEqual(reloaded.body.pricing_snapshot, result.body.pricing_snapshot,
         `${label}: persisted pricing snapshot is returned unchanged`);
+      assert.deepEqual(reloaded.body.storage_plan, result.body.storage_plan,
+        `${label}: persisted storage duration is returned unchanged`);
+      if (inspectStoragePlan) {
+        const storedPlan = await inspectStoragePlan(expectedPlanId);
+        assert.equal(storedPlan.duration_months, months,
+          `${label}: exact requested duration is persisted in the storage plan`);
+        assert.equal(storedPlan.is_lifetime, 0);
+        assert.equal(storedPlan.status, "ACTIVE");
+      }
     }
 
     const lifetime = await request("/orders", owner, {
@@ -240,8 +289,14 @@ export async function runPaymentContract({
     assert.equal(lifetime.body.pricing_snapshot.duration_type, "lifetime");
     assert.equal(lifetime.body.pricing_snapshot.lifetime_price_minor, 199_000);
     assert.equal(lifetime.body.pricing_snapshot.hosting_months, null);
+    assert.deepEqual(lifetime.body.storage_plan, {
+      id: "lifetime",
+      title: "Trọn đời",
+      duration_months: null,
+      lifetime: true,
+    });
 
-    for (const hostingMonths of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const hostingMonths of [-1, 0, 1.5, null, Number.MAX_SAFE_INTEGER + 1]) {
       const invalid = await request("/orders", owner, {
         method: "POST",
         mutating: true,
@@ -257,6 +312,21 @@ export async function runPaymentContract({
       });
       assert.equal(invalid.response.status, 400, `${label}: reject invalid month count ${hostingMonths}`);
     }
+    const unsupportedCalendarRange = await request("/orders", owner, {
+      method: "POST",
+      mutating: true,
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `invalid-calendar-range-${randomUUID()}`,
+      },
+      body: JSON.stringify({
+        design_id: designId,
+        duration_type: "monthly",
+        hosting_months: 1_000_000_000,
+      }),
+    });
+    assert.equal(unsupportedCalendarRange.response.status, 422,
+      `${label}: reject durations that cannot produce a representable expiry`);
 
     const unsupportedPlan = await createRequest(
       `unsupported-plan-${randomUUID()}`,
@@ -996,6 +1066,41 @@ export async function runPaymentContract({
     const originalUrl = publication.body.url;
     await deactivateTemplatePrice();
     await setPublicationExpiry(website.publication_id, "2099-01-31T12:00:00.000Z");
+    if (testStandardPricing) {
+      const standardRenewal = await request("/orders", owner, {
+        method: "POST",
+        mutating: true,
+        headers: { "Idempotency-Key": `standard-renewal-${randomUUID()}` },
+        json: {
+          design_id: designId,
+          renewal_publication_id: website.publication_id,
+          duration_type: "monthly",
+          hosting_months: 3,
+        },
+      });
+      assert.equal(standardRenewal.response.status, 201,
+        `${label}: standard renewal does not require an active template price`);
+      assert.equal(standardRenewal.body.total_minor, 30_000,
+        `${label}: standard renewal charges 10,000 VND per renewed month`);
+      assert.equal(standardRenewal.body.pricing_snapshot.hosting_charge_minor, 30_000);
+      assert.equal(standardRenewal.body.pricing_snapshot.pricing_version, "standard-v1");
+      assert.equal(standardRenewal.body.storage_plan.id, "3-months");
+      assert.equal(standardRenewal.body.storage_plan.duration_months, 3);
+      const lifetimeUpgrade = await request("/orders", owner, {
+        method: "POST",
+        mutating: true,
+        headers: { "Idempotency-Key": `lifetime-upgrade-${randomUUID()}` },
+        json: {
+          design_id: designId,
+          renewal_publication_id: website.publication_id,
+          duration_type: "lifetime",
+          hosting_months: null,
+        },
+      });
+      assert.equal(lifetimeUpgrade.response.status, 422,
+        `${label}: renewal cannot invent an unapproved Lifetime upgrade price`);
+      assert.equal(lifetimeUpgrade.body.error.code, "PRICE_UNAVAILABLE");
+    }
 
     const submitRenewal = (planId, idempotencyKey = randomUUID()) => request("/orders", owner, {
       method: "POST",
@@ -1118,6 +1223,36 @@ export async function runPaymentContract({
       expectedExpiry = addMonths(expectedExpiry, months);
       assert.equal(entitlement.expires_at, expectedExpiry,
         `${label}: ${planId} renewal extends from the existing expiry`);
+    }
+    if (testStandardPricing) {
+      const customRenewal = await request("/orders", owner, {
+        method: "POST",
+        mutating: true,
+        headers: { "Idempotency-Key": `custom-renewal-${randomUUID()}` },
+        json: {
+          design_id: designId,
+          renewal_publication_id: website.publication_id,
+          duration_type: "monthly",
+          hosting_months: 2,
+        },
+      });
+      assert.equal(customRenewal.response.status, 201,
+        `${label}: custom-month renewal can be ordered`);
+      assert.equal(customRenewal.body.total_minor, 20_000);
+      assert.deepEqual(customRenewal.body.storage_plan, {
+        id: "custom-2-months",
+        title: "2 tháng",
+        duration_months: 2,
+        lifetime: false,
+      });
+      const previousExpiry = expectedExpiry;
+      await confirmRenewal(customRenewal);
+      const entitlement = await inspectEntitlement(customRenewal.body.order_id);
+      expectedExpiry = addMonths(expectedExpiry, 2);
+      assert.equal(entitlement.duration_months, 2);
+      assert.equal(entitlement.previous_expires_at, previousExpiry);
+      assert.equal(entitlement.expires_at, expectedExpiry,
+        `${label}: custom-month renewal duration is persisted and extended exactly`);
     }
 
     const afterActiveRenewals = await request(`/publications/${website.publication_id}`, owner);

@@ -28,5 +28,9 @@ describe("storage plan calendar expiry", () => {
       { id: "1-month", durationMonths: null, lifetime: false },
       new Date(),
     ), RangeError);
+    assert.throws(
+      () => addCalendarMonths(new Date("2026-01-01T00:00:00.000Z"), 1_000_000_000),
+      RangeError,
+    );
   });
 });

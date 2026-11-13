@@ -6,6 +6,8 @@
   let csrfToken = "";
   let rows = [];
   let storagePlans = [];
+  let storageCheckoutEnabled = false;
+  let renewalMonthlyRate = null;
 
   function setNotice(text, state = "info") {
     notice.textContent = text;
@@ -205,27 +207,43 @@
     }
     if (row.publication_id && row.entitlement_status !== "LIFETIME" &&
         row.publication_status !== "REVOKED" && row.publication_status !== "DELETION_PENDING") {
-      const select = document.createElement("select");
-      select.dataset.plan = "";
-      select.setAttribute("aria-label", "Chọn gói gia hạn");
-      const prompt = document.createElement("option");
-      prompt.value = "";
-      prompt.textContent = "Chọn gói gia hạn";
-      select.append(prompt);
-      for (const plan of storagePlans) {
-        const option = document.createElement("option");
-        option.value = plan.id;
-        option.textContent = plan.available && plan.amount_minor !== null
-          ? `${plan.title} · ${plan.amount_minor.toLocaleString("vi-VN")} ${plan.currency}`
-          : `${plan.title} · chưa được cấu hình`;
-        option.disabled = !plan.available;
-        select.append(option);
-      }
       const renew = document.createElement("button");
       renew.textContent = "Tạo đơn gia hạn";
       renew.dataset.action = "renew";
-      renew.disabled = !storagePlans.some((plan) => plan.available);
-      actions.append(select, renew);
+      if (renewalMonthlyRate !== null) {
+        const label = document.createElement("label");
+        label.textContent = `Số tháng gia hạn (${renewalMonthlyRate.toLocaleString("vi-VN")} VND/tháng)`;
+        const months = document.createElement("input");
+        months.type = "number";
+        months.min = "1";
+        months.step = "1";
+        months.value = "1";
+        months.inputMode = "numeric";
+        months.dataset.months = "";
+        months.setAttribute("aria-label", "Số tháng gia hạn");
+        label.append(months);
+        renew.disabled = !storageCheckoutEnabled;
+        actions.append(label, renew);
+      } else {
+        const select = document.createElement("select");
+        select.dataset.plan = "";
+        select.setAttribute("aria-label", "Chọn gói gia hạn");
+        const prompt = document.createElement("option");
+        prompt.value = "";
+        prompt.textContent = "Chọn gói gia hạn";
+        select.append(prompt);
+        for (const plan of storagePlans) {
+          const option = document.createElement("option");
+          option.value = plan.id;
+          option.textContent = plan.available && plan.amount_minor !== null
+            ? `${plan.title} · ${plan.amount_minor.toLocaleString("vi-VN")} ${plan.currency}`
+            : `${plan.title} · ${plan.lifetime ? "không áp dụng gia hạn" : "chưa được cấu hình"}`;
+          option.disabled = !plan.available || !storageCheckoutEnabled;
+          select.append(option);
+        }
+        renew.disabled = !storageCheckoutEnabled || !storagePlans.some((plan) => plan.available);
+        actions.append(select, renew);
+      }
     }
     card.append(actions);
     return card;
@@ -250,18 +268,36 @@
   async function loadStoragePlans() {
     const response = await api("/storage-plans");
     storagePlans = response.plans || [];
+    storageCheckoutEnabled = response.checkout_enabled === true;
+    renewalMonthlyRate = Number.isSafeInteger(response.renewal_month_price_minor) &&
+      response.renewal_month_price_minor > 0
+      ? response.renewal_month_price_minor
+      : null;
   }
 
   async function createRenewalOrder(row, card) {
-    const storagePlanId = card.querySelector("select[data-plan]")?.value;
-    if (!storagePlanId) throw new Error("Hãy chọn gói lưu trữ cần gia hạn.");
+    if (!storageCheckoutEnabled) {
+      throw new Error("Tính năng tạo đơn gia hạn và thanh toán hiện chưa được bật.");
+    }
+    let duration;
+    if (renewalMonthlyRate !== null) {
+      const months = Number(card.querySelector("input[data-months]")?.value);
+      if (!Number.isSafeInteger(months) || months < 1) {
+        throw new Error("Hãy nhập số tháng gia hạn là số nguyên dương.");
+      }
+      duration = { duration_type: "monthly", hosting_months: months };
+    } else {
+      const storagePlanId = card.querySelector("select[data-plan]")?.value;
+      if (!storagePlanId) throw new Error("Hãy chọn gói lưu trữ cần gia hạn.");
+      duration = { storage_plan_id: storagePlanId };
+    }
     const order = await api("/orders", {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({
         design_id: row.design_id,
         renewal_publication_id: row.publication_id,
-        storage_plan_id: storagePlanId,
+        ...duration,
         asset_consents: [],
       }),
     });

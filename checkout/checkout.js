@@ -129,7 +129,7 @@ function updatePrice() {
       ? policy?.lifetime_price_minor
       : null;
   const estimateValid = Number.isSafeInteger(total) && total > 0;
-  const checkoutEnabled = Boolean(policy?.catalog_enabled && estimateValid);
+  const checkoutEnabled = Boolean(policy?.catalog_enabled && catalog?.checkout_enabled && estimateValid);
   document.querySelector("#duration-price").textContent = monthly
     ? hostingCharge === null ? "—" : formatAmount(hostingCharge)
     : Number.isSafeInteger(policy?.lifetime_price_minor)
@@ -155,7 +155,10 @@ function updatePrice() {
       : "Giá gói trọn đời hiện chưa được cấu hình.";
     durationNote.dataset.state = "error";
   } else if (!policy?.catalog_enabled) {
-    durationNote.textContent = "Đây là ước tính theo chính sách giá đã duyệt. Checkout hiện chưa được kích hoạt.";
+    durationNote.textContent = "Chưa thể xác nhận giá cho lựa chọn này.";
+    durationNote.dataset.state = "error";
+  } else if (!catalog?.checkout_enabled) {
+    durationNote.textContent = "Giá đã được duyệt; tính năng tạo đơn và thanh toán hiện chưa được bật.";
     durationNote.dataset.state = "error";
   } else {
     durationNote.textContent = "Tổng tiền sẽ được máy chủ tính lại khi tạo đơn.";
@@ -169,7 +172,7 @@ function showCatalog(catalogData) {
   if (!product) throw new Error("Mẫu này hiện không được mở bán.");
   document.querySelector("#design-template").textContent = product.title;
   document.querySelector("#base-price").textContent =
-    `${formatAmount(product.base_price_minor)} · chưa gồm hosting`;
+    `${formatAmount(product.base_price_minor)} · gồm tháng đầu tiên`;
   document.querySelector("#design-summary").textContent =
     `Bản xem trước sử dụng phiên bản nội dung ${design.revision} đã lưu. Có thể quay lại trình chỉnh sửa trước khi tạo đơn.`;
   addConsentOptions(design.data);
@@ -326,7 +329,7 @@ async function createOrder(event) {
   const policy = catalog?.pricing_policy;
   const monthly = durationTypeSelect.value === "monthly";
   const months = Number(hostingMonthsInput.value);
-  if (!design || !policy?.catalog_enabled ||
+  if (!design || !policy?.catalog_enabled || !catalog?.checkout_enabled ||
       (monthly && (!Number.isSafeInteger(months) || months < 1))) {
     showNotice("Checkout chưa được kích hoạt hoặc thời hạn hosting không hợp lệ. Chưa tạo đơn.", "error");
     return;

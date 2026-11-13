@@ -84,21 +84,17 @@ describe("shared API database contract on local Turso/libSQL", () => {
       );
       closeDatabase = close;
       const media = createStorageBinding();
-      const mailer = {
-        async fetch(_url: string, init?: RequestInit) {
-          const message = JSON.parse(String(init?.body)) as { text: string };
-          const match = message.text.match(/#magic_token=([A-Za-z0-9_-]+)/);
-          if (!match) throw new Error("Magic link did not contain a fragment token");
-          tokenQueue.push(match[1]);
-          return new Response(null, { status: 200 });
-        },
-      };
       const env = {
         DB: database,
         STORAGE: media.storage,
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+        LOCAL_TEST_EMAIL_SINK: async (message: { text: string }) => {
+          const match = message.text.match(/#magic_token=([A-Za-z0-9_-]+)/);
+          if (!match) throw new Error("Magic link did not contain a fragment token");
+          tokenQueue.push(match[1]);
+        },
         APP_ORIGIN: "https://crushify.test",
-        MAILER: mailer,
-        MAILER_AUTH_TOKEN: "local-contract-mailer",
       };
 
       const request = async (path: string, session?: { cookies: string[]; csrf: string }, options = {}) => {

@@ -170,6 +170,27 @@ function csrfCookieOptions(env: Env, maxAge: number): string {
   return `Path=/api/v1${secure}; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
+function authenticationEnabled(env: Env): boolean {
+  return env.ENVIRONMENT === "local" || env.ENVIRONMENT === "production";
+}
+
+function guardAuthentication(env: Env, requestId: string): Response | null {
+  if (authenticationEnabled(env)) return null;
+  return apiError(
+    requestId,
+    503,
+    "AUTH_UNAVAILABLE",
+    "Authentication is unavailable in this environment",
+  );
+}
+
+function clearAuthenticationCookies(requestId: string, env: Env): Response {
+  const headers = new Headers();
+  headers.append("Set-Cookie", `${SESSION_COOKIE}=; ${cookieOptions(env, 0)}`);
+  headers.append("Set-Cookie", `${CSRF_COOKIE}=; ${csrfCookieOptions(env, 0)}`);
+  return jsonResponse({ authenticated: false }, 200, requestId, headers);
+}
+
 async function applyRateLimit(
   env: Env,
   key: string,
@@ -199,6 +220,7 @@ async function applyRateLimit(
 }
 
 export async function getSession(request: Request, env: Env): Promise<Session | null> {
+  if (!authenticationEnabled(env)) return null;
   const token = getCookie(request, SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = await sha256(token);
@@ -225,6 +247,8 @@ export async function requireSession(
   env: Env,
   requestId: string,
 ): Promise<{ session?: Session; response?: Response }> {
+  const unavailable = guardAuthentication(env, requestId);
+  if (unavailable) return { response: unavailable };
   const session = await getSession(request, env);
   if (!session) {
     return { response: apiError(requestId, 401, "UNAUTHENTICATED", "Sign-in required") };
@@ -254,6 +278,19 @@ export async function handleSessionRoutes(
   path: string,
   requestId: string,
 ): Promise<Response | null> {
+  const isLogout = path === "/api/v1/customers/session" && request.method === "DELETE";
+  if (isLogout && !authenticationEnabled(env)) {
+    return clearAuthenticationCookies(requestId, env);
+  }
+  const isAuthenticationRoute =
+    (path === "/api/v1/customers/session" && request.method === "POST") ||
+    (path === "/api/v1/customers/session/verify" && request.method === "POST") ||
+    (path === "/api/v1/customers/me" && request.method === "GET");
+  if (isAuthenticationRoute) {
+    const unavailable = guardAuthentication(env, requestId);
+    if (unavailable) return unavailable;
+  }
+
   if (path === "/api/v1/customers/session" && request.method === "POST") {
     const parsed = await readJson(request, requestId);
     if (parsed.response) return parsed.response;

@@ -2,8 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import {
-  assertTursoMigrationConfirmation,
-  assertTursoStagingConfiguration,
+  resolveTursoStagingMigrationTarget,
   StagingConfigurationError,
 } from "./staging-config.ts";
 import {
@@ -75,8 +74,7 @@ async function main(): Promise<void> {
   if (mode !== "--preflight" && mode !== "--migrate") {
     throw new Error("Use --preflight or --migrate");
   }
-  if (mode === "--migrate") assertTursoMigrationConfirmation(process.env);
-  const target = assertTursoStagingConfiguration(process.env);
+  const target = resolveTursoStagingMigrationTarget(process.env, mode);
   const migrations = await loadMigrations();
   if (migrations.length === 0) throw new Error("No database migrations were found");
   if (migrations.some((migration, index) => migration.version !== index + 1)) {

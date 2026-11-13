@@ -4,7 +4,7 @@
 
 This is a staged migration guide, not a production deployment record.
 
-- The Cloudflare Worker remains available with D1/R2 for rollback. A Vercel Node Functions catch-all now uses the shared API router with Turso and Cloudinary adapters.
+- The Cloudflare Worker remains available with D1/R2 for rollback. A Vercel Node Functions catch-all uses the shared API router with Turso and Cloudinary adapters; Cloudinary is Production-only, while Preview and local development use mock storage.
 - The shared SQL contract and Turso/libSQL adapter are implemented. The same API contract tests run against local Wrangler D1 and an ephemeral local Turso/libSQL file database; the migration CLI is tested locally.
 - No remote Turso database has been connected, and no existing D1 data has been exported or imported.
 - The Vercel adapter additionally passes the shared API contract over a local Node HTTP server using a local Turso file and in-memory media. It has not been deployed or tested on Vercel. Cloudinary HTTP is mock-tested only; no Cloudinary account, credentials, upload, or real-account compatibility check is configured.
@@ -68,7 +68,7 @@ For Vercel local development:
 For Vercel Preview staging:
 
 1. Use a dedicated, verified non-production Turso database. Vercel serverless filesystems are ephemeral and must not be used for persistent databases.
-2. Set `ENVIRONMENT=staging`, `DATABASE_PROVIDER=turso`, `TURSO_STAGING_DATABASE_URL`, `TURSO_STAGING_AUTH_TOKEN`, and `STORAGE_PROVIDER=mock` for isolated Preview checks. Preview Cloudinary storage requires a separately verified account and the `CLOUDINARY_STAGING_*` variables; the previously assumed cloud is rejected. Do not use generic Production credentials in Preview.
+2. Set `ENVIRONMENT=staging`, `DATABASE_PROVIDER=turso`, `TURSO_STAGING_DATABASE_URL`, and `TURSO_STAGING_AUTH_TOKEN` for Preview database checks. Do not configure `STORAGE_PROVIDER=mock` in Preview: mock storage is local/test only, and Preview media operations remain unavailable until a separate durable staging provider is approved and configured. Do not configure Cloudinary credentials or `STORAGE_PROVIDER=cloudinary` in Preview; the runtime rejects them before storage initialization. A future dedicated staging account would still require independent owner/reviewer verification and a separate reviewed code change. Do not use generic Production credentials in Preview.
 3. Keep `LOCAL_TEST_MODE` and all payment/SePay variables disabled. The Vercel adapter does not pass payment mode or SePay secrets outside local development. Set a staging-only test mail sender only if separately approved.
 4. Vercel Cron invokes the Production deployment only. The handler requires the matching `ENVIRONMENT=production` and `VERCEL_ENV=production` pair for scheduled production cleanup; Preview has no scheduled lifecycle invocation. `CRON_SECRET` is required in the Vercel Production environment before an approved release. Vercel sends it as a bearer token. No production endpoint was invoked during this work.
 5. Do not add production customer data, test with real users, or enable checkout. See [Vercel staging setup](./VERCEL_STAGING.md) for guarded database migration and synthetic-only checks.
@@ -142,17 +142,29 @@ No `netlify.toml` or Netlify Function is added in this phase because routing and
 
 ## Cloudinary
 
-The server-side adapter is implemented for both the Cloudflare Worker and Vercel runtime. It uses signed authenticated image uploads, server-generated private IDs, bounded short-lived private downloads, and authenticated deletion. The API secret is never returned to the browser. Both runtimes proxy image bytes and retain the current API response shape.
+The server-side adapter is implemented for the Cloudflare Worker Production scope and Vercel Production. It uses signed authenticated image uploads, server-generated private IDs, bounded short-lived private downloads, and authenticated deletion. The API secret is never returned to the browser. Both runtimes proxy image bytes and retain the current API response shape.
 
-To select Cloudinary for an isolated test environment, set these server-side values (never `VITE_*` or other browser-exposed variables):
+The generic server-side values below are reserved for the existing Production configuration (never `VITE_*` or other browser-exposed variables):
 
 - `CLOUDINARY_CLOUD_NAME`
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
 
-Set `STORAGE_PROVIDER=cloudinary` and add the three credentials through the host's secret manager. Both Vercel and Worker runtime selectors fail closed if configuration is missing and do not fall back to R2. `.dev.vars.example` and Wrangler configs explicitly select R2; `.env.example` selects in-memory mock only for local Vercel development. Local Cloudinary adapter tests use mocked HTTP only. No account credentials were supplied, and no Cloudinary request, real upload, asset migration, or deployment has been run.
+Vercel Production uses `STORAGE_PROVIDER=cloudinary` with those Production credentials in its Production-only secret store; Production behavior is unchanged by the Preview isolation policy. The Vercel Preview runtime rejects Cloudinary and any staging Cloudinary values before initializing the database or storage. Local development rejects Cloudinary and uses mock storage. The legacy Worker rejects staging scope, rejects Cloudinary configuration in local scope, and in Production rejects staging Cloudinary variables before storage use. No implicit fallback to another account or provider occurs.
 
-Do not switch an environment containing R2-backed asset rows by changing only the variable: storage providers do not share binaries. Plan and test a separate inventory/copy/verification/cutover procedure first. R2 remains available as the configured local/staging provider and rollback adapter; reverting after Cloudinary writes also requires transferring or otherwise reconciling those binaries. No implicit fallback is used.
+The following is a planning-only placeholder for a possible future staging account, not a configuration to apply now:
+
+```dotenv
+ENVIRONMENT=staging
+STORAGE_PROVIDER=cloudinary
+CLOUDINARY_STAGING_CLOUD_NAME=<owner-verified-staging-cloud-name>
+CLOUDINARY_STAGING_API_KEY=<credential-issued-by-staging-account>
+CLOUDINARY_STAGING_API_SECRET=<credential-issued-by-staging-account>
+```
+
+Preview currently fails closed even when these values are present. Cloud Names, variable names, and a self-declared confirmation cannot prove separate account ownership. An authorized owner and independent security reviewer must verify the separate account directly in the Cloudinary console and verify credential provenance before a separate code review may consider enablement. No environment-only toggle is supported. `.dev.vars.example` and Wrangler configs explicitly select R2; `.env.example` selects in-memory mock only for local Vercel development. Local Cloudinary adapter tests use mocked HTTP only. No account credentials were supplied, and no Cloudinary request, real upload, asset migration, or deployment has been run.
+
+Do not switch an environment containing R2-backed asset rows by changing only the variable: storage providers do not share binaries. Plan and test a separate inventory/copy/verification/cutover procedure first. R2 remains available to the legacy Worker and rollback path; Vercel Preview's mock storage is ephemeral and not persistent. Reverting after Cloudinary writes also requires transferring or otherwise reconciling those binaries. No implicit fallback is used.
 
 Cloudinary currently advertises 25 monthly credits on its Free plan; credits are shared across managed storage, image bandwidth and transformations (the exact conversion and feature availability depend on current plan terms). This is not a guaranteed quota or commercial eligibility statement. Check the [current Cloudinary pricing and plan terms](https://cloudinary.com/pricing), authenticated-asset delivery features, account limits, regional/privacy terms, retention, and intended commercial use directly with Cloudinary before selecting it for production. Track credit usage and set upload quotas/alerts.
 

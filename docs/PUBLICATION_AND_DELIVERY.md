@@ -23,13 +23,13 @@ The publication stores a snapshot of the exact template, schema, renderer, and d
 
 Public slugs are random bearer links. D1 stores the slug for the authenticated owner dashboard to reconstruct the recipient URL and stores a hash for public-route lookup; protect D1 and its backups as containing bearer-link secrets. Treat a shared link as public to anyone who receives it. Public responses expose only validated recipient data and safe media paths, not customer identity, draft IDs, order/payment metadata, or private originals.
 
-The bounded lifecycle runner expires publications at the exact UTC boundary (`expires_at <= now`), skips lifetime entitlements (`expires_at = NULL`), and retains content until its configured deletion date. Retention cleanup defers while a valid pending, paid, or fulfilling order exists, claims the design against new checkout before deleting source assets, and retries failed media deletion. A renewal accepted before the retention deadline restores the existing publication and stable slug; a paid renewal after the deadline cannot revive retained data.
+The bounded lifecycle runner expires publications at the exact UTC boundary (`expires_at <= now`), skips lifetime entitlements (`expires_at = NULL`), and retains content until its configured deletion date. Retention cleanup defers while a valid pending, paid, or fulfilling order exists, claims the design against new checkout before deleting source assets, and retries failed media deletion. It also defers cleanup when a source asset is still referenced by another active or retained publication. A renewal accepted before the retention deadline restores the existing publication and stable slug; a paid renewal after the deadline cannot revive retained data.
 
 ## 3. Media consent and deletion
 
 Original uploaded objects remain private. A media item is copied to a publication-specific derivative only when the customer explicitly consents to that asset. The API serves a derivative only while its publication is active, the related payment remains eligible, the source asset is ready, and consent has not been withdrawn.
 
-Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately deny public reads. Derivative/source deletion is tracked in D1; a failed deletion leaves cleanup pending and does not produce a success response for design deletion. The Cloudflare Worker retains a scheduled maintenance handler for rollback, but both Wrangler cron triggers are disabled. The Vercel Production Cron is the sole configured lifecycle schedule; local synthetic route/retry tests pass, but no deployed scheduler execution was verified.
+Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately deny public reads. Derivative/source deletion is tracked in D1; a failed deletion leaves cleanup pending and does not produce a success response for design deletion. The Cloudflare Worker retains a scheduled maintenance handler for rollback, but both Wrangler cron triggers are disabled. The Vercel Production Cron is the sole configured lifecycle schedule. Vercel Preview has no scheduled lifecycle. Its manual `POST /api/ops/staging/publication-lifecycle` requires a Preview-only `STAGING_LIFECYCLE_SECRET` (exactly 64 hexadecimal characters), independently generated from Production secrets; `CRON_SECRET` alone cannot authorize it. Although authorization remains isolated, the route returns `STORAGE_UNAVAILABLE` before database access because Preview has no approved durable media provider, so it performs no lifecycle mutation. Preview durable storage is unavailable until a separate staging provider is approved and configured. Local synthetic tests cover the route's fail-closed behavior and the unchanged local lifecycle retry/cleanup behavior; no deployed scheduler or manual lifecycle execution was verified.
 
 ## 4. Routes and UI
 
@@ -42,6 +42,7 @@ Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately d
 - `GET /api/v1/publications/{slug}` and `/assets/{assetId}`: recipient data and consented derivative.
 - `GET /p/{slug}`: static recipient shell.
 - `/account/websites/`: customer dashboard with consent selection and lifecycle actions.
+- `POST /api/ops/staging/publication-lifecycle`: Preview-only operator lifecycle trigger; not a customer or generic database-mutation API.
 
 All publication mutations require `LOCAL_TEST_MODE=true` and an unset or `local` `ENVIRONMENT`. Otherwise the API returns `PUBLICATION_DISABLED`. The customer dashboard is not evidence that a remote publishing service is enabled.
 

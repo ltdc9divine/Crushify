@@ -47,7 +47,7 @@ npm run db:migrate:turso
 vercel dev
 ```
 
-`.env.local` dùng `STORAGE_PROVIDER=mock` và `LOCAL_TEST_MODE=true` cho dữ liệu thử cục bộ. Không dùng file SQLite trên Vercel Preview/Production; Preview phải dùng Turso test database riêng và Cloudinary account riêng, secrets cấu hình qua Vercel server-side environment. `APP_ORIGIN` phải là origin chính xác của ứng dụng. API routes mặc định không cache; function giới hạn ảnh ở 4 MiB để nằm dưới giới hạn payload của serverless platform. Checkout/thanh toán chỉ có prototype local-only; không bật trên Vercel Preview/Production.
+`.env.local` dùng `STORAGE_PROVIDER=mock` và `LOCAL_TEST_MODE=true` cho dữ liệu thử cục bộ. Không dùng file SQLite trên Vercel Preview/Production; Preview phải dùng Turso staging database riêng. Cloudinary hiện chỉ được phép ở Production; Preview và local vẫn dùng mock storage cho đến khi tài khoản staging được chủ sở hữu xác minh độc lập và có thay đổi mã nguồn được review riêng. Không cấu hình Cloudinary credentials trong Preview hoặc local. `APP_ORIGIN` phải là origin chính xác của ứng dụng. API routes mặc định không cache; function giới hạn ảnh ở 4 MiB để nằm dưới giới hạn payload của serverless platform. Checkout/thanh toán chỉ có prototype local-only; không bật trên Vercel Preview/Production.
 
 Khi import repository lên Vercel, chọn **Other**, giữ project root ở repository root, không cần build command hay `vercel.json` cho static paths và catch-all function. Các trang template tiếp tục được phục vụ từ thư mục tĩnh `templates/`; không rewrite API thành HTML và không thay đổi tài nguyên riêng của template.
 

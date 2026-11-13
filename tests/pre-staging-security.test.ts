@@ -149,7 +149,160 @@ describe("pre-staging environment and storage isolation", () => {
     assert.equal(stagingOnlyIdentifier, "STORAGE_ISOLATION_ERROR");
   });
 
-  it("keeps the explicit Preview mock and local mock selection functional", async () => {
+  it("does not treat Cloud names, variable names, or self-attestation as account verification", () => {
+    const configurations = [
+      {
+        ...previewEnvironment,
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined,
+      },
+      {
+        ...previewEnvironment,
+        CLOUDINARY_STAGING_CLOUD_NAME: undefined,
+        CLOUDINARY_STAGING_API_KEY: undefined,
+        CLOUDINARY_STAGING_API_SECRET: undefined,
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined,
+      },
+      {
+        ...previewEnvironment,
+        CLOUDINARY_CLOUD_NAME: "synthetic-production-cloud",
+        CLOUDINARY_API_KEY: "synthetic-production-key",
+        CLOUDINARY_API_SECRET: "synthetic-production-secret",
+        CLOUDINARY_STAGING_CLOUD_NAME: undefined,
+        CLOUDINARY_STAGING_API_KEY: undefined,
+        CLOUDINARY_STAGING_API_SECRET: undefined,
+      },
+      {
+        ...previewEnvironment,
+        CLOUDINARY_CLOUD_NAME: "synthetic-production-cloud",
+        CLOUDINARY_API_KEY: "synthetic-production-key",
+        CLOUDINARY_API_SECRET: "synthetic-production-secret",
+      },
+      {
+        ...previewEnvironment,
+        CLOUDINARY_STAGING_CLOUD_NAME: "different-synthetic-cloud",
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: "synthetic-production-cloud",
+      },
+      {
+        ...previewEnvironment,
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined,
+        CLOUDINARY_STAGING_ISOLATED_ACCOUNT: "I_CONFIRM_SEPARATE_ACCOUNT",
+      },
+      {
+        ...previewEnvironment,
+        VERCEL_ENV: "unknown",
+      },
+    ];
+
+    for (const configuration of configurations) {
+      assert.notEqual(
+        validateVercelEnvironment({ ...configuration, STORAGE_PROVIDER: "cloudinary" }),
+        null,
+      );
+    }
+  });
+
+  it("blocks Preview upload, deletion, delivery, and derivative operations before storage initialization", async () => {
+    let databaseConnections = 0;
+    let cloudinaryFactories = 0;
+    let mockFactories = 0;
+    const handler = createVercelApiHandler({
+      ...previewEnvironment,
+      CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined,
+    }, {
+      async connectDatabase() {
+        databaseConnections++;
+        return { database, close: () => undefined };
+      },
+      createCloudinaryStorage() {
+        cloudinaryFactories++;
+        return new MemoryStorageAdapter();
+      },
+      createMockStorage() {
+        mockFactories++;
+        return new MemoryStorageAdapter();
+      },
+    });
+
+    const assetId = "00000000-0000-4000-8000-000000000001";
+    const designId = "00000000-0000-4000-8000-000000000002";
+    const publicationId = "00000000-0000-4000-8000-000000000003";
+    const requests = [
+      new Request("https://preview.crushify.test/api/v1/assets/upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ design_id: designId, media_type: "image/png", size: 4 }),
+      }),
+      new Request(`https://preview.crushify.test/api/v1/assets/${assetId}/content`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${"a".repeat(43)}`, "Content-Type": "image/png" },
+        body: new Uint8Array([1, 2, 3, 4]),
+      }),
+      new Request(`https://preview.crushify.test/api/v1/designs/${designId}`, {
+        method: "DELETE",
+      }),
+      new Request(`https://preview.crushify.test/api/v1/previews/assets/${assetId}`),
+      new Request(
+        `https://preview.crushify.test/api/v1/publications/${publicationId}/publish`,
+        { method: "POST" },
+      ),
+      new Request(
+        `https://preview.crushify.test/api/v1/publications/${publicationId}/revoke`,
+        { method: "POST" },
+      ),
+      new Request(
+        `https://preview.crushify.test/api/v1/publications/g${"a".repeat(30)}/assets/${assetId}`,
+      ),
+    ];
+
+    for (const request of requests) {
+      const response = await handler(request);
+      assert.equal(response.status, 500);
+      assert.equal((await response.json() as { error: { code: string } }).error.code,
+        "STORAGE_ISOLATION_ERROR");
+    }
+    assert.equal(databaseConnections, 0);
+    assert.equal(cloudinaryFactories, 0);
+    assert.equal(mockFactories, 0, "Cloudinary failures must not silently switch storage providers");
+  });
+
+  it("keeps Production Cloudinary selection on the existing generic credential set", async () => {
+    let selectedConfiguration: {
+      CLOUDINARY_CLOUD_NAME?: string;
+      CLOUDINARY_API_KEY?: string;
+      CLOUDINARY_API_SECRET?: string;
+      CLOUDINARY_STAGING_CLOUD_NAME?: string;
+    } | undefined;
+    const production = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "https://database.synthetic.invalid",
+      TURSO_AUTH_TOKEN: "synthetic-database-token",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "synthetic-production-cloud",
+      CLOUDINARY_API_KEY: "synthetic-production-key",
+      CLOUDINARY_API_SECRET: "synthetic-production-secret",
+      ENVIRONMENT: "production",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    }, {
+      async connectDatabase() {
+        return { database, close: () => undefined };
+      },
+      createCloudinaryStorage(environment) {
+        selectedConfiguration = environment;
+        return new MemoryStorageAdapter();
+      },
+    });
+    const response = await production(
+      new Request("https://crushify.test/api/v1/nonexistent"),
+    );
+    assert.equal(response.status, 404);
+    assert.equal(selectedConfiguration?.CLOUDINARY_CLOUD_NAME, "synthetic-production-cloud");
+    assert.equal(selectedConfiguration?.CLOUDINARY_API_KEY, "synthetic-production-key");
+    assert.equal(selectedConfiguration?.CLOUDINARY_API_SECRET, "synthetic-production-secret");
+    assert.equal(selectedConfiguration?.CLOUDINARY_STAGING_CLOUD_NAME, undefined);
+  });
+
+  it("does not instantiate Preview mock storage and keeps local mock selection functional", async () => {
     let previewMockCreated = false;
     const preview = createVercelApiHandler({
       ...previewEnvironment,
@@ -170,7 +323,7 @@ describe("pre-staging environment and storage isolation", () => {
       (await preview(new Request("https://preview.crushify.test/api/v1/nonexistent"))).status,
       404,
     );
-    assert.equal(previewMockCreated, true);
+    assert.equal(previewMockCreated, false);
 
     let localMockCreated = false;
     const local = createVercelApiHandler({

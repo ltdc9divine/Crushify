@@ -5,7 +5,7 @@ export const STANDARD_HOSTING_MONTHLY_ADDITION_MINOR = 10_000;
 export const STANDARD_HOSTING_INCLUDED_MONTHS = 1;
 export const STANDARD_LIFETIME_PRICE_MINOR = 199_000;
 export const STANDARD_PRICING_VERSION = "standard-v1";
-export const STANDARD_CATALOG_ENABLED = false;
+export const STANDARD_CATALOG_ENABLED = true;
 
 export interface StandardProduct {
   id: TemplateId;
@@ -61,11 +61,11 @@ export const STANDARD_PRODUCTS: readonly StandardProduct[] =
   Object.freeze(standardProducts.map((product) => Object.freeze(product)));
 
 const storageDurations: StorageDuration[] = [
-  { id: "1-month", title: "1 tháng", durationMonths: 1, lifetime: false, amountMinor: null, currency: "VND", enabled: false },
-  { id: "3-months", title: "3 tháng", durationMonths: 3, lifetime: false, amountMinor: null, currency: "VND", enabled: false },
-  { id: "6-months", title: "6 tháng", durationMonths: 6, lifetime: false, amountMinor: null, currency: "VND", enabled: false },
-  { id: "12-months", title: "12 tháng", durationMonths: 12, lifetime: false, amountMinor: null, currency: "VND", enabled: false },
-  { id: "lifetime", title: "Trọn đời", durationMonths: null, lifetime: true, amountMinor: null, currency: "VND", enabled: false },
+  { id: "1-month", title: "1 tháng", durationMonths: 1, lifetime: false, amountMinor: null, currency: "VND", enabled: true },
+  { id: "3-months", title: "3 tháng", durationMonths: 3, lifetime: false, amountMinor: null, currency: "VND", enabled: true },
+  { id: "6-months", title: "6 tháng", durationMonths: 6, lifetime: false, amountMinor: null, currency: "VND", enabled: true },
+  { id: "12-months", title: "12 tháng", durationMonths: 12, lifetime: false, amountMinor: null, currency: "VND", enabled: true },
+  { id: "lifetime", title: "Trọn đời", durationMonths: null, lifetime: true, amountMinor: null, currency: "VND", enabled: true },
 ];
 export const STORAGE_DURATIONS: readonly StorageDuration[] =
   Object.freeze(storageDurations.map((duration) => Object.freeze(duration)));
@@ -105,6 +105,12 @@ export function resolveStandardPlanAmountMinor(duration: StorageDuration): numbe
     return duration.amountMinor;
   }
   return deriveHostingAmountMinor(duration);
+}
+
+export function standardRenewalAmountMinor(duration: StorageDuration): number | null {
+  if (!duration.enabled || duration.lifetime || duration.durationMonths === null) return null;
+  const amount = duration.durationMonths * STANDARD_HOSTING_MONTHLY_ADDITION_MINOR;
+  return Number.isSafeInteger(amount) && amount > 0 ? amount : null;
 }
 
 function validateHostingTerm(term: StandardHostingTerm): void {
@@ -184,7 +190,7 @@ export function standardStoragePlanForTerm(term: StandardHostingTerm): StorageDu
     lifetime: false,
     amountMinor: null,
     currency: "VND",
-    enabled: false,
+    enabled: true,
   };
 }
 
@@ -241,19 +247,25 @@ export function publicProductCatalog(options: PublicCatalogOptions = {}) {
       available: product.available,
     })),
     storage_durations: STORAGE_DURATIONS.map((plan) => {
-      const enabled = catalogEnabled;
+      const enabled = catalogEnabled && plan.enabled;
+      const hostingChargeMinor = enabled && !plan.lifetime
+        ? deriveHostingAmountMinor(plan)
+        : null;
       const amountMinor = enabled
-        ? (plan.amountMinor ?? deriveHostingAmountMinor(plan))
-        : plan.amountMinor;
+        ? plan.lifetime
+          ? STANDARD_LIFETIME_PRICE_MINOR
+          : STANDARD_TEMPLATE_BASE_PRICE_MINOR + deriveHostingAmountMinor(plan)
+        : null;
       return {
         id: plan.id,
         title: plan.title,
         duration_months: plan.durationMonths,
         lifetime: plan.lifetime,
         amount_minor: amountMinor,
+        hosting_charge_minor: hostingChargeMinor,
         currency: plan.currency,
         enabled,
-        price_configured: enabled,
+        price_configured: amountMinor !== null,
       };
     }),
   };

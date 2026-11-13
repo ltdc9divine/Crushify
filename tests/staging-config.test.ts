@@ -4,6 +4,7 @@ import {
   assertTursoMigrationConfirmation,
   assertCloudinaryStagingConfiguration,
   assertTursoStagingConfiguration,
+  resolveTursoStagingMigrationTarget,
 } from "../scripts/staging-config.ts";
 
 const validTursoEnvironment = {
@@ -15,6 +16,7 @@ const validTursoEnvironment = {
   TURSO_CONFIRM_DATABASE: "crushify-staging",
   TURSO_CONFIRM_GROUP: "crushify-staging-sg",
   TURSO_CONFIRM_REGION: "Singapore",
+  TURSO_CONFIRM_HOSTNAME: "crushify-staging-test-org.turso.io",
 };
 
 const validCloudinaryEnvironment = {
@@ -82,6 +84,10 @@ describe("staging script environment guards", () => {
       { CRUSHIFY_STAGING_PROFILE: undefined },
       { ENVIRONMENT: "production" },
       { VERCEL_ENV: "production" },
+      { VERCEL_ENV: "preview" },
+      { VERCEL_ENV: "unknown" },
+      { TURSO_DATABASE_URL: "libsql://production.example.turso.io" },
+      { TURSO_AUTH_TOKEN: "synthetic-production-token" },
     ]) {
       assert.throws(
         () => assertTursoStagingConfiguration({
@@ -117,6 +123,94 @@ describe("staging script environment guards", () => {
     );
   });
 
+  it("pins staging migration identity to the exact confirmed hostname", () => {
+    for (const override of [
+      { TURSO_CONFIRM_HOSTNAME: undefined },
+      { TURSO_CONFIRM_HOSTNAME: "crushify-staging-another-org.turso.io" },
+      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-another-org.turso.io" },
+      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io/path" },
+      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io:443" },
+      { TURSO_STAGING_DATABASE_URL: " libsql://crushify-staging-test-org.turso.io" },
+    ]) {
+      assert.throws(
+        () => assertTursoStagingConfiguration({
+          ...validTursoEnvironment,
+          ...override,
+        }),
+        /confirmed staging database identity|hostname confirmation|credentials are required/,
+      );
+    }
+
+    assert.deepEqual(
+      assertTursoStagingConfiguration(validTursoEnvironment),
+      {
+        url: validTursoEnvironment.TURSO_STAGING_DATABASE_URL,
+        authToken: validTursoEnvironment.TURSO_STAGING_AUTH_TOKEN,
+      },
+    );
+  });
+
+  it("requires staging-only credentials and an unambiguous Vercel scope", () => {
+    for (const override of [
+      { TURSO_STAGING_DATABASE_URL: undefined },
+      { TURSO_STAGING_AUTH_TOKEN: undefined },
+      { TURSO_DATABASE_URL: "libsql://production.example.turso.io" },
+      { TURSO_AUTH_TOKEN: "synthetic-production-token" },
+      { VERCEL_ENV: "production" },
+      { VERCEL_ENV: "preview" },
+    ]) {
+      assert.throws(
+        () => assertTursoStagingConfiguration({
+          ...validTursoEnvironment,
+          ...override,
+        }),
+        /staging profile|credentials|identity/,
+      );
+    }
+  });
+
+  it("validates migration preflight configuration without connecting to Turso", () => {
+    assert.deepEqual(
+      resolveTursoStagingMigrationTarget(validTursoEnvironment, "--preflight"),
+      {
+        url: validTursoEnvironment.TURSO_STAGING_DATABASE_URL,
+        authToken: validTursoEnvironment.TURSO_STAGING_AUTH_TOKEN,
+      },
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget({
+        ...validTursoEnvironment,
+        VERCEL_ENV: "production",
+      }, "--preflight"),
+      /cannot run in Vercel Production/,
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget({
+        ...validTursoEnvironment,
+        TURSO_STAGING_DATABASE_URL: undefined,
+      }, "--preflight"),
+      /credentials are required/,
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget({
+        ...validTursoEnvironment,
+        TURSO_CONFIRM_HOSTNAME: "crushify-staging-unverified-org.turso.io",
+      }, "--preflight"),
+      /confirmed staging database identity/,
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget(validTursoEnvironment, "--migrate"),
+      /explicit TURSO_MIGRATE_CONFIRM confirmation/,
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget(
+        validTursoEnvironment,
+        "--invalid",
+      ),
+      /migration mode must be explicit/,
+    );
+  });
+
   it("requires synthetic-data opt-in for Turso smoke tests", () => {
     assert.throws(
       () => assertTursoStagingConfiguration(validTursoEnvironment, true),
@@ -133,7 +227,7 @@ describe("staging script environment guards", () => {
         TURSO_DATABASE_URL: validTursoEnvironment.TURSO_STAGING_DATABASE_URL,
         TURSO_AUTH_TOKEN: validTursoEnvironment.TURSO_STAGING_AUTH_TOKEN,
       }),
-      /Turso staging credentials are required/,
+      /cannot run in Vercel Production|Production credentials/,
     );
   });
 

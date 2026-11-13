@@ -9,6 +9,7 @@ import { applyMigrations, type SqlMigration } from "../src/database/migrations.t
 import { handleApiRequest } from "../src/index.ts";
 import { createVercelApiHandler } from "../src/platform/vercel.ts";
 import { runPublicationLifecycle } from "../src/publications.ts";
+import { runScheduledPublicationLifecycle } from "../src/scheduler.ts";
 import type { Storage, StorageObject } from "../src/storage.ts";
 
 const NOW = new Date("2099-01-31T12:00:00.000Z");
@@ -76,10 +77,11 @@ async function createFixture(
     lifetime?: boolean;
     withAsset?: boolean;
     extraOrderStatus?: "AWAITING_PAYMENT" | "PAID";
+    customerId?: string;
   },
 ) {
   const id = () => randomUUID();
-  const customerId = id();
+  const customerId = options.customerId ?? id();
   const designId = id();
   const orderId = id();
   const publicationId = id();
@@ -93,12 +95,14 @@ async function createFixture(
   const data = String(template.rows[0]?.default_data_json);
   const lifetime = options.lifetime ?? false;
   const planId = lifetime ? "lifetime" : "1-month";
-  await client.batch([
-    {
+  if (!options.customerId) {
+    await client.execute({
       sql: `INSERT INTO customers (id, email, email_normalized, status, created_at, updated_at)
             VALUES (?, ?, ?, 'ACTIVE', ?, ?)`,
       args: [customerId, `${customerId}@example.test`, `${customerId}@example.test`, now, now],
-    },
+    });
+  }
+  await client.batch([
     {
       sql: `INSERT INTO designs (
               id, customer_id, template_id, schema_version, data_json, revision, status, created_at, updated_at
@@ -439,6 +443,170 @@ describe("publication expiration lifecycle", () => {
     }
   });
 
+  it("blocks Preview lifecycle without durable storage and preserves isolated lifecycle behavior", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createStorage({ derivative: 0, source: 0 });
+    const now = new Date();
+    const expiredAt = new Date(now.getTime() - 60_000).toISOString();
+    const activeUntil = new Date(now.getTime() + 86_400_000).toISOString();
+    const secret = "a".repeat(64);
+    const cronSecret = "b".repeat(64);
+    let connections = 0;
+    let storageCreations = 0;
+    let emailCalls = 0;
+    let outboundCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      outboundCalls++;
+      return new Response(null, { status: 500 });
+    };
+    const handler = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-staging-token",
+      STORAGE_PROVIDER: "mock",
+      ENVIRONMENT: "staging",
+      VERCEL_ENV: "preview",
+      APP_ORIGIN: "https://crushify-staging.vercel.app",
+      VERCEL_URL: "crushify-staging.vercel.app",
+      CRON_SECRET: cronSecret,
+      STAGING_LIFECYCLE_SECRET: secret,
+      DATA_RETENTION_DAYS: "30",
+    }, {
+      async connectDatabase() {
+        connections++;
+        return { database: adapter, close: () => undefined };
+      },
+      createMockStorage() {
+        storageCreations++;
+        return storage;
+      },
+      async localTestEmailSink() {
+        emailCalls++;
+      },
+    });
+    const trigger = () => handler(new Request(
+      "https://crushify-staging.vercel.app/api/ops/staging/publication-lifecycle",
+      { method: "POST", headers: { Authorization: `Bearer ${secret}` } },
+    ));
+
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const expired = await createFixture(client, {
+        expiresAt: expiredAt,
+        extraOrderStatus: "AWAITING_PAYMENT",
+      });
+      const active = await createFixture(client, { expiresAt: activeUntil });
+      assert.ok(expired.extraOrderId);
+      const paymentsBefore = await client.execute(
+        "SELECT id, provider, status FROM payments ORDER BY id",
+      );
+      const ordersBefore = await client.execute(
+        "SELECT id, status, paid_at FROM orders ORDER BY id",
+      );
+      const publicationCountBefore = await client.execute(
+        "SELECT COUNT(*) AS count FROM publications",
+      );
+
+      await client.execute(`CREATE TRIGGER reject_lifecycle_expiry
+        BEFORE UPDATE OF status ON publications
+        WHEN NEW.status = 'EXPIRED'
+        BEGIN SELECT RAISE(ABORT, 'injected lifecycle failure'); END`);
+      const failed = await trigger();
+      assert.equal(failed.status, 503);
+      assert.equal(
+        (await failed.json() as { error: { code: string } }).error.code,
+        "STORAGE_UNAVAILABLE",
+      );
+      assert.equal(connections, 0);
+      assert.equal(storageCreations, 0);
+      const unchanged = await client.execute({
+        sql: "SELECT status, expired_at FROM publications WHERE id = ?",
+        args: [expired.publicationId],
+      });
+      assert.deepEqual(unchanged.rows[0], { status: "PUBLISHED", expired_at: null });
+
+      const lifecycleEnv = {
+        DB: adapter,
+        STORAGE: storage,
+        ENVIRONMENT: "staging",
+        DATA_RETENTION_DAYS: "30",
+      } as Parameters<typeof runScheduledPublicationLifecycle>[0];
+      await assert.rejects(
+        runScheduledPublicationLifecycle(lifecycleEnv, { limit: 10 }),
+        /injected lifecycle failure/,
+      );
+      await client.execute("DROP TRIGGER reject_lifecycle_expiry");
+
+      const summary = await runScheduledPublicationLifecycle(lifecycleEnv, { limit: 10 });
+      assert.deepEqual(summary, { acquired: true, expired: 1, erased: 0, retryable: 0 });
+      assert.deepEqual(Object.keys(summary).sort(), ["acquired", "erased", "expired", "retryable"]);
+
+      const repeated = await runScheduledPublicationLifecycle(lifecycleEnv, { limit: 10 });
+      assert.deepEqual(repeated, {
+        acquired: true,
+        expired: 0,
+        erased: 0,
+        retryable: 0,
+      });
+      assert.equal(connections, 0);
+      assert.equal(storageCreations, 0);
+
+      const expiredState = await client.execute({
+        sql: "SELECT status, retention_delete_after_at FROM publications WHERE id = ?",
+        args: [expired.publicationId],
+      });
+      assert.equal(expiredState.rows[0]?.status, "EXPIRED");
+      assert.ok(Date.parse(String(expiredState.rows[0]?.retention_delete_after_at)) > Date.now());
+      const pendingOrder = await client.execute({
+        sql: "SELECT status, paid_at FROM orders WHERE id = ?",
+        args: [expired.extraOrderId],
+      });
+      assert.deepEqual(pendingOrder.rows[0], { status: "AWAITING_PAYMENT", paid_at: null });
+      const unpaidPublication = await client.execute({
+        sql: "SELECT id FROM publications WHERE order_id = ?",
+        args: [expired.extraOrderId],
+      });
+      assert.equal(unpaidPublication.rows.length, 0);
+      const paymentsAfter = await client.execute(
+        "SELECT id, provider, status FROM payments ORDER BY id",
+      );
+      assert.deepEqual(paymentsAfter.rows, paymentsBefore.rows);
+      const ordersAfter = await client.execute(
+        "SELECT id, status, paid_at FROM orders ORDER BY id",
+      );
+      assert.deepEqual(ordersAfter.rows, ordersBefore.rows);
+      const publicationCountAfter = await client.execute(
+        "SELECT COUNT(*) AS count FROM publications",
+      );
+      assert.deepEqual(publicationCountAfter.rows, publicationCountBefore.rows);
+      assert.equal((await client.execute(
+        "SELECT COUNT(*) AS count FROM scheduled_task_runs WHERE status = 'FAILED'",
+      )).rows[0]?.count, 1);
+
+      const publicEnv = {
+        DB: adapter,
+        STORAGE: storage,
+        DATA_RETENTION_DAYS: "30",
+      } as Parameters<typeof runPublicationLifecycle>[0];
+      assert.equal((await handleApiRequest(
+        new Request(`https://crushify-staging.vercel.app/api/v1/publications/${expired.slug}`),
+        publicEnv,
+      )).status, 410);
+      assert.equal((await handleApiRequest(
+        new Request(`https://crushify-staging.vercel.app/api/v1/publications/${active.slug}`),
+        publicEnv,
+      )).status, 200);
+      assert.equal(emailCalls, 0);
+      assert.equal(outboundCalls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      client.close();
+    }
+  });
+
   it("retains source assets until retention and retries derivative/source cleanup failures safely", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -505,6 +673,73 @@ describe("publication expiration lifecycle", () => {
       assert.equal(erased.rows[0]?.derivative_key, null);
       assert.equal(erased.rows[0]?.snapshot_json, "{}");
       assert.equal(erased.rows[0]?.retention_delete_after_at, null);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("does not clean a source asset referenced by another active publication", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createStorage({ derivative: 0, source: 0 });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const expired = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        retentionUntil: "2099-01-30T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in expired) || !("derivativeKey" in expired)) {
+        assert.fail("Expected expired asset fixture");
+      }
+      const active = await createFixture(client, {
+        customerId: expired.customerId,
+        expiresAt: "2100-01-01T00:00:00.000Z",
+      });
+      const activeDerivative = `published/active-${randomUUID()}.png`;
+      const now = new Date("2099-02-01T00:00:00.000Z").toISOString();
+      await client.execute({
+        sql: `INSERT INTO publication_assets (
+                id, publication_id, asset_id, customer_id, consent_version, consented_at,
+                derivative_key, derivative_status, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 'public-image-v1', ?, ?, 'READY', ?, ?)`,
+        args: [
+          randomUUID(), active.publicationId, expired.assetId, expired.customerId,
+          now, activeDerivative, now, now,
+        ],
+      });
+      await storage.upload(expired.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.createPublishedDerivative(expired.sourceKey, expired.derivativeKey);
+      await storage.createPublishedDerivative(expired.sourceKey, activeDerivative);
+
+      const result = await runPublicationLifecycle({
+        DB: adapter,
+        STORAGE: storage,
+        DATA_RETENTION_DAYS: "30",
+      } as Parameters<typeof runPublicationLifecycle>[0], {
+        limit: 10,
+        now: new Date("2099-02-01T00:00:00.000Z"),
+      });
+      assert.deepEqual(result, { expired: 0, erased: 0, retryable: 1 });
+
+      const state = await client.execute({
+        sql: `SELECT a.status AS asset_status, pa.derivative_status, p.status AS active_status
+              FROM assets a
+              JOIN publication_assets pa ON pa.asset_id = a.id
+              JOIN publications p ON p.id = pa.publication_id
+              WHERE a.id = ? AND p.id = ?`,
+        args: [expired.assetId, active.publicationId],
+      });
+      assert.deepEqual(state.rows[0], {
+        asset_status: "READY",
+        derivative_status: "READY",
+        active_status: "PUBLISHED",
+      });
+      assert.ok(await storage.get(expired.sourceKey));
+      assert.ok(await storage.getPublishedDerivative(expired.derivativeKey));
+      assert.ok(await storage.getPublishedDerivative(activeDerivative));
     } finally {
       client.close();
     }

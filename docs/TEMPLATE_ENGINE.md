@@ -1,6 +1,6 @@
 # Shared Template Engine
 
-**Status:** all five publication validators, recipient payload adapters, shared customer editor controls, server-backed draft/preview adapters, and publication bootstrap are wired. Customer draft APIs, payment, and publication are local-test only. The shared checkout now supports all five designs, but no customer order can be created until hosting-duration prices are approved and enabled centrally.
+**Status:** all five publication validators, recipient payload adapters, shared customer editor controls, server-backed draft/preview adapters, and publication bootstrap are wired. Customer draft APIs, payment, and publication are local-test only. The shared catalog exposes all five standard designs and approved prices; checkout authorization remains separate and is disabled in Production and Preview.
 **Goal:** share services/data lifecycle while keeping five distinct visual experiences.
 
 ## 1. Current state and gaps
@@ -15,7 +15,7 @@ The gallery links to five independent HTML applications; some CSS/JS are inline 
 | `say-yes` | Proposal editor, YES/NO interactions, local image selection and 2D fallback. | Schema-v1 draft save/restore, photo upload and bearer-token preview through the shared customer tools. Three.js CDN fallback includes a vendor path not present in the repository. |
 | `distance-means-nothing` | Names, dates, time-zone clocks/countdown/distance editor and 3D/2D scene; no image upload. | Schema-v1 draft save/restore and bearer-token preview through the shared customer tools. Existing hash-based sharing remains separate. Three.js 0.160.0, addon modules and fonts depend on external CDN/import-map hosts. |
 
-The registry validates and converts recipient data for all five templates, and each template's own page loads the published payload through the shared bootstrap without merging its CSS, JavaScript, or 3D scene. Shared server-backed editing, authentication, preview and checkout navigation exist for all five in local Worker mode. The authoritative standard base price is 59,000 VND; hosting prices and lifetime remain disabled in the central catalog, so the checkout cannot create a paid order. Browser checks establish local behavior, not production-scale reliability, physical-device behavior, CDN-failure resilience, or commercial readiness. No template uses webcam/camera capture.
+The registry validates and converts recipient data for all five templates, and each template's own page loads the published payload through the shared bootstrap without merging its CSS, JavaScript, or 3D scene. Shared server-backed editing, authentication, preview and checkout navigation exist for all five in local Worker mode. The approved standard price is 59,000 VND including the first month, plus 10,000 VND per additional month, or 199,000 VND Lifetime. Production and Preview checkout remain disabled independently of catalog visibility. Browser checks establish local behavior, not production-scale reliability, physical-device behavior, CDN-failure resilience, or commercial readiness. No template uses webcam/camera capture.
 
 ## 2. Per-template manifest contract
 

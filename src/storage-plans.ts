@@ -14,12 +14,21 @@ export function addCalendarMonths(value: Date, months: number): Date {
   const day = result.getUTCDate();
   result.setUTCDate(1);
   result.setUTCMonth(result.getUTCMonth() + months);
+  if (!Number.isFinite(result.getTime())) {
+    throw new RangeError("Calendar month duration exceeds the supported date range");
+  }
   const finalDay = new Date(Date.UTC(
     result.getUTCFullYear(),
     result.getUTCMonth() + 1,
     0,
   )).getUTCDate();
+  if (!Number.isInteger(finalDay)) {
+    throw new RangeError("Calendar month duration exceeds the supported date range");
+  }
   result.setUTCDate(Math.min(day, finalDay));
+  if (!Number.isFinite(result.getTime())) {
+    throw new RangeError("Calendar month duration exceeds the supported date range");
+  }
   return result;
 }
 

@@ -21,6 +21,7 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 - Every resource query scopes to authenticated customer ID. Use opaque IDs plus authorization; opaque identifiers are not access control.
 - Return indistinguishable `404` for non-owned drafts/orders/assets. Never put raw D1 ID in a public capability URL as the only guard.
 - Prevent account enumeration in login/reset responses; throttle by IP and normalized identifier.
+- The shared auth boundary enables customer authentication only for the already-classified `local` and `production` runtimes. Vercel Preview (`staging`) and unknown/ambiguous environments reject login-link request/consumption and all session acceptance before database, token, or email side effects; `getSession()` never accepts a Preview cookie. Production and local behavior remain enabled. Preview logout only clears browser cookies without looking up or revoking server-side sessions.
 
 ## 4. Preview tokens and public slugs
 

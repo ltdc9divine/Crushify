@@ -23,9 +23,12 @@ export function assertTursoMigrationConfirmation(environment: Environment): void
 function assertStagingEnvironment(environment: Environment): void {
   if (environment.CRUSHIFY_STAGING_PROFILE !== "local" ||
       environment.ENVIRONMENT !== "staging" ||
-      environment.VERCEL_ENV === "production") {
+      (environment.VERCEL_ENV !== undefined &&
+        environment.VERCEL_ENV !== "development") ||
+      environment.TURSO_DATABASE_URL !== undefined ||
+      environment.TURSO_AUTH_TOKEN !== undefined) {
     throw new StagingConfigurationError(
-      "Staging operations require the local staging profile and cannot run in Vercel Production",
+      "Staging operations require an unambiguous local staging profile and cannot run in Vercel Production or with Production credentials",
     );
   }
 }
@@ -48,9 +51,14 @@ export function assertTursoStagingConfiguration(
 
   const rawUrl = environment.TURSO_STAGING_DATABASE_URL;
   const authToken = environment.TURSO_STAGING_AUTH_TOKEN;
-  if (!rawUrl || !authToken?.trim()) {
+  const rawConfirmedHostname = environment.TURSO_CONFIRM_HOSTNAME;
+  if (!rawUrl || rawUrl.trim() !== rawUrl || !authToken?.trim()) {
     throw new StagingConfigurationError("Turso staging credentials are required");
   }
+  if (!rawConfirmedHostname || rawConfirmedHostname !== rawConfirmedHostname.trim()) {
+    throw new StagingConfigurationError("Exact staging hostname confirmation is required");
+  }
+  const confirmedHostname = rawConfirmedHostname.trim().toLowerCase();
 
   let url: URL;
   try {
@@ -59,12 +67,25 @@ export function assertTursoStagingConfiguration(
     throw new StagingConfigurationError("Turso URL does not match the confirmed staging database identity");
   }
   if (url.protocol !== "libsql:" ||
-      url.username || url.password || url.search || url.hash ||
-      !stagingDatabaseHostname.test(url.hostname)) {
+      url.username || url.password || url.port || url.search || url.hash ||
+      (url.pathname && url.pathname !== "/") ||
+      !stagingDatabaseHostname.test(url.hostname) ||
+      url.hostname !== confirmedHostname) {
     throw new StagingConfigurationError("Turso URL does not match the confirmed staging database identity");
   }
 
   return { url: url.toString(), authToken };
+}
+
+export function resolveTursoStagingMigrationTarget(
+  environment: Environment,
+  mode: string,
+): { url: string; authToken: string } {
+  if (mode !== "--preflight" && mode !== "--migrate") {
+    throw new StagingConfigurationError("Turso staging migration mode must be explicit");
+  }
+  if (mode === "--migrate") assertTursoMigrationConfirmation(environment);
+  return assertTursoStagingConfiguration(environment);
 }
 
 export function assertCloudinaryStagingConfiguration(

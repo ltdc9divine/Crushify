@@ -39,8 +39,6 @@ const child = spawn(
     "--var",
     "LOCAL_TEST_CATALOG_OVERRIDE:true",
     "--var",
-    "LOCAL_TEST_PRICING_POLICY:true",
-    "--var",
     "PAYMENT_MODE:sepay-test",
     "--var",
     `SEPAY_WEBHOOK_SECRET:${webhookSecret}`,
@@ -596,8 +594,16 @@ try {
     },
     inspectEntitlement(orderId) {
       const rows = queryLocalD1(
-        `SELECT activated_at, starts_at, previous_expires_at, expires_at, status
+        `SELECT activated_at, starts_at, previous_expires_at, expires_at, status, duration_months
           FROM storage_entitlements WHERE order_id = '${orderId}'`,
+      );
+      assert.equal(rows.length, 1);
+      return rows[0];
+    },
+    inspectStoragePlan(planId) {
+      const rows = queryLocalD1(
+        `SELECT id, duration_months, is_lifetime, status
+          FROM storage_plans WHERE id = '${planId}'`,
       );
       assert.equal(rows.length, 1);
       return rows[0];

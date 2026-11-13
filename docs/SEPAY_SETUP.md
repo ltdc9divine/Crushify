@@ -6,6 +6,13 @@ Crushify currently implements only a local order and webhook-verification protot
 
 The route is `POST /api/v1/payments/sepay/webhook`. It accepts `application/json` up to 64 KiB, verifies `X-SePay-Signature: sha256=<hex>` over `{X-SePay-Timestamp}.{raw_body}`, rejects timestamps outside ±300 seconds, and requires valid UTF-8. A valid event is only applied when its transaction ID is unique, its transfer is incoming, its payment reference exactly matches, the receiving account matches configured local Test mode settings, the amount is exact, and the order is still pending and unexpired. Verified unmatched or mismatched events are retained with attempt count, expected/actual amount and a reason for review.
 
+## Preview and Production isolation
+
+- The trusted runtime resolver selects `MOCK` in Vercel Preview/staging regardless of request data. Preview rejects `PAYMENT_MODE` and all `SEPAY_*` configuration; none is forwarded to the application.
+- Preview's customer authentication gate prevents order creation before payment-table queries or writes. The SePay webhook and payment-recovery paths reject Preview before body/signature processing. Staging fulfillment and fulfillment recovery are also disabled.
+- There is no Preview mock-confirmation route today. Do not re-enable customer authentication or use the SePay webhook to confirm a mock order. A future operator-only mechanism requires separate approval and a Preview-only capability bound to the staging database and `MOCK` provider state.
+- The current repository does not enable Production checkout or SePay webhook processing. It retains SePay as the Production provider identity, but the only configured/implemented payment mode is local `sepay-test` or `mock`. This task did not activate or change Production payment configuration.
+
 ## Local mock workflow
 
 1. Copy `.dev.vars.example` to `.dev.vars` only if `.dev.vars` does not already exist. Keep `.dev.vars` ignored and do not commit it.
@@ -44,7 +51,7 @@ SePay Test mode requires account access and may have account-specific limits. It
 
 | Variable | Use | Local restriction |
 |---|---|---|
-| `PAYMENT_MODE` | `mock` or `sepay-test` | Accepted only in local test mode. No `live` value exists. |
+| `PAYMENT_MODE` | `mock` or `sepay-test` | Accepted only in local test mode. Preview internally selects mock without this variable; Production has no live mode. |
 | `SEPAY_WEBHOOK_SECRET` | HMAC verification | Local Test mode secret only; keep server-side. |
 | `SEPAY_BANK_CODE` | Test mode QR instructions | Required only for `sepay-test`; never pass to browser as configuration. |
 | `SEPAY_BANK_ACCOUNT` | Expected incoming account and QR instructions | Must be the isolated Test mode account. |
@@ -52,7 +59,7 @@ SePay Test mode requires account access and may have account-specific limits. It
 
 `PaymentProvider` is the provider boundary for creating transfer instructions, verifying signed webhooks, parsing payloads, and normalizing transactions. SePay is currently the sole implementation. `CRF` order references and `CRP` payment references are separate random values; only the `CRP` reference is matched to the webhook's `code`.
 
-Vercel Preview and Production do not pass these settings into the API runtime. Cloudflare remote deployments have not been changed. There is intentionally no documented production activation procedure.
+Vercel Preview and Production do not pass these user-configured settings into the API runtime. Preview selects its mock mode in code; Production payment routes remain disabled. Cloudflare remote deployments have not been changed. There is intentionally no documented production activation procedure.
 
 ## References
 

@@ -28,8 +28,9 @@ h1 { margin: 8px 0; font: 500 clamp(2rem, 7vw, 3.2rem) Georgia, serif; }
 .consents img { width: 52px; height: 52px; flex: 0 0 52px; border-radius: 8px; object-fit: cover; background: #261b30; }
 .asset-option button { min-height: 34px; padding: 5px 8px; font-size: .78rem; }
 .actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.actions label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: #e5d7e3; }
 button, .button { display: inline-flex; min-height: 40px; align-items: center; justify-content: center; padding: 8px 12px; border: 1px solid rgba(255, 157, 201, .28); border-radius: 10px; background: rgba(255, 157, 201, .1); color: #ffb0d2; font: inherit; text-decoration: none; cursor: pointer; }
-select { min-height: 40px; max-width: 100%; padding: 7px 10px; border: 1px solid rgba(255, 157, 201, .28); border-radius: 10px; background: #211728; color: #fff0f6; font: inherit; }
+select, input[type="number"] { min-height: 40px; max-width: 100%; padding: 7px 10px; border: 1px solid rgba(255, 157, 201, .28); border-radius: 10px; background: #211728; color: #fff0f6; font: inherit; }
 .renewal-checkout { margin-top: 16px; padding: 14px; border: 1px solid rgba(255, 157, 201, .28); border-radius: 12px; color: #e5d7e3; overflow-wrap: anywhere; }
 .renewal-checkout h3 { margin: 0 0 8px; color: #ffb0d2; font-size: 1rem; }
 .renewal-checkout p { margin: 5px 0; }

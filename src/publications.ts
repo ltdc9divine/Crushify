@@ -1,5 +1,6 @@
 import { requireCsrf, requireSession } from "./auth.ts";
 import { logSafeError } from "./logging.ts";
+import { resolvePaymentEnvironmentPolicy } from "./payments/policy.ts";
 import { normalizeEnvironmentOrigin } from "./platform/environment.ts";
 import { DatabaseError } from "./database.ts";
 import {
@@ -452,6 +453,21 @@ export async function runPublicationLifecycle(
   let erased = 0;
   let retryable = 0;
   for (const publication of expired.results) {
+    const sharedAsset = await env.DB.prepare(
+      `SELECT a.id FROM assets a
+       JOIN publication_assets pa ON pa.asset_id = a.id AND pa.revoked_at IS NULL
+       JOIN publications other ON other.id = pa.publication_id
+       WHERE a.design_id = ? AND other.id <> ?
+         AND (other.status IN ('PUBLISHED','UNPUBLISHED') OR
+           (other.status IN ('EXPIRED','REVOKED') AND
+             (other.retention_delete_after_at IS NULL OR other.retention_delete_after_at > ?)))
+       LIMIT 1`,
+    ).bind(publication.design_id, publication.id, now).first<{ id: string }>();
+    if (sharedAsset) {
+      retryable++;
+      continue;
+    }
+
     const claimed = await env.DB.prepare(
       `UPDATE designs SET status = 'ARCHIVED', updated_at = ?
        WHERE id = ? AND status IN ('DRAFT','ARCHIVED')
@@ -1213,6 +1229,9 @@ export async function handleFulfillmentForOrder(
   env: Env,
   orderId: string,
 ): Promise<{ completed: boolean; retryable: boolean }> {
+  if (!resolvePaymentEnvironmentPolicy(env).fulfillmentEnabled) {
+    throw new Error("Payment fulfillment is disabled for this runtime");
+  }
   const job = await env.DB.prepare(
     `SELECT status FROM fulfillment_jobs WHERE order_id = ?`,
   ).bind(orderId).first<{ status: string }>();
@@ -1361,6 +1380,9 @@ export async function recoverPendingFulfillments(
 ): Promise<{ attempted: number; completed: number; retryable: number }> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new RangeError("Fulfillment recovery batch size must be between 1 and 100");
+  }
+  if (!resolvePaymentEnvironmentPolicy(env).fulfillmentEnabled) {
+    throw new Error("Payment fulfillment recovery is disabled for this runtime");
   }
   const rows = await env.DB.prepare(
     `SELECT order_id FROM fulfillment_jobs

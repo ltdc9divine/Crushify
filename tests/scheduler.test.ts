@@ -39,6 +39,7 @@ describe("Vercel scheduled publication lifecycle", () => {
   it("fails closed when the Cron secret or required providers are missing", async () => {
     const { client, database } = await createDatabase();
     const secret = "local-synthetic-cron-secret-with-sufficient-length";
+    const stagingSecret = "c".repeat(64);
     let connections = 0;
     const dependencies = {
       async connectDatabase() {
@@ -77,6 +78,14 @@ describe("Vercel scheduled publication lifecycle", () => {
         CRON_SECRET: "too-short",
       }, dependencies);
       assert.equal((await shortSecret(request("Bearer too-short"))).status, 401);
+      assert.equal(connections, 0);
+
+      const stagingSecretOnly = createVercelApiHandler({
+        ...baseEnvironment,
+        CRON_SECRET: undefined,
+        STAGING_LIFECYCLE_SECRET: stagingSecret,
+      }, dependencies);
+      assert.equal((await stagingSecretOnly(request(`Bearer ${stagingSecret}`))).status, 401);
       assert.equal(connections, 0);
 
       const missingDatabase = createVercelApiHandler({
@@ -150,6 +159,12 @@ describe("Vercel scheduled publication lifecycle", () => {
       const second = await runScheduledPublicationLifecycle(env, { now: runNow, limit: 10 });
       assert.deepEqual(second, { acquired: true, expired: 0, erased: 0, retryable: 0 });
 
+      const competingLeases = await Promise.all([
+        acquireScheduledTaskLease(env, new Date(now.getTime() + 20 * 60 * 1000), "parallel-one"),
+        acquireScheduledTaskLease(env, new Date(now.getTime() + 20 * 60 * 1000), "parallel-two"),
+      ]);
+      assert.equal(competingLeases.filter(Boolean).length, 1);
+
       const runs = await database.prepare(
         "SELECT status, result_json FROM scheduled_task_runs ORDER BY started_at, id",
       ).all<{ status: string; result_json: string }>();
@@ -161,10 +176,12 @@ describe("Vercel scheduled publication lifecycle", () => {
     }
   });
 
-  it("protects the staging lifecycle route with CRON_SECRET and rejects non-staging deployments", async () => {
+  it("requires durable Preview storage before running the manual lifecycle route", async () => {
     const { client, database } = await createDatabase();
-    const secret = "local-test-cron-secret-32-characters";
+    const secret = "a".repeat(64);
+    const cronSecret = "b".repeat(64);
     let connections = 0;
+    let storageCreations = 0;
     const environment = {
       DATABASE_PROVIDER: "turso",
       TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
@@ -174,41 +191,106 @@ describe("Vercel scheduled publication lifecycle", () => {
       VERCEL_ENV: "preview",
       APP_ORIGIN: "https://crushify-staging.vercel.app",
       VERCEL_URL: "crushify-staging.vercel.app",
-      CRON_SECRET: secret,
+      CRON_SECRET: cronSecret,
+      STAGING_LIFECYCLE_SECRET: secret,
     };
-    const handler = createVercelApiHandler(environment, {
+    const dependencies = {
       async connectDatabase() {
         connections++;
         return { database, close: () => undefined };
       },
-      createMockStorage: () => new MemoryStorageAdapter(),
+      createMockStorage() {
+        storageCreations++;
+        return new MemoryStorageAdapter();
+      },
+    };
+    const handler = createVercelApiHandler(environment, dependencies);
+    const createScopedHandler = (overrides: Partial<typeof environment>) =>
+      createVercelApiHandler({ ...environment, ...overrides }, dependencies);
+    const url = "https://crushify-staging.vercel.app/api/ops/staging/publication-lifecycle";
+    const authorizedRequest = (
+      requestUrl = url,
+      body?: string,
+      authorization = `Bearer ${secret}`,
+      method = "POST",
+    ) => new Request(requestUrl, {
+      method,
+      headers: { Authorization: authorization },
+      ...(body === undefined ? {} : { body }),
     });
     try {
       const unauthorized = await handler(
-        new Request("https://crushify-staging.vercel.app/api/cron/publication-lifecycle"),
+        new Request(url, { method: "POST" }),
       );
       assert.equal(unauthorized.status, 401);
       assert.equal(connections, 0);
+      assert.equal(storageCreations, 0);
 
-      const invalid = await handler(new Request(
-        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
-        { headers: { Authorization: "Bearer invalid-local-test-value" } },
-      ));
-      assert.equal(invalid.status, 401);
+      const failures = [
+        await createScopedHandler({ STAGING_LIFECYCLE_SECRET: undefined })(
+          authorizedRequest(url, undefined, `Bearer ${cronSecret}`),
+        ),
+        await createScopedHandler({ STAGING_LIFECYCLE_SECRET: undefined })(
+          authorizedRequest(url),
+        ),
+        await handler(authorizedRequest(url, undefined, `Bearer ${"c".repeat(64)}`)),
+        await createScopedHandler({ STAGING_LIFECYCLE_SECRET: "" })(authorizedRequest()),
+        await createScopedHandler({ STAGING_LIFECYCLE_SECRET: "short" })(
+          authorizedRequest(url, undefined, "Bearer short"),
+        ),
+        await createScopedHandler({ STAGING_LIFECYCLE_SECRET: `${secret.slice(0, 63)}!` })(
+          authorizedRequest(url, undefined, `Bearer ${secret.slice(0, 63)}!`),
+        ),
+      ];
+      const failureBodies = await Promise.all(failures.map(async (response) => {
+        assert.equal(response.status, 401);
+        const body = await response.json() as { error: { code: string; message: string } };
+        return { code: body.error.code, message: body.error.message };
+      }));
+      assert.ok(failureBodies.every((body) => body.code === "UNAUTHENTICATED"));
+      assert.ok(failureBodies.every((body) => body.message === failureBodies[0]?.message));
       assert.equal(connections, 0);
+      assert.equal(storageCreations, 0);
 
-      const authorized = await handler(new Request(
-        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
-        { headers: { Authorization: `Bearer ${secret}` } },
+      const bodyCannotAuthorize = await handler(new Request(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authorization: `Bearer ${secret}` }),
+      }));
+      const queryCannotAuthorize = await handler(new Request(
+        `${url}?authorization=${encodeURIComponent(`Bearer ${secret}`)}`,
+        { method: "POST" },
       ));
-      assert.equal(authorized.status, 200);
-      assert.deepEqual(await authorized.json(), {
-        acquired: true,
-        expired: 0,
-        erased: 0,
-        retryable: 0,
-      });
-      assert.equal(connections, 1);
+      assert.equal(bodyCannotAuthorize.status, 401);
+      assert.equal(queryCannotAuthorize.status, 401);
+
+      for (const method of ["GET", "PUT"]) {
+        assert.equal((await handler(authorizedRequest(url, undefined, `Bearer ${secret}`, method))).status, 405);
+      }
+
+      const withBody = await handler(authorizedRequest(url, '{"limit":1000,"environment":"production"}'));
+      assert.equal(withBody.status, 400);
+      const withQuery = await handler(authorizedRequest(`${url}?limit=1000&environment=production`));
+      assert.equal(withQuery.status, 400);
+      assert.equal(connections, 0);
+      assert.equal(storageCreations, 0);
+
+      const authorized = await handler(authorizedRequest());
+      assert.equal(authorized.status, 503);
+      assert.equal(
+        (await authorized.json() as { error: { code: string } }).error.code,
+        "STORAGE_UNAVAILABLE",
+      );
+      assert.equal(connections, 0);
+      assert.equal(storageCreations, 0);
+
+      const sharedCronPath = await handler(new Request(
+        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
+        { headers: { Authorization: `Bearer ${cronSecret}` } },
+      ));
+      assert.equal(sharedCronPath.status, 404);
+      assert.equal(connections, 0);
+      assert.equal(storageCreations, 0);
 
       const previewWithProductionCredentials = createVercelApiHandler({
         ...environment,
@@ -224,47 +306,36 @@ describe("Vercel scheduled publication lifecycle", () => {
         },
       });
       const rejectedProductionCredentials = await previewWithProductionCredentials(new Request(
-        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
-        { headers: { Authorization: "Bearer " + secret } },
+        url,
+        { method: "POST", headers: { Authorization: `Bearer ${secret}` } },
       ));
       assert.equal(rejectedProductionCredentials.status, 500);
       assert.equal(
         (await rejectedProductionCredentials.json() as { error: { code: string } }).error.code,
         "RUNTIME_CONFIGURATION_ERROR",
       );
-      assert.equal(connections, 1);
+      assert.equal(connections, 0);
+      assert.equal(storageCreations, 0);
 
-      const wrongEnvironment = createVercelApiHandler({
-        ...environment,
-        ENVIRONMENT: "production",
-      }, {
-        async connectDatabase() {
-          connections++;
-          return { database, close: () => undefined };
-        },
-      });
-      const hidden = await wrongEnvironment(new Request(
-        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
-        { headers: { Authorization: `Bearer ${secret}` } },
-      ));
-      assert.equal(hidden.status, 404);
-      assert.equal(connections, 1);
-
-      const stagingInProduction = createVercelApiHandler({
-        ...environment,
-        VERCEL_ENV: "production",
-      }, {
-        async connectDatabase() {
-          connections++;
-          return { database, close: () => undefined };
-        },
-      });
-      const productionHidden = await stagingInProduction(new Request(
-        "https://crushify-staging.vercel.app/api/cron/publication-lifecycle",
-        { headers: { Authorization: "Bearer local-test-cron-secret-32-characters" } },
-      ));
-      assert.equal(productionHidden.status, 404);
-      assert.equal(connections, 1);
+      for (const otherScope of [
+        { ENVIRONMENT: "production", VERCEL_ENV: "production" },
+        { ENVIRONMENT: "local", VERCEL_ENV: "development" },
+        { ENVIRONMENT: "staging", VERCEL_ENV: "unknown" },
+      ]) {
+        const rejectedScope = createVercelApiHandler({
+          ...environment,
+          ...otherScope,
+        }, {
+          async connectDatabase() {
+            connections++;
+            return { database, close: () => undefined };
+          },
+        });
+        const hidden = await rejectedScope(authorizedRequest());
+        assert.equal(hidden.status, 404);
+        assert.equal(connections, 0);
+        assert.equal(storageCreations, 0);
+      }
     } finally {
       client.close();
     }

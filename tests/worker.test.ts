@@ -19,6 +19,8 @@ describe("legacy Worker storage isolation", () => {
       CLOUDINARY_STAGING_API_KEY: "synthetic-production-key",
       CLOUDINARY_STAGING_API_SECRET: "synthetic-production-secret",
       CLOUDINARY_PRODUCTION_CLOUD_NAME: "synthetic-production-cloud",
+      CRON_SECRET: "synthetic-operator-secret-with-32-characters",
+      STAGING_LIFECYCLE_SECRET: "c".repeat(64),
     };
     assert.throws(
       () => createStorageFromEnvironment(unsafeStaging),
@@ -27,7 +29,10 @@ describe("legacy Worker storage isolation", () => {
 
     let databaseAccessed = false;
     const response = await worker.fetch(
-      new Request("https://worker.example.test/api/v1/nonexistent"),
+      new Request("https://worker.example.test/api/ops/staging/publication-lifecycle", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${unsafeStaging.STAGING_LIFECYCLE_SECRET}` },
+      }),
       {
         ...unsafeStaging,
         DATABASE_PROVIDER: "d1",
@@ -74,6 +79,52 @@ describe("legacy Worker storage isolation", () => {
       assert.equal((await response.json() as { error: { code: string } }).error.code,
         "RUNTIME_CONFIGURATION_ERROR");
     }
+  });
+
+  it("rejects staging Cloudinary variables in Production before Worker storage use", async () => {
+    let databaseAccessed = false;
+    const response = await worker.fetch(
+      new Request("https://worker.example.test/api/v1/nonexistent"),
+      {
+        ENVIRONMENT: "production",
+        DATABASE_PROVIDER: "d1",
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_CLOUD_NAME: "synthetic-production-cloud",
+        CLOUDINARY_API_KEY: "synthetic-production-key",
+        CLOUDINARY_API_SECRET: "synthetic-production-secret",
+        CLOUDINARY_STAGING_CLOUD_NAME: "synthetic-staging-cloud",
+        CLOUDINARY_STAGING_API_KEY: "synthetic-staging-key",
+        CLOUDINARY_STAGING_API_SECRET: "synthetic-staging-secret",
+        DB: {
+          prepare() {
+            databaseAccessed = true;
+            throw new Error("Mixed Worker storage scopes must fail before database access");
+          },
+        } as never,
+        ASSETS: { fetch: async () => new Response(null, { status: 404 }) } as never,
+      } as never,
+    );
+    assert.equal(response.status, 500);
+    assert.equal((await response.json() as { error: { code: string } }).error.code,
+      "RUNTIME_CONFIGURATION_ERROR");
+    assert.equal(databaseAccessed, false);
+  });
+
+  it("keeps Production Worker Cloudinary selection on generic credentials", async () => {
+    const response = await worker.fetch(
+      new Request("https://worker.example.test/api/v1/nonexistent"),
+      {
+        ENVIRONMENT: "production",
+        DATABASE_PROVIDER: "d1",
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_CLOUD_NAME: "synthetic-production-cloud",
+        CLOUDINARY_API_KEY: "synthetic-production-key",
+        CLOUDINARY_API_SECRET: "synthetic-production-secret",
+        DB: {} as never,
+        ASSETS: { fetch: async () => new Response(null, { status: 404 }) } as never,
+      } as never,
+    );
+    assert.equal(response.status, 404);
   });
 
   it("does not allow local-only flags in an explicitly Production Worker", async () => {
@@ -217,17 +268,26 @@ describe("API foundation", () => {
     assert.equal(response.headers.get("referrer-policy"), "no-referrer");
   });
 
-  it("exposes the approved product base price while clearly disabling unpriced hosting", async () => {
+  it("exposes approved catalog prices without enabling Production checkout", async () => {
     const response = await handleApiRequest(
       new Request("https://crushify.test/api/v1/catalog"),
-      noBindings,
+      { ...noBindings, ENVIRONMENT: "production" } as never,
     );
     const body = await response.json() as {
+      checkout_enabled: boolean;
+      pricing_policy: { catalog_enabled: boolean };
       products: Array<{ id: string; base_price_minor: number; currency: string }>;
-      storage_durations: Array<{ id: string; amount_minor: number | null; enabled: boolean }>;
+      storage_durations: Array<{
+        id: string;
+        amount_minor: number | null;
+        hosting_charge_minor: number | null;
+        enabled: boolean;
+      }>;
     };
 
     assert.equal(response.status, 200);
+    assert.equal(body.pricing_policy.catalog_enabled, true);
+    assert.equal(body.checkout_enabled, false);
     assert.deepEqual(body.products.map((product) => product.id).sort(), [
       "distance-means-nothing", "love-letter", "our-memories", "our-universe", "say-yes",
     ]);
@@ -236,13 +296,32 @@ describe("API foundation", () => {
     assert.deepEqual(body.storage_durations.map((plan) => plan.id), [
       "1-month", "3-months", "6-months", "12-months", "lifetime",
     ]);
-    assert.ok(body.storage_durations.every((plan) =>
-      plan.amount_minor === null && plan.enabled === false));
+    assert.deepEqual(body.storage_durations.map((plan) => plan.amount_minor), [
+      59_000, 79_000, 109_000, 169_000, 199_000,
+    ]);
+    assert.ok(body.storage_durations.every((plan) => plan.enabled));
+
+    const renewals = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/storage-plans"),
+      { ...noBindings, ENVIRONMENT: "production" } as never,
+    );
+    const renewalBody = await renewals.json() as {
+      checkout_enabled: boolean;
+      plans: Array<{ id: string; amount_minor: number | null; available: boolean }>;
+    };
+    assert.equal(renewals.status, 200);
+    assert.equal(renewalBody.checkout_enabled, false);
+    assert.deepEqual(renewalBody.plans.map((plan) => plan.amount_minor), [
+      10_000, 30_000, 60_000, 120_000, null,
+    ]);
+    assert.deepEqual(renewalBody.plans.map((plan) => plan.available), [
+      true, true, true, true, false,
+    ]);
   });
 
   it("preserves security headers on dashboard, preview, and error responses", async () => {
     const paths = [
-      ["/api/v1/customers/me", 401],
+      ["/api/v1/customers/me", 503],
       ["/api/v1/previews", 404],
       ["/api/v1/unimplemented", 404],
     ] as const;

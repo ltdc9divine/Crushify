@@ -20,7 +20,11 @@ import type { Database } from "../src/database.ts";
 import type { Storage } from "../src/storage.ts";
 import { MemoryStorageAdapter } from "../src/storage/mock.ts";
 import { recoverPendingFulfillments } from "../src/publications.ts";
-import { createVercelApiHandler, VERCEL_UPLOAD_MAX_BYTES } from "../src/platform/vercel.ts";
+import {
+  createVercelApiHandler,
+  resolveVercelDatabaseConfiguration,
+  VERCEL_UPLOAD_MAX_BYTES,
+} from "../src/platform/vercel.ts";
 import nodeHandler, { readVercelRequestBody } from "../api/[...path].ts";
 import { runDatabaseContract } from "./database-contract.mjs";
 import { runPaymentContract } from "./payment-contract.mjs";
@@ -44,6 +48,113 @@ function requestWithOrigin(path: string, origin: string, init: RequestInit = {})
   headers.set("Origin", origin);
   return new Request(`https://crushify.test/api/v1${path}`, { ...init, headers });
 }
+
+describe("Vercel database environment selection", () => {
+  const previewEnvironment = {
+    DATABASE_PROVIDER: "turso",
+    TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+    TURSO_STAGING_AUTH_TOKEN: "synthetic-staging-token",
+    STORAGE_PROVIDER: "mock",
+    ENVIRONMENT: "staging",
+    VERCEL_ENV: "preview",
+    VERCEL_URL: "preview-crushify.test",
+  };
+
+  it("selects only the dedicated staging Turso credentials for Preview", () => {
+    assert.deepEqual(resolveVercelDatabaseConfiguration(previewEnvironment), {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: previewEnvironment.TURSO_STAGING_DATABASE_URL,
+      TURSO_AUTH_TOKEN: previewEnvironment.TURSO_STAGING_AUTH_TOKEN,
+    });
+  });
+
+  it("fails closed for missing, conflicting, malformed, or Production Preview credentials", () => {
+    for (const override of [
+      { TURSO_STAGING_DATABASE_URL: undefined },
+      { TURSO_STAGING_AUTH_TOKEN: undefined },
+      {
+        TURSO_STAGING_DATABASE_URL: undefined,
+        TURSO_STAGING_AUTH_TOKEN: undefined,
+        TURSO_DATABASE_URL: "libsql://crushify-production.turso.io",
+        TURSO_AUTH_TOKEN: "synthetic-production-token",
+      },
+      {
+        TURSO_DATABASE_URL: "libsql://crushify-production.turso.io",
+        TURSO_AUTH_TOKEN: "synthetic-production-token",
+      },
+      { TURSO_STAGING_DATABASE_URL: "not-a-turso-url" },
+      { ENVIRONMENT: "production" },
+      { DATABASE_PROVIDER: "d1" },
+    ]) {
+      assert.equal(
+        resolveVercelDatabaseConfiguration({ ...previewEnvironment, ...override }),
+        null,
+      );
+    }
+  });
+
+  it("selects only generic Production credentials in Production and rejects staging identities", () => {
+    const production = {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-production-test-org.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-production-token",
+      STORAGE_PROVIDER: "mock",
+      ENVIRONMENT: "production",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    };
+    assert.deepEqual(resolveVercelDatabaseConfiguration(production), {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: production.TURSO_DATABASE_URL,
+      TURSO_AUTH_TOKEN: production.TURSO_AUTH_TOKEN,
+    });
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...production,
+      TURSO_DATABASE_URL: undefined,
+    }), null);
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...production,
+      TURSO_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+    }), null);
+  });
+
+  it("keeps local Vercel development on an explicit file database", () => {
+    const local = {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "file:.local/test.db",
+      STORAGE_PROVIDER: "mock",
+      ENVIRONMENT: "local",
+      VERCEL_ENV: "development",
+    };
+    assert.deepEqual(resolveVercelDatabaseConfiguration(local), {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: local.TURSO_DATABASE_URL,
+      TURSO_AUTH_TOKEN: undefined,
+    });
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...local,
+      TURSO_DATABASE_URL: undefined,
+    }), null);
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...local,
+      TURSO_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-staging-token",
+    }), null);
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...local,
+      TURSO_DATABASE_URL: "file://remote-host/.local/test.db",
+    }), null);
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...local,
+      TURSO_DATABASE_URL: "file:.local/test.db?mode=ro",
+    }), null);
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...local,
+      VERCEL_ENV: "unknown",
+    }), null);
+  });
+});
 
 describe("Vercel API runtime adapter", () => {
   it("enables mock settlement only for explicit local SQLite and mock storage", async () => {
@@ -130,7 +241,7 @@ describe("Vercel API runtime adapter", () => {
     const previewResponse = await preview(webhook());
     assert.equal(previewResponse.status, 503);
     assert.equal((await previewResponse.json() as { error: { code: string } }).error.code,
-      "PAYMENTS_DISABLED");
+      "MOCK_SETTLEMENT_UNAVAILABLE");
 
     const production = createVercelApiHandler({
       ...local,
@@ -382,15 +493,18 @@ describe("Vercel API runtime adapter", () => {
     assert.equal(absentRoute.status, 404);
   });
 
-  it("allows mock storage on Preview and never configures outbound mail there", async () => {
+  it("fails Preview media operations closed without initializing ephemeral storage", async () => {
     let mockStorageCreated = false;
     let cloudinaryStorageCreated = false;
+    let databaseOperations = 0;
     const database: Database = {
       prepare() {
-        throw new Error("Unknown API route must not use the database");
+        databaseOperations++;
+        throw new Error("Preview media operations must not access the database");
       },
       async batch() {
-        throw new Error("Unknown API route must not use the database");
+        databaseOperations++;
+        throw new Error("Preview media operations must not access the database");
       },
     };
     const handler = createVercelApiHandler({
@@ -421,7 +535,31 @@ describe("Vercel API runtime adapter", () => {
       new Request("https://preview.crushify.test/api/v1/nonexistent"),
     );
     assert.equal(response.status, 404);
-    assert.equal(mockStorageCreated, true);
+
+    const upload = await handler(new Request(
+      "https://preview.crushify.test/api/v1/assets/upload-url",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          design_id: "00000000-0000-4000-8000-000000000001",
+          media_type: "image/png",
+          size: 3,
+        }),
+      },
+    ));
+    assert.equal(upload.status, 503);
+    assert.equal(
+      (await upload.json() as { error: { code: string } }).error.code,
+      "STORAGE_UNAVAILABLE",
+    );
+
+    const publicAsset = await handler(new Request(
+      "https://preview.crushify.test/api/v1/publications/g12345678901234567890/assets/00000000-0000-4000-8000-000000000001",
+    ));
+    assert.equal(publicAsset.status, 404);
+    assert.equal(databaseOperations, 0);
+    assert.equal(mockStorageCreated, false);
     assert.equal(cloudinaryStorageCreated, false);
   });
 
