@@ -155,9 +155,26 @@ describe("Vercel scheduled publication lifecycle", () => {
 
       const runNow = new Date(now.getTime() + 10 * 60 * 1000);
       const first = await runScheduledPublicationLifecycle(env, { now: runNow, limit: 10 });
-      assert.deepEqual(first, { acquired: true, expired: 0, erased: 0, retryable: 0 });
+      assert.deepEqual(first, {
+        acquired: true,
+        failed: false,
+        expired: 0,
+        erased: 0,
+        retryable: 0,
+        operations: {
+          fulfillmentRecovery: { status: "skipped", reason: "runtime_policy" },
+          publicationLifecycle: {
+            status: "completed",
+            result: { expired: 0, erased: 0, retryable: 0 },
+          },
+          uploadCleanup: {
+            status: "completed",
+            result: { processed: 0, cleaned: 0, preserved: 0, retryable: 0, manualReview: 0 },
+          },
+        },
+      });
       const second = await runScheduledPublicationLifecycle(env, { now: runNow, limit: 10 });
-      assert.deepEqual(second, { acquired: true, expired: 0, erased: 0, retryable: 0 });
+      assert.deepEqual(second, first);
 
       const competingLeases = await Promise.all([
         acquireScheduledTaskLease(env, new Date(now.getTime() + 20 * 60 * 1000), "parallel-one"),

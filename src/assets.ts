@@ -7,6 +7,7 @@ import { assetReferences, type TemplateData } from "./template-registry.ts";
 
 const UPLOAD_LEASE_MS = 15 * 60 * 1000;
 const UPLOAD_CLEANUP_DELAY_MS = 60 * 60 * 1000;
+const UPLOAD_ORPHAN_RECHECK_MS = 60 * 60 * 1000;
 const UPLOAD_CLEANUP_MAX_FAILURES = 8;
 
 interface ImageInfo {
@@ -738,7 +739,7 @@ export async function reconcileUploadAttemptCleanup(
          WHERE id = ? AND status = 'CLEANUP_PENDING' AND cleanup_lease_token = ?`,
       ).bind(
         verifiedAt,
-        new Date(Date.parse(verifiedAt) + 7 * 24 * 60 * 60_000).toISOString(),
+        new Date(Date.parse(verifiedAt) + UPLOAD_ORPHAN_RECHECK_MS).toISOString(),
         verifiedAt, attempt.id, cleanupToken,
       ).run();
       if (verified.meta.changes !== 1) {

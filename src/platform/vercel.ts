@@ -517,7 +517,7 @@ export function createVercelApiHandler(
           DATA_RETENTION_DAYS: environment.DATA_RETENTION_DAYS,
         }, { limit: 10 });
         return Response.json(result, {
-          status: result.acquired ? 200 : 202,
+          status: result.acquired ? (result.failed ? 503 : 200) : 202,
           headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
         });
       } catch (error) {
@@ -575,7 +575,7 @@ export function createVercelApiHandler(
           DATA_RETENTION_DAYS: environment.DATA_RETENTION_DAYS,
         });
         return Response.json(result, {
-          status: result.acquired ? 200 : 202,
+          status: result.acquired ? (result.failed ? 503 : 200) : 202,
           headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
         });
       } catch (error) {

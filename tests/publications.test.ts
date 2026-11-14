@@ -616,6 +616,31 @@ async function insertUploadAttemptFixture(
   return { id, leaseToken, objectKey: String(row.object_key) };
 }
 
+async function insertDueCleanupAttempt(client: Client, assetId: string) {
+  const asset = await client.execute(
+    "SELECT customer_id FROM assets WHERE id = ?",
+    [assetId],
+  );
+  const customerId = String(asset.rows[0]?.customer_id ?? "");
+  if (!customerId) assert.fail("Expected cleanup asset fixture");
+  const now = new Date();
+  const timestamp = now.toISOString();
+  await client.execute({
+    sql: `INSERT INTO asset_upload_sessions (
+            id, asset_id, customer_id, token_hash, expires_at, used_at, created_at, status
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETE')`,
+    args: [
+      randomUUID(), assetId, customerId, createHash("sha256").update(randomUUID()).digest("hex"),
+      timestamp, timestamp, timestamp,
+    ],
+  });
+  return insertUploadAttemptFixture(client, assetId, {
+    status: "CLEANUP_PENDING",
+    leaseExpiresAt: new Date(now.getTime() - 60_000).toISOString(),
+    nextCleanupAt: new Date(now.getTime() - 60_000).toISOString(),
+  });
+}
+
 function deletionContext(
   adapter: Database,
   storage: Storage,
@@ -779,6 +804,14 @@ describe("publication expiration lifecycle", () => {
         retentionUntil,
         withAsset: true,
       });
+      const fulfillmentDesign = await createDraftFixture(client);
+      const fulfillmentOrder = await createOrderSnapshot(client, fulfillmentDesign, { paid: true });
+      await client.execute(
+        "UPDATE fulfillment_jobs SET next_attempt_at = ? WHERE order_id = ?",
+        [now.toISOString(), fulfillmentOrder.orderId],
+      );
+      const cleanupDesign = await createDraftFixture(client, true);
+      const cleanupAttempt = await insertDueCleanupAttempt(client, cleanupDesign.assetId);
       if (!("sourceKey" in retrying) || !("derivativeKey" in retrying)) {
         assert.fail("Expected cleanup asset fixture");
       }
@@ -795,19 +828,58 @@ describe("publication expiration lifecycle", () => {
       ));
       assert.equal(invalid.status, 401);
       assert.equal(connections, 0);
+      assert.equal((await client.execute(
+        "SELECT status FROM fulfillment_jobs WHERE order_id = ?",
+        [fulfillmentOrder.orderId],
+      )).rows[0]?.status, "PENDING", "unauthenticated Cron requests cannot claim fulfillment");
 
       const firstResponse = await handler(new Request(
         "https://crushify.test/api/cron/publication-lifecycle",
         { headers: { Authorization: `Bearer ${secret}` } },
       ));
       assert.equal(firstResponse.status, 200);
-      assert.deepEqual(await firstResponse.json(), {
-        acquired: true,
-        expired: 1,
-        erased: 0,
-        retryable: 1,
-      });
+      const firstResult = await firstResponse.json() as {
+        acquired: boolean;
+        failed: boolean;
+        expired: number;
+        erased: number;
+        retryable: number;
+        operations: {
+          fulfillmentRecovery: { status: string; result?: { attempted: number; completed: number } };
+          publicationLifecycle: { status: string };
+          uploadCleanup: { status: string; result?: { preserved: number } };
+        };
+      };
+      assert.equal(firstResult.acquired, true);
+      assert.equal(firstResult.failed, false);
+      assert.deepEqual(
+        { expired: firstResult.expired, erased: firstResult.erased, retryable: firstResult.retryable },
+        { expired: 1, erased: 0, retryable: 1 },
+      );
+      assert.equal(firstResult.operations.fulfillmentRecovery.status, "completed");
+      assert.deepEqual(
+        {
+          attempted: firstResult.operations.fulfillmentRecovery.result?.attempted,
+          completed: firstResult.operations.fulfillmentRecovery.result?.completed,
+        },
+        { attempted: 1, completed: 1 },
+      );
+      assert.equal(firstResult.operations.publicationLifecycle.status, "completed");
+      assert.equal(firstResult.operations.uploadCleanup.status, "completed");
+      assert.equal(firstResult.operations.uploadCleanup.result?.preserved, 1);
       assert.equal(connections, 1);
+      assert.equal((await client.execute(
+        "SELECT status FROM fulfillment_jobs WHERE order_id = ?",
+        [fulfillmentOrder.orderId],
+      )).rows[0]?.status, "COMPLETED");
+      assert.equal((await client.execute(
+        "SELECT status FROM orders WHERE id = ?",
+        [fulfillmentOrder.orderId],
+      )).rows[0]?.status, "FULFILLED");
+      assert.equal((await client.execute(
+        "SELECT status FROM asset_upload_attempts WHERE id = ?",
+        [cleanupAttempt.id],
+      )).rows[0]?.status, "ATTACHED");
       const firstStates = await client.execute({
         sql: `SELECT id, status FROM publications WHERE id IN (?, ?, ?)`,
         args: [expiring.publicationId, active.publicationId, retrying.publicationId],
@@ -831,11 +903,19 @@ describe("publication expiration lifecycle", () => {
         { headers: { Authorization: `Bearer ${secret}` } },
       ));
       assert.equal(sourceRetry.status, 200);
-      assert.deepEqual(await sourceRetry.json(), {
-        acquired: true,
-        expired: 0,
-        erased: 0,
-        retryable: 1,
+      const sourceRetryResult = await sourceRetry.json() as typeof firstResult;
+      assert.equal(sourceRetryResult.acquired, true);
+      assert.equal(sourceRetryResult.failed, false);
+      assert.deepEqual(
+        {
+          expired: sourceRetryResult.expired,
+          erased: sourceRetryResult.erased,
+          retryable: sourceRetryResult.retryable,
+        },
+        { expired: 0, erased: 0, retryable: 1 },
+      );
+      assert.deepEqual(sourceRetryResult.operations.fulfillmentRecovery.result, {
+        attempted: 0, completed: 0, retryable: 0, manualReview: 0,
       });
 
       const completed = await handler(new Request(
@@ -843,12 +923,17 @@ describe("publication expiration lifecycle", () => {
         { headers: { Authorization: `Bearer ${secret}` } },
       ));
       assert.equal(completed.status, 200);
-      assert.deepEqual(await completed.json(), {
-        acquired: true,
-        expired: 0,
-        erased: 1,
-        retryable: 0,
-      });
+      const completedResult = await completed.json() as typeof firstResult;
+      assert.equal(completedResult.acquired, true);
+      assert.equal(completedResult.failed, false);
+      assert.deepEqual(
+        {
+          expired: completedResult.expired,
+          erased: completedResult.erased,
+          retryable: completedResult.retryable,
+        },
+        { expired: 0, erased: 1, retryable: 0 },
+      );
       const erasedAsset = await client.execute({
         sql: "SELECT status FROM assets WHERE design_id = ?",
         args: [retrying.designId],
@@ -859,12 +944,189 @@ describe("publication expiration lifecycle", () => {
         { headers: { Authorization: `Bearer ${secret}` } },
       ));
       assert.equal(repeated.status, 200);
-      assert.deepEqual(await repeated.json(), {
-        acquired: true,
-        expired: 0,
-        erased: 0,
-        retryable: 0,
+      const repeatedResult = await repeated.json() as typeof firstResult;
+      assert.equal(repeatedResult.acquired, true);
+      assert.equal(repeatedResult.failed, false);
+      assert.deepEqual(
+        {
+          expired: repeatedResult.expired,
+          erased: repeatedResult.erased,
+          retryable: repeatedResult.retryable,
+        },
+        { expired: 0, erased: 0, retryable: 0 },
+      );
+      assert.deepEqual(repeatedResult.operations.fulfillmentRecovery.result, {
+        attempted: 0, completed: 0, retryable: 0, manualReview: 0,
       });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("continues publication and upload cleanup when Cron fulfillment recovery fails", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createStorage({ derivative: 0, source: 0 });
+    const secret = "local-synthetic-cron-secret-with-sufficient-length";
+    const handler = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-production-test-org.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-token",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_CLOUD_NAME: "crushify-production-test",
+      CLOUDINARY_API_KEY: "synthetic-api-key",
+      CLOUDINARY_API_SECRET: "synthetic-api-secret",
+      ENVIRONMENT: "production",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+      CRON_SECRET: secret,
+      DATA_RETENTION_DAYS: "30",
+    }, {
+      async connectDatabase() {
+        return { database: adapter, close: () => undefined };
+      },
+      createCloudinaryStorage: () => storage,
+    });
+
+    try {
+      await applyMigrations(client, await loadMigrations());
+      const now = new Date();
+      const expired = await createFixture(client, {
+        expiresAt: new Date(now.getTime() - 60_000).toISOString(),
+      });
+      const paidDraft = await createDraftFixture(client);
+      const paidOrder = await createOrderSnapshot(client, paidDraft, { paid: true });
+      await client.execute(
+        "UPDATE fulfillment_jobs SET next_attempt_at = ? WHERE order_id = ?",
+        [now.toISOString(), paidOrder.orderId],
+      );
+      const cleanupDraft = await createDraftFixture(client, true);
+      const cleanupAttempt = await insertDueCleanupAttempt(client, cleanupDraft.assetId);
+      await client.execute(`CREATE TRIGGER reject_fulfillment_claim
+        BEFORE UPDATE OF status ON fulfillment_jobs
+        WHEN NEW.status = 'PROCESSING'
+        BEGIN SELECT RAISE(ABORT, 'injected recovery claim failure'); END`);
+
+      const failedRun = await handler(new Request(
+        "https://crushify.test/api/cron/publication-lifecycle",
+        { headers: { Authorization: `Bearer ${secret}` } },
+      ));
+      assert.equal(failedRun.status, 503);
+      const failureResult = await failedRun.json() as {
+        failed: boolean;
+        operations: {
+          fulfillmentRecovery: { status: string; error_code?: string };
+          publicationLifecycle: { status: string; result?: { expired: number } };
+          uploadCleanup: { status: string; result?: { preserved: number } };
+        };
+      };
+      assert.equal(failureResult.failed, true);
+      assert.deepEqual(failureResult.operations.fulfillmentRecovery, {
+        status: "failed",
+        error_code: "DATABASE_ERROR",
+      });
+      assert.equal(failureResult.operations.publicationLifecycle.status, "completed");
+      assert.equal(failureResult.operations.publicationLifecycle.result?.expired, 1);
+      assert.equal(failureResult.operations.uploadCleanup.status, "completed");
+      assert.equal(failureResult.operations.uploadCleanup.result?.preserved, 1);
+      assert.equal((await client.execute(
+        "SELECT status FROM publications WHERE id = ?",
+        [expired.publicationId],
+      )).rows[0]?.status, "EXPIRED");
+      assert.equal((await client.execute(
+        "SELECT status FROM fulfillment_jobs WHERE order_id = ?",
+        [paidOrder.orderId],
+      )).rows[0]?.status, "PENDING");
+      assert.equal((await client.execute(
+        "SELECT status FROM asset_upload_attempts WHERE id = ?",
+        [cleanupAttempt.id],
+      )).rows[0]?.status, "ATTACHED");
+
+      await client.execute("DROP TRIGGER reject_fulfillment_claim");
+      const retry = await handler(new Request(
+        "https://crushify.test/api/cron/publication-lifecycle",
+        { headers: { Authorization: `Bearer ${secret}` } },
+      ));
+      assert.equal(retry.status, 200);
+      assert.equal((await client.execute(
+        "SELECT status FROM fulfillment_jobs WHERE order_id = ?",
+        [paidOrder.orderId],
+      )).rows[0]?.status, "COMPLETED");
+      assert.equal((await client.execute(
+        "SELECT status FROM orders WHERE id = ?",
+        [paidOrder.orderId],
+      )).rows[0]?.status, "FULFILLED");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("bounds scheduled fulfillment batches and preserves idempotent retry behavior", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createStorage({ derivative: 0, source: 0 });
+    try {
+      await applyMigrations(client, await loadMigrations());
+      const firstDesign = await createDraftFixture(client);
+      const secondDesign = await createDraftFixture(client);
+      const firstOrder = await createOrderSnapshot(client, firstDesign, { paid: true });
+      const secondOrder = await createOrderSnapshot(client, secondDesign, { paid: true });
+      const env = {
+        DB: adapter,
+        STORAGE: storage,
+        ENVIRONMENT: "production",
+      } as Parameters<typeof runScheduledPublicationLifecycle>[0];
+
+      await assert.rejects(
+        runScheduledPublicationLifecycle(env, { now: NOW, limit: 101 }),
+        /batch size must be between 1 and 100/,
+      );
+      const firstRun = await runScheduledPublicationLifecycle(env, { now: NOW, limit: 1 });
+      assert.equal(firstRun.failed, false);
+      assert.deepEqual(firstRun.operations?.fulfillmentRecovery, {
+        status: "completed",
+        result: { attempted: 1, completed: 1, retryable: 0, manualReview: 0 },
+      });
+      const afterFirst = await client.execute(
+        "SELECT status, COUNT(*) AS count FROM fulfillment_jobs GROUP BY status",
+      );
+      assert.equal(afterFirst.rows.reduce((sum, row) => sum + Number(row.count), 0), 2);
+      assert.deepEqual(
+        afterFirst.rows.map((row) => [row.status, Number(row.count)]).sort(),
+        [["COMPLETED", 1], ["PENDING", 1]],
+      );
+
+      const secondRun = await runScheduledPublicationLifecycle(env, {
+        now: new Date(NOW.getTime() + 1),
+        limit: 1,
+      });
+      assert.equal(secondRun.failed, false);
+      assert.deepEqual(secondRun.operations?.fulfillmentRecovery, {
+        status: "completed",
+        result: { attempted: 1, completed: 1, retryable: 0, manualReview: 0 },
+      });
+      const repeated = await runScheduledPublicationLifecycle(env, {
+        now: new Date(NOW.getTime() + 2),
+        limit: 1,
+      });
+      assert.deepEqual(repeated.operations?.fulfillmentRecovery, {
+        status: "completed",
+        result: { attempted: 0, completed: 0, retryable: 0, manualReview: 0 },
+      });
+      for (const order of [firstOrder, secondOrder]) {
+        assert.equal((await client.execute(
+          "SELECT status FROM fulfillment_jobs WHERE order_id = ?",
+          [order.orderId],
+        )).rows[0]?.status, "COMPLETED");
+        assert.equal((await client.execute(
+          "SELECT COUNT(*) AS count FROM storage_entitlements WHERE order_id = ?",
+          [order.orderId],
+        )).rows[0]?.count, 1);
+        assert.equal((await client.execute(
+          "SELECT COUNT(*) AS count FROM publications WHERE order_id = ?",
+          [order.orderId],
+        )).rows[0]?.count, 1);
+      }
     } finally {
       client.close();
     }
@@ -961,23 +1223,33 @@ describe("publication expiration lifecycle", () => {
         ENVIRONMENT: "staging",
         DATA_RETENTION_DAYS: "30",
       } as Parameters<typeof runScheduledPublicationLifecycle>[0];
-      await assert.rejects(
-        runScheduledPublicationLifecycle(lifecycleEnv, { limit: 10 }),
-        /injected lifecycle failure/,
-      );
+      const failedMaintenance = await runScheduledPublicationLifecycle(lifecycleEnv, { limit: 10 });
+      assert.equal(failedMaintenance.failed, true);
+      assert.equal(failedMaintenance.operations?.publicationLifecycle.status, "failed");
+      assert.equal(failedMaintenance.operations?.uploadCleanup.status, "completed");
+      assert.deepEqual(failedMaintenance.operations?.fulfillmentRecovery, {
+        status: "skipped",
+        reason: "runtime_policy",
+      });
       await client.execute("DROP TRIGGER reject_lifecycle_expiry");
 
       const summary = await runScheduledPublicationLifecycle(lifecycleEnv, { limit: 10 });
-      assert.deepEqual(summary, { acquired: true, expired: 1, erased: 0, retryable: 0 });
-      assert.deepEqual(Object.keys(summary).sort(), ["acquired", "erased", "expired", "retryable"]);
+      assert.equal(summary.acquired, true);
+      assert.equal(summary.failed, false);
+      assert.deepEqual(
+        { expired: summary.expired, erased: summary.erased, retryable: summary.retryable },
+        { expired: 1, erased: 0, retryable: 0 },
+      );
+      assert.equal(summary.operations?.publicationLifecycle.status, "completed");
+      assert.equal(summary.operations?.uploadCleanup.status, "completed");
 
       const repeated = await runScheduledPublicationLifecycle(lifecycleEnv, { limit: 10 });
-      assert.deepEqual(repeated, {
-        acquired: true,
-        expired: 0,
-        erased: 0,
-        retryable: 0,
-      });
+      assert.equal(repeated.acquired, true);
+      assert.equal(repeated.failed, false);
+      assert.deepEqual(
+        { expired: repeated.expired, erased: repeated.erased, retryable: repeated.retryable },
+        { expired: 0, erased: 0, retryable: 0 },
+      );
       assert.equal(connections, 0);
       assert.equal(storageCreations, 0);
 
@@ -1470,46 +1742,185 @@ describe("publication expiration lifecycle", () => {
     const storage = createRaceStorage({ sourceDeleteFailures: 1 });
     try {
       await client.execute("PRAGMA foreign_keys = ON");
-      await applyMigrations(client, await loadMigrations());
-      const fixture = await createDraftFixture(client, true);
-      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      const migrations = await loadMigrations();
+      assert.deepEqual(
+        await applyMigrations(client, migrations.filter((migration) => migration.version <= 10)),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      );
+      const customerId = randomUUID();
+      const designId = randomUUID();
+      const firstAssetId = randomUUID();
+      const retainedAssetId = randomUUID();
+      const firstKey = `private/${firstAssetId}.png`;
+      const retainedKey = `private/${retainedAssetId}.png`;
+      const now = new Date().toISOString();
+      const historicalData = JSON.stringify({
+        photos: [{ asset_id: firstAssetId }, { asset_id: retainedAssetId }],
+      });
       await client.batch([
         {
-          sql: `INSERT INTO design_asset_refs (
-                  design_id, asset_id, customer_id, revision, created_at
-                ) VALUES (?, ?, ?, 1, ?)`,
-          args: [fixture.designId, fixture.assetId, fixture.customerId, NOW.toISOString()],
+          sql: `INSERT INTO customers (
+                  id, email, email_normalized, status, created_at, updated_at
+                ) VALUES (?, ?, ?, 'ACTIVE', ?, ?)`,
+          args: [customerId, `${customerId}@legacy.test`, `${customerId}@legacy.test`, now, now],
         },
         {
-          sql: "UPDATE designs SET status = 'ARCHIVED' WHERE id = ?",
-          args: [fixture.designId],
+          sql: `INSERT INTO designs (
+                  id, customer_id, template_id, schema_version, data_json, revision, status,
+                  created_at, updated_at
+                ) VALUES (?, ?, 'our-universe', 1, ?, 1, 'ARCHIVED', ?, ?)`,
+          args: [designId, customerId, historicalData, now, now],
         },
+        {
+          sql: `INSERT INTO design_revisions (design_id, revision, data_json, created_at)
+                VALUES (?, 1, ?, ?)`,
+          args: [designId, historicalData, now],
+        },
+        ...[firstAssetId, retainedAssetId].map((assetId) => ({
+          sql: `INSERT INTO assets (
+                  id, customer_id, design_id, object_key, visibility, status, media_type,
+                  byte_size, sha256, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'PRIVATE', 'READY', 'image/png', ?, ?, ?, ?)`,
+          args: [assetId, customerId, designId, `private/${assetId}.png`,
+            IMAGE.length, "e".repeat(64), now, now],
+        })),
       ]);
-      const session = await createSession(client, fixture.customerId);
-      const harness = deletionContext(adapter, storage.storage, session);
+      await storage.storage.upload(firstKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.upload(retainedKey, IMAGE, { contentType: "image/png" });
 
-      const failedCleanup = await harness.deleteDesign(fixture.designId);
-      assert.equal(failedCleanup.status, 503);
-      const retained = await client.execute({
-        sql: `SELECT d.status AS design_status, a.status AS asset_status,
-                (SELECT COUNT(*) FROM design_asset_refs ref WHERE ref.asset_id = a.id) AS design_refs
-              FROM designs d JOIN assets a ON a.design_id = d.id WHERE d.id = ?`,
-        args: [fixture.designId],
+      assert.deepEqual(
+        await applyMigrations(client, migrations.filter((migration) => migration.version <= 11)),
+        [11],
+      );
+      const retainingPublication = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: new Date(Date.now() - 86_400_000).toISOString(),
+        retentionUntil: new Date(Date.now() + 86_400_000).toISOString(),
+        customerId,
       });
-      assert.deepEqual(retained.rows[0], {
-        design_status: "ARCHIVED",
-        asset_status: "DELETION_PENDING",
-        design_refs: 0,
+      const publicationAssetId = randomUUID();
+      await client.execute({
+        sql: `INSERT INTO publication_assets (
+                id, publication_id, asset_id, customer_id, consent_version, consented_at,
+                derivative_status, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 'public-image-v1', ?, 'DELETED', ?, ?)`,
+        args: [publicationAssetId, retainingPublication.publicationId, retainedAssetId,
+          customerId, now, now, now],
       });
-      assert.ok(await storage.storage.get(fixture.sourceKey));
+      const backfilled = await client.execute({
+        sql: `SELECT asset_id, revision FROM design_asset_refs
+              WHERE design_id = ? ORDER BY asset_id`,
+        args: [designId],
+      });
+      assert.deepEqual(backfilled.rows, [
+        { asset_id: firstAssetId, revision: 1 },
+        { asset_id: retainedAssetId, revision: 1 },
+      ].sort((a, b) => a.asset_id.localeCompare(b.asset_id)));
 
-      assert.equal((await harness.deleteDesign(fixture.designId)).status, 200);
-      assert.equal((await harness.deleteDesign(fixture.designId)).status, 200);
-      assert.equal(await storage.storage.get(fixture.sourceKey), null);
+      storage.objects.delete(firstKey);
+      await assert.rejects(
+        client.execute(
+          "UPDATE assets SET status = 'DELETION_PENDING' WHERE id = ?",
+          [firstAssetId],
+        ),
+        /referenced asset cannot be deleted/,
+        "the historical DB transition failed after the provider object had already been removed",
+      );
       assert.equal((await client.execute(
         "SELECT status FROM assets WHERE id = ?",
-        [fixture.assetId],
-      )).rows[0]?.status, "DELETED");
+        [firstAssetId],
+      )).rows[0]?.status, "READY");
+
+      assert.deepEqual(await applyMigrations(client, migrations), [12]);
+      assert.deepEqual(await applyMigrations(client, migrations), []);
+      await assert.rejects(
+        client.execute(
+          "UPDATE assets SET status = 'DELETION_PENDING' WHERE id = ?",
+          [firstAssetId],
+        ),
+        /referenced asset cannot be deleted/,
+        "migration 0012 keeps the backfilled reference protected after upgrade",
+      );
+      const session = await createSession(client, customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const beforeSnapshot = (await client.execute(
+        "SELECT data_json FROM order_design_snapshots WHERE order_id = ?",
+        [retainingPublication.orderId],
+      )).rows[0]?.data_json;
+      const beforePublication = (await client.execute(
+        "SELECT status, snapshot_json FROM publications WHERE id = ?",
+        [retainingPublication.publicationId],
+      )).rows[0];
+      const beforeEntitlement = (await client.execute(
+        "SELECT status, expires_at FROM storage_entitlements WHERE order_id = ?",
+        [retainingPublication.orderId],
+      )).rows[0];
+      const protectedRetry = await harness.deleteDesign(designId);
+      assert.equal(protectedRetry.status, 409);
+      assert.equal(await storage.storage.get(retainedKey) !== null, true);
+      assert.equal((await client.execute(
+        "SELECT status FROM assets WHERE id = ?",
+        [retainedAssetId],
+      )).rows[0]?.status, "READY");
+      assert.equal((await client.execute(
+        "SELECT COUNT(*) AS count FROM design_asset_refs WHERE design_id = ?",
+        [designId],
+      )).rows[0]?.count, 2);
+
+      await client.execute(
+        "UPDATE publications SET retention_delete_after_at = ? WHERE id = ?",
+        [new Date(Date.now() - 1_000).toISOString(), retainingPublication.publicationId],
+      );
+      const failedCleanup = await harness.deleteDesign(designId);
+      assert.equal(failedCleanup.status, 503);
+      const retryable = await client.execute({
+        sql: `SELECT d.status AS design_status, a.status AS asset_status,
+                (SELECT COUNT(*) FROM design_asset_refs ref WHERE ref.design_id = d.id) AS design_refs
+              FROM designs d JOIN assets a ON a.design_id = d.id WHERE d.id = ?
+              ORDER BY a.id`,
+        args: [designId],
+      });
+      assert.equal(retryable.rows.length, 2);
+      assert.ok(retryable.rows.every((row) =>
+        row.design_status === "ARCHIVED" && row.asset_status === "DELETION_PENDING" &&
+        row.design_refs === 0));
+      assert.equal(await storage.storage.get(firstKey), null);
+
+      const retainedLedger = await client.execute({
+        sql: `SELECT o.status AS order_status, payment.status AS payment_status,
+                     snapshot.data_json, entitlement.status AS entitlement_status,
+                     entitlement.expires_at
+              FROM orders o
+              JOIN payments payment ON payment.order_id = o.id
+              JOIN order_design_snapshots snapshot ON snapshot.order_id = o.id
+              JOIN storage_entitlements entitlement ON entitlement.order_id = o.id
+              WHERE o.id = ?`,
+        args: [retainingPublication.orderId],
+      });
+      assert.deepEqual(retainedLedger.rows[0], {
+        order_status: "FULFILLED",
+        payment_status: "SUCCEEDED",
+        data_json: beforeSnapshot,
+        entitlement_status: beforeEntitlement?.status,
+        expires_at: beforeEntitlement?.expires_at,
+      });
+
+      assert.equal((await harness.deleteDesign(designId)).status, 200);
+      assert.equal((await harness.deleteDesign(designId)).status, 200);
+      assert.equal(await storage.storage.get(firstKey), null);
+      assert.equal(await storage.storage.get(retainedKey), null);
+      assert.deepEqual((await client.execute(
+        "SELECT status, snapshot_json FROM publications WHERE id = ?",
+        [retainingPublication.publicationId],
+      )).rows[0], beforePublication);
+      const cleaned = await client.execute(
+        "SELECT id, status FROM assets WHERE design_id = ? ORDER BY id",
+        [designId],
+      );
+      assert.deepEqual(cleaned.rows, [
+        { id: firstAssetId, status: "DELETED" },
+        { id: retainedAssetId, status: "DELETED" },
+      ].sort((a, b) => a.id.localeCompare(b.id)));
     } finally {
       client.close();
     }
@@ -2897,6 +3308,107 @@ describe("upload and design deletion concurrency", () => {
     }
   });
 
+  it("cleans a stale worker result while a takeover upload is still in flight", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const firstStarted = deferred();
+    const releaseFirst = deferred();
+    const secondStarted = deferred();
+    const releaseSecond = deferred();
+    let uploadCount = 0;
+    const storage = createRaceStorage({
+      beforeUpload: async () => {
+        uploadCount++;
+        if (uploadCount === 1) {
+          firstStarted.resolve();
+          await releaseFirst.promise;
+        } else if (uploadCount === 2) {
+          secondStarted.resolve();
+          await releaseSecond.promise;
+        }
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      const upload = () => assetRequest(
+        harness.env, session, grant.body.upload_url.replace("/api/v1", ""), {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/png",
+          },
+          body: new Blob([UPLOAD_PNG], { type: "image/png" }),
+        },
+      );
+
+      const firstUpload = upload();
+      await firstStarted.promise;
+      await client.execute(
+        `UPDATE asset_upload_sessions
+         SET lease_expires_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ?`,
+        [grant.body.asset_id],
+      );
+      await client.execute(
+        `UPDATE asset_upload_attempts
+         SET lease_expires_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ? AND status = 'UPLOADING'`,
+        [grant.body.asset_id],
+      );
+
+      const secondUpload = upload();
+      await secondStarted.promise;
+      releaseFirst.resolve();
+      assert.equal((await firstUpload).status, 409);
+
+      const attempts = await client.execute(
+        `SELECT object_key, status FROM asset_upload_attempts
+         WHERE asset_id = ? ORDER BY created_at, id`,
+        [grant.body.asset_id],
+      );
+      assert.equal(attempts.rows.length, 2);
+      const staleKey = String(attempts.rows.find((row) => row.status === "CLEANUP_PENDING")?.object_key);
+      const currentAttemptKey = String(attempts.rows.find((row) => row.status === "UPLOADING")?.object_key);
+      assert.notEqual(staleKey, currentAttemptKey);
+      assert.equal(storage.objects.has(staleKey), true);
+      assert.equal(storage.objects.has(currentAttemptKey), false);
+
+      await client.execute(
+        "UPDATE asset_upload_attempts SET next_cleanup_at = ? WHERE object_key = ?",
+        [new Date().toISOString(), staleKey],
+      );
+      const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: new Date() });
+      assert.equal(cleanup.cleaned, 1);
+      assert.equal(storage.objects.has(staleKey), false);
+      assert.equal(storage.objects.has(currentAttemptKey), false);
+
+      releaseSecond.resolve();
+      assert.equal((await secondUpload).status, 204);
+      assert.equal((await assetRequest(
+        harness.env, session, `/assets/${grant.body.asset_id}/complete`, { method: "POST" },
+      )).status, 200);
+      const asset = await client.execute(
+        "SELECT status, object_key FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      );
+      assert.deepEqual(asset.rows[0], { status: "READY", object_key: currentAttemptKey });
+      assert.deepEqual([...storage.objects.keys()], [currentAttemptKey]);
+
+      const repeated = await reconcileUploadAttemptCleanup(harness.env, { now: new Date() });
+      assert.equal(repeated.processed, 0);
+      assert.deepEqual([...storage.objects.keys()], [currentAttemptKey]);
+    } finally {
+      releaseFirst.resolve();
+      releaseSecond.resolve();
+      client.close();
+    }
+  });
+
   it("reconciles an uncertain provider timeout without deleting a retried referenced asset", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -3213,7 +3725,7 @@ describe("upload and design deletion concurrency", () => {
       assert.equal(storage.objects.size, 1, "late provider success is not cancelled by DB fencing");
 
       const lateRetry = await reconcileUploadAttemptCleanup(harness.env, {
-        now: new Date(NOW.getTime() + 7 * 24 * 60 * 60_000 + 1),
+        now: new Date(NOW.getTime() + 60 * 60_000 + 1),
       });
       assert.equal(lateRetry.cleaned, 1);
       assert.equal(storage.objects.size, 0);
@@ -3294,9 +3806,9 @@ describe("upload and design deletion concurrency", () => {
         "SELECT result_json FROM scheduled_task_runs WHERE status = 'COMPLETED'",
       );
       const result = JSON.parse(String(recorded.rows[0]?.result_json)) as {
-        uploadCleanup: { cleaned: number };
+        operations: { uploadCleanup: { result: { cleaned: number } } };
       };
-      assert.equal(result.uploadCleanup.cleaned, 1);
+      assert.equal(result.operations.uploadCleanup.result.cleaned, 1);
       assert.equal((await client.execute(
         "SELECT status FROM asset_upload_attempts WHERE asset_id = ?",
         [grant.body.asset_id],
@@ -3329,6 +3841,98 @@ describe("upload and design deletion concurrency", () => {
         args: [fixture.designId],
       });
       assert.deepEqual(deleted.rows[0], { design_status: "ARCHIVED", asset_status: "DELETED" });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("enforces migration 0012 asset retention through the database trigger", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    try {
+      const migrations = await loadMigrations();
+      assert.deepEqual(
+        await applyMigrations(client, migrations.filter((migration) => migration.version <= 11)),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+      );
+      const retainedUntil = new Date(Date.now() + 60_000).toISOString();
+      const protectedFixtures = [];
+      for (const status of ["PUBLISHED", "UNPUBLISHED", "EXPIRED", "REVOKED"] as const) {
+        protectedFixtures.push(await createFixture(client, {
+          status,
+          expiresAt: status === "PUBLISHED" || status === "UNPUBLISHED"
+            ? new Date(Date.now() + 86_400_000).toISOString()
+            : new Date(Date.now() - 86_400_000).toISOString(),
+          retentionUntil: retainedUntil,
+          withAsset: true,
+        }));
+      }
+
+      assert.deepEqual(await applyMigrations(client, migrations), [12]);
+      assert.deepEqual(await applyMigrations(client, migrations), []);
+
+      for (const fixture of protectedFixtures) {
+        for (const status of ["DELETION_PENDING", "DELETED"]) {
+          await assert.rejects(
+            client.execute({
+              sql: "UPDATE assets SET status = ? WHERE id = ?",
+              args: [status, fixture.assetId],
+            }),
+            /referenced asset cannot be deleted/,
+            `${status} must be blocked for retained publication ${fixture.publicationId}`,
+          );
+        }
+        assert.equal((await client.execute(
+          "SELECT status FROM assets WHERE id = ?",
+          [fixture.assetId],
+        )).rows[0]?.status, "READY");
+      }
+
+      const retainedExpired = protectedFixtures.find((fixture) => fixture !== undefined);
+      assert.ok(retainedExpired);
+      await client.execute(
+        `UPDATE publications SET status = 'EXPIRED', retention_delete_after_at = ?
+         WHERE id = ?`,
+        [retainedUntil, retainedExpired.publicationId],
+      );
+      await assert.rejects(
+        client.execute(
+          "UPDATE assets SET status = 'DELETION_PENDING' WHERE id = ?",
+          [retainedExpired.assetId],
+        ),
+        /referenced asset cannot be deleted/,
+        "expired publication references remain protected until their deadline",
+      );
+      await client.execute(
+        "UPDATE publications SET retention_delete_after_at = ? WHERE id = ?",
+        [new Date(Date.now() - 1_000).toISOString(), retainedExpired.publicationId],
+      );
+      await client.execute(
+        "UPDATE assets SET status = 'DELETION_PENDING' WHERE id = ?",
+        [retainedExpired.assetId],
+      );
+      await client.execute(
+        "UPDATE assets SET status = 'DELETED' WHERE id = ?",
+        [retainedExpired.assetId],
+      );
+      assert.equal((await client.execute(
+        "SELECT status FROM assets WHERE id = ?",
+        [retainedExpired.assetId],
+      )).rows[0]?.status, "DELETED");
+
+      const unrelated = await createDraftFixture(client, true);
+      await client.execute(
+        "UPDATE assets SET status = 'DELETION_PENDING' WHERE id = ?",
+        [unrelated.assetId],
+      );
+      await client.execute(
+        "UPDATE assets SET status = 'DELETED' WHERE id = ?",
+        [unrelated.assetId],
+      );
+      assert.equal((await client.execute(
+        "SELECT status FROM assets WHERE id = ?",
+        [unrelated.assetId],
+      )).rows[0]?.status, "DELETED");
+      assert.deepEqual((await client.execute("PRAGMA foreign_key_check")).rows, []);
     } finally {
       client.close();
     }
