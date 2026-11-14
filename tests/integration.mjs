@@ -206,6 +206,13 @@ function seedPaidOrder(email, designId, revision) {
     `SELECT id FROM customers WHERE email_normalized = ${sqlText(email)}`,
   )[0];
   assert.ok(customer?.id);
+  const designSnapshot = queryLocalD1(
+    `SELECT d.template_id, d.schema_version, revision.data_json
+       FROM designs d
+       JOIN design_revisions revision ON revision.design_id = d.id AND revision.revision = ${revision}
+      WHERE d.id = ${sqlText(designId)}`,
+  )[0];
+  assert.ok(designSnapshot?.data_json);
   const now = new Date().toISOString();
   const orderId = crypto.randomUUID();
   const orderItemId = crypto.randomUUID();
@@ -241,6 +248,20 @@ function seedPaidOrder(email, designId, revision) {
        '{"kind":"STORAGE_PLAN","storage_plan_id":"1-month","title":"1 tháng","duration_months":1,"lifetime":false,"asset_consents":[]}',
        ${sqlText(now)}
      )`,
+    `INSERT INTO order_design_snapshots (
+       order_id, design_id, design_revision, template_id, schema_version,
+       data_json, content_sha256, created_at
+     ) VALUES (
+       ${sqlText(orderId)}, ${sqlText(designId)}, ${revision},
+       ${sqlText(designSnapshot.template_id)}, ${Number(designSnapshot.schema_version)},
+       ${sqlText(designSnapshot.data_json)},
+       ${sqlText(createHash("sha256").update(String(designSnapshot.data_json)).digest("hex"))},
+       ${sqlText(now)}
+     )`,
+    `INSERT INTO order_asset_refs (order_id, asset_id, created_at)
+     SELECT ${sqlText(orderId)}, asset_id, ${sqlText(now)}
+       FROM design_asset_refs WHERE design_id = ${sqlText(designId)}
+         AND revision = ${revision}`,
     `INSERT INTO payments (
        id, order_id, provider, provider_payment_id, status, amount_minor, currency, idempotency_key,
        created_at, updated_at, succeeded_at, payment_reference, review_required
@@ -959,11 +980,12 @@ try {
     method: "DELETE",
     mutating: true,
   });
-  assert.equal(removed.response.status, 200);
+  assert.equal(removed.response.status, 409,
+    "paid order snapshots retain referenced source assets after the draft unlinks them");
   const removedRead = await fetch(origin + `/api/v1/assets/${goodImage.grant.asset_id}`, {
     headers: { Cookie: first.cookies.join("; ") },
   });
-  assert.equal(removedRead.status, 404);
+  assert.equal(removedRead.status, 200);
 
   const tokenHash = createHash("sha256").update(previewCreated.body.token).digest("hex");
   execFileSync(process.execPath, [
@@ -1122,7 +1144,7 @@ try {
     "WHEN NEW.status = 'QUARANTINED' BEGIN SELECT RAISE(ABORT, 'forced asset metadata failure'); END",
   );
   const failedUpload = await uploadImage(contract.owner, assetFailureDesign.body.design_id, makePng());
-  assert.equal(failedUpload.uploaded.status, 502);
+  assert.equal(failedUpload.uploaded.status, 503);
   const inaccessibleFailedUpload = await contractRequest(
     `/assets/${failedUpload.grant.asset_id}`,
     contract.owner,

@@ -75,6 +75,7 @@ interface EligibleOrder {
   design_current_revision: number;
   template_id: string;
   schema_version: number;
+  content_sha256: string;
   renderer_version: string;
   data_json: string;
   paid_at: string;
@@ -159,8 +160,9 @@ async function paidOrderForOwner(
 ): Promise<EligibleOrder | null> {
   return env.DB.prepare(
     `SELECT o.id AS order_id, o.customer_id, d.id AS design_id, o.order_reference,
-            o.design_revision, d.revision AS design_current_revision,
-            d.template_id, d.schema_version, d.data_json,
+            o.design_revision, snapshot.design_revision AS design_current_revision,
+            snapshot.template_id, snapshot.schema_version, snapshot.data_json,
+            snapshot.content_sha256,
             t.current_renderer_version AS renderer_version, o.paid_at,
             storage_item.reference_id AS storage_plan_id,
             json_extract(storage_item.metadata_json, '$.title') AS storage_plan_title,
@@ -168,6 +170,8 @@ async function paidOrderForOwner(
             json_extract(storage_item.metadata_json, '$.lifetime') AS storage_lifetime
      FROM orders o
      JOIN designs d ON d.id = o.design_id AND d.customer_id = o.customer_id
+     JOIN order_design_snapshots snapshot ON snapshot.order_id = o.id
+       AND snapshot.design_id = d.id AND snapshot.design_revision = o.design_revision
      JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
      JOIN order_items storage_item ON storage_item.order_id = o.id
        AND storage_item.item_type = 'ADD_ON'
@@ -175,16 +179,17 @@ async function paidOrderForOwner(
      JOIN payments p ON p.order_id = o.id AND p.provider = 'SEPAY'
      JOIN payment_webhook_events e ON e.provider = p.provider
        AND e.event_id = p.provider_payment_id AND e.outcome = 'PROCESSED'
-     JOIN templates t ON t.id = d.template_id AND t.status = 'ACTIVE'
-     JOIN template_versions v ON v.template_id = d.template_id
-       AND v.schema_version = d.schema_version AND v.status = 'ACTIVE'
+     JOIN templates t ON t.id = snapshot.template_id AND t.status = 'ACTIVE'
+     JOIN template_versions v ON v.template_id = snapshot.template_id
+       AND v.schema_version = snapshot.schema_version AND v.status = 'ACTIVE'
      WHERE o.id = ? AND o.customer_id = ? AND o.order_type = 'SELF_SERVICE'
        AND o.status IN ('PAID','FULFILLING','FULFILLED') AND o.paid_at IS NOT NULL
        AND o.payment_review_required = 0
-       AND o.design_revision IS NOT NULL AND o.design_revision <= d.revision
-       AND d.status = 'DRAFT' AND d.data_json IS NOT NULL
-       AND i.reference_id = d.template_id
-       AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = d.schema_version
+       AND o.design_revision IS NOT NULL
+       AND d.status = 'DRAFT'
+       AND snapshot.data_json IS NOT NULL
+       AND i.reference_id = snapshot.template_id
+       AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = snapshot.schema_version
        AND p.status = 'SUCCEEDED' AND p.review_required = 0
        AND p.provider_payment_id IS NOT NULL AND p.provider_payment_id <> ''
        AND p.succeeded_at IS NOT NULL AND p.amount_minor = o.total_minor
@@ -254,17 +259,19 @@ async function insertPublication(
   }
   const order = await paidOrderForOwner(env, customerId, orderId);
   if (!order) return apiError(requestId, 422, "PAYMENT_NOT_VERIFIED", "A verified paid template order is required");
-  if (order.design_current_revision !== expectedRevision) {
-    return apiError(requestId, 409, "CONFLICT", "Design revision changed; reload before publishing");
+  if (order.design_revision !== expectedRevision ||
+      order.design_current_revision !== order.design_revision) {
+    return apiError(requestId, 409, "CONFLICT", "The order's authorized design snapshot is unavailable");
   }
   const renderer = TEMPLATE_RENDERERS[order.template_id as TemplateId];
   if (!renderer || !supportsTemplateVersion(order.template_id, order.schema_version) ||
       renderer.rendererVersion !== order.renderer_version) {
     return apiError(requestId, 422, "RENDERER_UNAVAILABLE", "This template version cannot be published");
   }
-  const rawData = await designRevisionData(env, order.design_id, expectedRevision as number);
-  if (!rawData) return apiError(requestId, 409, "CONFLICT", "Design revision is unavailable");
-  const validated = validateTemplateData(order.template_id, order.schema_version, JSON.parse(rawData));
+  const validated = validateTemplateData(order.template_id, order.schema_version, JSON.parse(order.data_json));
+  if (order.content_sha256 && await sha256(order.data_json) !== order.content_sha256) {
+    return apiError(requestId, 409, "CONFLICT", "The order's authorized design snapshot failed integrity verification");
+  }
   if (!validated.value) {
     return apiError(requestId, 422, "VALIDATION_ERROR", "Design data is invalid", validated.fields);
   }
@@ -311,20 +318,22 @@ async function insertPublication(
          WHERE EXISTS (
            SELECT 1 FROM orders o
            JOIN designs d ON d.id = o.design_id AND d.customer_id = o.customer_id
+           JOIN order_design_snapshots snapshot ON snapshot.order_id = o.id
+             AND snapshot.design_id = d.id AND snapshot.design_revision = o.design_revision
            JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
            JOIN payments p ON p.order_id = o.id AND p.provider = 'SEPAY'
            JOIN payment_webhook_events e ON e.provider = p.provider
              AND e.event_id = p.provider_payment_id AND e.outcome = 'PROCESSED'
-           JOIN templates t ON t.id = d.template_id AND t.status = 'ACTIVE'
-           JOIN template_versions v ON v.template_id = d.template_id
-             AND v.schema_version = d.schema_version AND v.status = 'ACTIVE'
+           JOIN templates t ON t.id = snapshot.template_id AND t.status = 'ACTIVE'
+           JOIN template_versions v ON v.template_id = snapshot.template_id
+             AND v.schema_version = snapshot.schema_version AND v.status = 'ACTIVE'
            WHERE o.id = ? AND o.customer_id = ? AND o.order_type = 'SELF_SERVICE'
              AND o.status IN ('PAID','FULFILLING','FULFILLED')
              AND o.paid_at IS NOT NULL AND o.payment_review_required = 0
-             AND o.design_revision = ? AND d.revision = ? AND d.status = 'DRAFT'
-             AND d.template_id = ? AND d.schema_version = ?
-             AND i.reference_id = d.template_id
-             AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = d.schema_version
+             AND o.design_revision = ? AND snapshot.design_revision = ? AND d.status = 'DRAFT'
+             AND snapshot.template_id = ? AND snapshot.schema_version = ?
+             AND i.reference_id = snapshot.template_id
+             AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = snapshot.schema_version
              AND p.status = 'SUCCEEDED' AND p.provider_payment_id IS NOT NULL
              AND p.provider_payment_id <> '' AND p.succeeded_at IS NOT NULL
              AND p.review_required = 0 AND p.amount_minor = o.total_minor
@@ -474,8 +483,9 @@ export async function runPublicationLifecycle(
 
   const expired = await env.DB.prepare(
     `SELECT id, design_id FROM publications
-     WHERE status IN ('EXPIRED','REVOKED') AND retention_delete_after_at IS NOT NULL
-       AND retention_delete_after_at <= ?
+     WHERE status IN ('EXPIRED','REVOKED')
+       AND snapshot_json <> '{}'
+       AND (retention_delete_after_at IS NULL OR retention_delete_after_at <= ?)
        AND NOT EXISTS (
          SELECT 1 FROM storage_entitlements entitlement
          WHERE entitlement.publication_id = publications.id AND entitlement.status = 'LIFETIME'
@@ -503,7 +513,7 @@ export async function runPublicationLifecycle(
        WHERE a.design_id = ? AND other.id <> ?
          AND (other.status IN ('PUBLISHED','UNPUBLISHED') OR
            (other.status IN ('EXPIRED','REVOKED') AND
-             (other.retention_delete_after_at IS NULL OR other.retention_delete_after_at > ?)))
+             other.retention_delete_after_at > ?))
        LIMIT 1`,
     ).bind(publication.design_id, publication.id, now).first<{ id: string }>();
     if (sharedAsset) {
@@ -530,7 +540,7 @@ export async function runPublicationLifecycle(
            WHERE other.design_id = designs.id AND other.id <> ?
              AND (other.status IN ('PUBLISHED','UNPUBLISHED') OR
                (other.status IN ('EXPIRED','REVOKED') AND
-                 (other.retention_delete_after_at IS NULL OR other.retention_delete_after_at > ?)))
+                 other.retention_delete_after_at > ?))
          )`,
     ).bind(now, publication.design_id, publication.id, now).run();
     if (claimed.meta.changes !== 1) {
@@ -561,6 +571,8 @@ export async function runPublicationLifecycle(
     }
     const archivedAt = nowIso();
     await env.DB.batch([
+      env.DB.prepare("DELETE FROM design_asset_refs WHERE design_id = ?")
+        .bind(publication.design_id),
       ...assets.results.map((asset) => env.DB.prepare(
         `UPDATE assets SET status = 'DELETED', deleted_at = COALESCE(deleted_at, ?), updated_at = ?
          WHERE id = ?`,
@@ -701,22 +713,23 @@ async function publish(
        AND EXISTS (
          SELECT 1 FROM orders o
          JOIN designs d ON d.id = o.design_id AND d.customer_id = o.customer_id
+         JOIN order_design_snapshots snapshot ON snapshot.order_id = o.id
+           AND snapshot.design_id = d.id AND snapshot.design_revision = o.design_revision
          JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
          JOIN payments payment ON payment.order_id = o.id AND payment.provider = 'SEPAY'
          JOIN payment_webhook_events e ON e.provider = payment.provider
            AND e.event_id = payment.provider_payment_id AND e.outcome = 'PROCESSED'
-         JOIN templates t ON t.id = d.template_id AND t.status = 'ACTIVE'
-         JOIN template_versions v ON v.template_id = d.template_id
-           AND v.schema_version = d.schema_version AND v.status = 'ACTIVE'
+         JOIN templates t ON t.id = snapshot.template_id AND t.status = 'ACTIVE'
+         JOIN template_versions v ON v.template_id = snapshot.template_id
+           AND v.schema_version = snapshot.schema_version AND v.status = 'ACTIVE'
          WHERE o.id = publications.order_id AND o.customer_id = ?
            AND o.order_type = 'SELF_SERVICE' AND o.status IN ('PAID','FULFILLING','FULFILLED')
            AND o.paid_at IS NOT NULL AND o.payment_review_required = 0
-           AND o.design_revision IS NOT NULL AND o.design_revision <= d.revision
-           AND d.status = 'DRAFT' AND d.template_id = publications.template_id
-           AND d.schema_version = publications.schema_version
-           AND publications.published_revision <= d.revision
-           AND i.reference_id = d.template_id
-           AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = d.schema_version
+           AND o.design_revision IS NOT NULL AND d.status = 'DRAFT'
+           AND snapshot.template_id = publications.template_id
+           AND snapshot.schema_version = publications.schema_version
+           AND i.reference_id = snapshot.template_id
+           AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = snapshot.schema_version
            AND payment.status = 'SUCCEEDED' AND payment.provider_payment_id IS NOT NULL
            AND payment.provider_payment_id <> '' AND payment.succeeded_at IS NOT NULL
            AND payment.review_required = 0 AND payment.amount_minor = o.total_minor
@@ -903,7 +916,10 @@ async function updateSnapshot(
   }
   const order = await paidOrderForOwner(env, customerId, row.order_id);
   if (!order) return apiError(requestId, 422, "PAYMENT_NOT_VERIFIED", "The linked paid order is no longer eligible");
-  if (order.design_current_revision !== body.expected_revision) {
+  const currentDesign = await env.DB.prepare(
+    "SELECT revision FROM designs WHERE id = ? AND customer_id = ? AND status = 'DRAFT'",
+  ).bind(row.design_id, customerId).first<{ revision: number }>();
+  if (currentDesign?.revision !== body.expected_revision) {
     return apiError(requestId, 409, "CONFLICT", "Design revision changed; reload before updating");
   }
   const rawData = await designRevisionData(env, row.design_id, body.expected_revision as number);

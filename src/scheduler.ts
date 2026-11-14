@@ -1,5 +1,6 @@
 import { randomToken, safeId } from "./http.ts";
 import { runPublicationLifecycle } from "./publications.ts";
+import { reconcileUploadAttemptCleanup } from "./assets.ts";
 import type { Env } from "./types.ts";
 
 const TASK_NAME = "publication-lifecycle";
@@ -49,10 +50,14 @@ export async function runScheduledPublicationLifecycle(
       now,
       limit: options.limit ?? 10,
     });
+    const uploadCleanup = await reconcileUploadAttemptCleanup(env, {
+      now,
+      limit: options.limit ?? 10,
+    });
     await env.DB.prepare(
       `UPDATE scheduled_task_runs SET status = 'COMPLETED', completed_at = ?, result_json = ?
        WHERE id = ? AND status = 'RUNNING'`,
-    ).bind(new Date().toISOString(), JSON.stringify(result), runId).run();
+    ).bind(new Date().toISOString(), JSON.stringify({ ...result, uploadCleanup }), runId).run();
     return { acquired: true, ...result };
   } catch (error) {
     const errorCode = error instanceof Error ? error.name.slice(0, 60) : "UNKNOWN_ERROR";

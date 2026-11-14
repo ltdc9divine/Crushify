@@ -624,6 +624,8 @@ async function createOrder(
   if (consentIds.some((id) => !availableAssetIds.has(id))) {
     return apiError(requestId, 422, "VALIDATION_ERROR", "Consent may only reference an image in this design");
   }
+  const referencedAssetIds = [...availableAssetIds].sort();
+  const snapshotHash = await sha256(design.data_json);
 
   const orderId = createOrderId();
   const paymentId = safeId();
@@ -673,6 +675,17 @@ async function createOrder(
                    )
                )
            ))
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(?) requested_asset
+             LEFT JOIN assets a ON a.id = requested_asset.value
+               AND a.customer_id = d.customer_id AND a.design_id = d.id AND a.status = 'READY'
+             WHERE a.id IS NULL
+           )
+           AND EXISTS (
+             SELECT 1 FROM design_revisions revision
+             WHERE revision.design_id = d.id AND revision.revision = d.revision
+               AND revision.data_json = d.data_json
+           )
        )`,
     ).bind(orderId, ownerId, "VND", amount, amount, design.id, renewalPublicationId,
       idempotencyKey, now, now, expiresAt, orderReference, design.revision, fingerprint,
@@ -680,7 +693,42 @@ async function createOrder(
       design.schema_version, !localFixturePricing || Boolean(renewalPublicationId) ? 1 : 0,
       templateAmount, "VND",
       !localFixturePricing ? 1 : 0, storageAmount, "VND",
-      renewalPublicationId, renewalPublicationId, now),
+      renewalPublicationId, renewalPublicationId, now, JSON.stringify(referencedAssetIds)),
+    env.DB.prepare(
+      `INSERT INTO order_design_snapshots (
+         order_id, design_id, design_revision, template_id, schema_version,
+         data_json, content_sha256, created_at
+       )
+       SELECT ?, d.id, revision.revision, d.template_id, d.schema_version,
+         revision.data_json, ?, ?
+       FROM orders o
+       JOIN designs d ON d.id = o.design_id AND d.customer_id = o.customer_id
+       JOIN design_revisions revision
+         ON revision.design_id = d.id AND revision.revision = o.design_revision
+       WHERE o.id = ? AND d.revision = ? AND d.template_id = ? AND d.schema_version = ?
+         AND revision.data_json = ?`,
+    ).bind(orderId, snapshotHash, now, orderId, design.revision,
+      design.template_id, design.schema_version, design.data_json),
+    env.DB.prepare(
+      `INSERT INTO order_asset_refs (order_id, asset_id, created_at)
+       SELECT ?, a.id, ?
+       FROM json_each(?) requested_asset
+       JOIN assets a ON a.id = requested_asset.value
+         AND a.customer_id = ? AND a.design_id = ? AND a.status = 'READY'
+       WHERE EXISTS (
+         SELECT 1 FROM orders o
+         JOIN order_design_snapshots snapshot ON snapshot.order_id = o.id
+         WHERE o.id = ? AND o.design_revision = snapshot.design_revision
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM json_each(?) requested_asset
+         LEFT JOIN assets checked_asset ON checked_asset.id = requested_asset.value
+           AND checked_asset.customer_id = ? AND checked_asset.design_id = ?
+           AND checked_asset.status = 'READY'
+         WHERE checked_asset.id IS NULL
+       )`,
+    ).bind(orderId, now, JSON.stringify(referencedAssetIds), ownerId, design.id,
+      orderId, JSON.stringify(referencedAssetIds), ownerId, design.id),
     env.DB.prepare(
       `INSERT INTO order_items (
          id, order_id, item_type, reference_id, description_snapshot, quantity,
@@ -731,6 +779,10 @@ async function createOrder(
     const results = await env.DB.batch(statements);
     if ((results[0]?.meta.changes ?? 0) !== 1) {
       return apiError(requestId, 409, "PRICE_CHANGED", "Design or template price changed; reload before checkout");
+    }
+    if ((results[1]?.meta.changes ?? 0) !== 1 ||
+        (results[2]?.meta.changes ?? 0) !== referencedAssetIds.length) {
+      throw new Error("Checkout snapshot or asset pin could not be persisted atomically");
     }
   } catch (error) {
     if (!(error instanceof DatabaseError) || error.code !== "CONSTRAINT") throw error;

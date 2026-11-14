@@ -696,7 +696,8 @@ describe("Vercel API runtime adapter", () => {
 
     try {
       const migrations = await loadMigrations();
-      assert.deepEqual(await applyMigrations(migrationClient, migrations), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      assert.deepEqual(await applyMigrations(migrationClient, migrations),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
       await verifyMigrationSchema(migrationClient, migrations);
       await migrationClient.execute("CREATE TABLE staging_schema_unexpected (id TEXT PRIMARY KEY)");
       await assert.rejects(
@@ -1297,7 +1298,8 @@ describe("Vercel API runtime adapter", () => {
     });
 
     try {
-      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
       process.env.DATABASE_PROVIDER = "turso";
       process.env.TURSO_DATABASE_URL = databaseUrl;
       process.env.TURSO_AUTH_TOKEN = "";

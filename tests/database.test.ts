@@ -30,7 +30,7 @@ describe("Turso/libSQL migrations", () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     try {
       const migrations = await loadMigrations();
-      assert.deepEqual(await applyMigrations(client, migrations), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      assert.deepEqual(await applyMigrations(client, migrations), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
       assert.deepEqual(await applyMigrations(client, migrations), []);
 
       const ledger = await client.execute(
@@ -47,6 +47,8 @@ describe("Turso/libSQL migrations", () => {
         [8, "scheduled_maintenance"],
         [9, "fulfillment_recovery_leases"],
         [10, "asset_upload_leases"],
+        [11, "asset_reference_and_upload_attempts"],
+        [12, "lifecycle_retention_and_upload_recovery"],
       ]);
 
       const foreignKeys = await client.execute("PRAGMA foreign_keys");
@@ -127,6 +129,28 @@ describe("Turso/libSQL migrations", () => {
     }
   });
 
+  it("upgrades the 0011 schema with retention and upload reconciliation safeguards", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    try {
+      const migrations = await loadMigrations();
+      assert.deepEqual(
+        await applyMigrations(client, migrations.filter((migration) => migration.version <= 11)),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+      );
+      const before = await client.execute("PRAGMA table_info('asset_upload_attempts')");
+      assert.ok(!before.rows.some((row) => row.name === "reconciliation_state"));
+
+      assert.deepEqual(await applyMigrations(client, migrations), [12]);
+      const after = await client.execute("PRAGMA table_info('asset_upload_attempts')");
+      assert.ok(after.rows.some((row) => row.name === "reconciliation_state"));
+      const indexes = await client.execute("PRAGMA index_list('asset_upload_attempts')");
+      assert.ok(indexes.rows.some((row) => row.name === "upload_attempts_reconciliation"));
+      assert.deepEqual(await client.execute("PRAGMA foreign_key_check").then((result) => result.rows), []);
+    } finally {
+      client.close();
+    }
+  });
+
   it("backfills existing finalized upload sessions without changing pending uploads", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     try {
@@ -183,7 +207,14 @@ describe("Turso/libSQL migrations", () => {
         },
       ]);
 
-      assert.deepEqual(await applyMigrations(client, migrations), [10]);
+      assert.deepEqual(await applyMigrations(client, migrations), [10, 11, 12]);
+      const attempts = await client.execute(
+        "SELECT reconciliation_state FROM asset_upload_attempts ORDER BY session_id",
+      );
+      assert.deepEqual(attempts.rows, [
+        { reconciliation_state: "ACTIVE" },
+        { reconciliation_state: "ACTIVE" },
+      ]);
       const sessions = await client.execute(
         `SELECT id, status FROM asset_upload_sessions
          WHERE id IN ('upload-ready-session','upload-pending-session') ORDER BY id`,
@@ -229,7 +260,7 @@ describe("Turso/libSQL migrations", () => {
           "PUBLICATION_FAILED", timestamp, timestamp, timestamp],
       });
 
-      assert.deepEqual(await applyMigrations(client, migrations), [9, 10]);
+      assert.deepEqual(await applyMigrations(client, migrations), [9, 10, 11, 12]);
       const preserved = await client.execute(
         `SELECT status, attempts, last_error_code, started_at, completed_at,
                 next_attempt_at, lease_token, lease_expires_at, last_failure_at

@@ -1,5 +1,5 @@
 import { handleSessionRoutes } from "./auth.ts";
-import { handleAssetRoutes } from "./assets.ts";
+import { handleAssetRoutes, reconcileUploadAttemptCleanup } from "./assets.ts";
 import { handleDesignRoutes, handlePreviewRoutes } from "./designs.ts";
 import { handlePaymentRoutes } from "./payments.ts";
 import { handlePublicationRoutes } from "./publications.ts";
@@ -192,6 +192,7 @@ export default {
     ctx.waitUntil((async () => {
       const fulfillment = await recoverPendingFulfillments(runtimeEnv, 50);
       const lifecycle = await runPublicationLifecycle(runtimeEnv, { limit: 50 });
+      const uploadCleanup = await reconcileUploadAttemptCleanup(runtimeEnv, { limit: 50 });
       logSafeInfo("scheduler.publication_maintenance_completed", "lifecycle", {
         environment: runtimeEnv.ENVIRONMENT,
         counts: {
@@ -200,6 +201,10 @@ export default {
           expired: lifecycle.expired,
           erased: lifecycle.erased,
           retryable: lifecycle.retryable,
+          upload_cleanup_processed: uploadCleanup.processed,
+          upload_cleanup_cleaned: uploadCleanup.cleaned,
+          upload_cleanup_retryable: uploadCleanup.retryable,
+          upload_cleanup_manual_review: uploadCleanup.manualReview,
         },
       });
     })().catch((error) => {

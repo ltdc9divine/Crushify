@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -8,8 +8,9 @@ import type { Database, DatabaseStatement } from "../src/database.ts";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
 import { handleApiRequest } from "../src/index.ts";
+import { reconcileUploadAttemptCleanup } from "../src/assets.ts";
 import { createVercelApiHandler } from "../src/platform/vercel.ts";
-import { runPublicationLifecycle } from "../src/publications.ts";
+import { handleFulfillmentForOrder, runPublicationLifecycle } from "../src/publications.ts";
 import { runScheduledPublicationLifecycle } from "../src/scheduler.ts";
 import type { Storage, StorageObject } from "../src/storage.ts";
 
@@ -63,7 +64,10 @@ class PausableDatabase implements Database {
 
 function createRaceStorage(options: {
   beforeUpload?: () => Promise<void>;
+  afterUpload?: () => Promise<void>;
   afterGet?: () => Promise<void>;
+  beforeDelete?: (key: string) => Promise<void>;
+  beforeDerivative?: (key: string) => Promise<void>;
   sourceDeleteFailures?: number;
 } = {}): { storage: Storage; objects: Map<string, Uint8Array> } {
   const objects = new Map<string, Uint8Array>();
@@ -84,9 +88,11 @@ function createRaceStorage(options: {
     async upload(key, bytes) {
       await options.beforeUpload?.();
       objects.set(key, new Uint8Array(bytes));
+      await options.afterUpload?.();
     },
     get: asObject,
     async delete(key) {
+      await options.beforeDelete?.(key);
       if (sourceDeleteFailures > 0) {
         sourceDeleteFailures--;
         throw new Error("Injected upload cleanup failure");
@@ -95,6 +101,7 @@ function createRaceStorage(options: {
     },
     async privateAssetUrl() { return null; },
     async createPublishedDerivative(source, derivative) {
+      await options.beforeDerivative?.(derivative);
       const bytes = objects.get(source);
       if (!bytes) throw new Error("Source asset is missing");
       objects.set(derivative, new Uint8Array(bytes));
@@ -137,6 +144,25 @@ async function createUploadGrant(
   });
   const body = await response.json() as { asset_id: string; upload_url: string; upload_token: string };
   return { response, body };
+}
+
+async function saveDesignWithAsset(
+  env: Parameters<typeof handleApiRequest>[1],
+  session: { token: string; csrf: string },
+  client: Client,
+  designId: string,
+  assetId: string,
+): Promise<Response> {
+  const row = await client.execute(
+    "SELECT default_data_json FROM template_versions WHERE template_id = 'our-universe' AND schema_version = 1",
+  );
+  const data = JSON.parse(String(row.rows[0]?.default_data_json)) as Record<string, unknown>;
+  data.photos = [{ asset_id: assetId, caption: "A memory" }];
+  return assetRequest(env, session, `/designs/${designId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schema_version: 1, expected_revision: 1, data }),
+  });
 }
 
 async function loadMigrations(): Promise<SqlMigration[]> {
@@ -220,7 +246,7 @@ async function createSession(client: Client, customerId: string) {
 async function createFixture(
   client: Client,
   options: {
-    status?: "PUBLISHED" | "EXPIRED";
+    status?: "PUBLISHED" | "UNPUBLISHED" | "EXPIRED" | "REVOKED";
     expiresAt: string | null;
     retentionUntil?: string | null;
     lifetime?: boolean;
@@ -314,7 +340,7 @@ async function createFixture(
       args: [
         publicationId, designId, orderId, slug,
         createHash("sha256").update(slug).digest("hex"), JSON.stringify({ data: JSON.parse(data) }),
-        options.status ?? "PUBLISHED", now, now, options.expiresAt, options.status === "EXPIRED" ? now : null,
+        options.status ?? "PUBLISHED", now, now, options.expiresAt, options.status === "REVOKED" ? now : null,
         options.retentionUntil ?? null, now, now, now,
       ],
     },
@@ -325,10 +351,21 @@ async function createFixture(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
       args: [
         id(), publicationId, orderId, planId, lifetime ? null : 1, now, now, options.expiresAt,
-        lifetime ? "LIFETIME" : options.status === "EXPIRED" ? "EXPIRED" : "ACTIVE", now,
+        lifetime ? "LIFETIME" : options.status === "EXPIRED" ? "EXPIRED" :
+          options.status === "REVOKED" ? "REVOKED" : "ACTIVE", now,
       ],
     },
   ]);
+  await client.execute({
+    sql: `INSERT INTO order_design_snapshots (
+            order_id, design_id, design_revision, template_id, schema_version,
+            data_json, content_sha256, created_at
+          ) VALUES (?, ?, 1, 'our-universe', 1, ?, ?, ?)`,
+    args: [
+      orderId, designId, data,
+      createHash("sha256").update(data).digest("hex"), now,
+    ],
+  });
   let extraOrderId: string | undefined;
   if (options.extraOrderStatus) {
     extraOrderId = id();
@@ -426,6 +463,157 @@ async function createDraftFixture(client: Client, withAsset = false): Promise<{
     return { customerId, designId, assetId, sourceKey: `private/${assetId}.png` };
   }
   return { customerId, designId, assetId };
+}
+
+async function createOrderSnapshot(
+  client: Client,
+  fixture: { customerId: string; designId: string },
+  options: { paid: boolean; assetId?: string },
+) {
+  const id = () => randomUUID();
+  const orderId = id();
+  const paymentId = id();
+  const transactionId = id();
+  const orderReference = `CRF${id().replaceAll("-", "").slice(0, 16).toUpperCase()}`;
+  const paymentReference = `CRP${id().replaceAll("-", "").slice(0, 16).toUpperCase()}`;
+  const now = NOW.toISOString();
+  const expiresAt = "2100-01-01T00:00:00.000Z";
+  const designResult = await client.execute({
+    sql: "SELECT revision, template_id, schema_version, data_json FROM designs WHERE id = ?",
+    args: [fixture.designId],
+  });
+  const design = designResult.rows[0];
+  if (!design) assert.fail("Expected order design fixture");
+  const dataJson = String(design.data_json);
+  const revision = Number(design.revision);
+  await client.batch([
+    {
+      sql: `INSERT INTO orders (
+              id, customer_id, order_type, status, currency, subtotal_minor, discount_minor, total_minor,
+              design_id, idempotency_key, created_at, updated_at, paid_at, expires_at, order_reference,
+              design_revision, request_hash, payment_review_required
+            ) VALUES (?, ?, 'SELF_SERVICE', ?, 'VND', 1000, 0, 1000, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      args: [
+        orderId, fixture.customerId, options.paid ? "PAID" : "AWAITING_PAYMENT",
+        fixture.designId, id(), now, now, options.paid ? now : null,
+        options.paid ? null : expiresAt, orderReference, revision,
+        createHash("sha256").update(dataJson).digest("hex"),
+      ],
+    },
+    {
+      sql: `INSERT INTO order_items (
+              id, order_id, item_type, reference_id, description_snapshot, quantity, unit_amount_minor,
+              line_total_minor, metadata_json, created_at
+            ) VALUES (?, ?, 'TEMPLATE_LICENSE', ?, 'Template license', 1, 1000, 1000, ?, ?)`,
+      args: [id(), orderId, String(design.template_id), JSON.stringify({
+        schema_version: Number(design.schema_version),
+      }), now],
+    },
+    {
+      sql: `INSERT INTO order_items (
+              id, order_id, item_type, reference_id, description_snapshot, quantity, unit_amount_minor,
+              line_total_minor, metadata_json, created_at
+            ) VALUES (?, ?, 'ADD_ON', '1-month', 'Storage', 1, 0, 0, ?, ?)`,
+      args: [id(), orderId, JSON.stringify({
+        kind: "STORAGE_PLAN",
+        storage_plan_id: "1-month",
+        title: "1 month",
+        duration_months: 1,
+        lifetime: false,
+        asset_consents: options.assetId
+          ? [{ asset_id: options.assetId, consent_version: "public-image-v1" }]
+          : [],
+      }), now],
+    },
+    {
+      sql: `INSERT INTO payments (
+              id, order_id, provider, provider_payment_id, status, amount_minor, currency,
+              idempotency_key, created_at, updated_at, succeeded_at, payment_reference, review_required
+            ) VALUES (?, ?, 'SEPAY', ?, ?, 1000, 'VND', ?, ?, ?, ?, ?, 0)`,
+      args: [
+        paymentId, orderId, options.paid ? transactionId : null,
+        options.paid ? "SUCCEEDED" : "PENDING", id(), now, now,
+        options.paid ? now : null, paymentReference,
+      ],
+    },
+  ]);
+  await client.execute({
+    sql: `INSERT INTO order_design_snapshots (
+            order_id, design_id, design_revision, template_id, schema_version,
+            data_json, content_sha256, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      orderId, fixture.designId, revision, String(design.template_id),
+      Number(design.schema_version), dataJson,
+      createHash("sha256").update(dataJson).digest("hex"), now,
+    ],
+  });
+  if (options.assetId) {
+    await client.execute({
+      sql: `INSERT INTO order_asset_refs (order_id, asset_id, created_at)
+            VALUES (?, ?, ?)`,
+      args: [orderId, options.assetId, now],
+    });
+  }
+  if (options.paid) {
+    await client.batch([
+      {
+        sql: `INSERT INTO payment_webhook_events (
+                id, provider, event_id, payload_hash, received_at, processed_at, outcome, raw_payload
+              ) VALUES (?, 'SEPAY', ?, ?, ?, ?, 'PROCESSED', '{}')`,
+        args: [id(), transactionId, "f".repeat(64), now, now],
+      },
+      {
+        sql: `INSERT INTO fulfillment_jobs (id, order_id, status, next_attempt_at, created_at, updated_at)
+              VALUES (?, ?, 'PENDING', ?, ?, ?)`,
+        args: [id(), orderId, now, now, now],
+      },
+    ]);
+  }
+  return { orderId, orderReference, paymentReference, transactionId, dataJson };
+}
+
+async function insertUploadAttemptFixture(
+  client: Client,
+  assetId: string,
+  options: {
+    status?: "UPLOADING" | "ATTACHED" | "CLEANUP_PENDING" | "CLEANED";
+    leaseExpiresAt?: string;
+    nextCleanupAt?: string;
+  } = {},
+) {
+  const asset = await client.execute(
+    `SELECT asset.object_key, session.id AS session_id
+     FROM assets asset JOIN asset_upload_sessions session ON session.asset_id = asset.id
+     WHERE asset.id = ?`,
+    [assetId],
+  );
+  const row = asset.rows[0];
+  if (!row) assert.fail("Expected upload attempt fixture");
+  const id = randomUUID();
+  const leaseToken = randomUUID();
+  const now = new Date().toISOString();
+  const leaseExpiresAt = options.leaseExpiresAt ?? new Date(Date.now() + 15 * 60_000).toISOString();
+  const status = options.status ?? "CLEANUP_PENDING";
+  if (status === "UPLOADING") {
+    await client.execute({
+      sql: `UPDATE asset_upload_sessions
+            SET status = 'UPLOADING', used_at = ?, lease_token = ?, lease_expires_at = ?
+            WHERE id = ?`,
+      args: [now, leaseToken, leaseExpiresAt, String(row.session_id)],
+    });
+  }
+  await client.execute({
+    sql: `INSERT INTO asset_upload_attempts (
+            id, session_id, asset_id, lease_token, object_key, status, lease_expires_at,
+            next_cleanup_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      id, String(row.session_id), assetId, leaseToken, String(row.object_key), status,
+      leaseExpiresAt, options.nextCleanupAt ?? now, now, now,
+    ],
+  });
+  return { id, leaseToken, objectKey: String(row.object_key) };
 }
 
 function deletionContext(
@@ -873,7 +1061,7 @@ describe("publication expiration lifecycle", () => {
 
       const beforeRetention = await runPublicationLifecycle(env, {
         limit: 10,
-        now: new Date("2099-01-30T23:59:59.999Z"),
+        now: new Date(),
       });
       assert.equal(beforeRetention.erased, 0);
       const preserved = await client.execute({
@@ -883,9 +1071,14 @@ describe("publication expiration lifecycle", () => {
       assert.equal(preserved.rows[0]?.status, "READY");
       assert.ok(await storage.get(fixture.sourceKey));
 
+      await client.execute(
+        "UPDATE publications SET retention_delete_after_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+        [fixture.publicationId],
+      );
+      const cleanupNow = new Date();
       const derivativeFailure = await runPublicationLifecycle(env, {
         limit: 10,
-        now: new Date("2099-02-01T00:00:00.000Z"),
+        now: cleanupNow,
       });
       assert.equal(derivativeFailure.retryable, 1);
       const session = await createSession(client, fixture.customerId);
@@ -919,12 +1112,12 @@ describe("publication expiration lifecycle", () => {
         "owner can inspect a publication while lifecycle cleanup is pending");
       const sourceFailure = await runPublicationLifecycle(env, {
         limit: 10,
-        now: new Date("2099-02-01T00:00:00.000Z"),
+        now: cleanupNow,
       });
       assert.equal(sourceFailure.retryable, 1);
       const completed = await runPublicationLifecycle(env, {
         limit: 10,
-        now: new Date("2099-02-01T00:00:00.000Z"),
+        now: cleanupNow,
       });
       assert.equal(completed.erased, 1);
       const erased = await client.execute({
@@ -1062,6 +1255,10 @@ describe("publication expiration lifecycle", () => {
         sql: "UPDATE orders SET status = 'CANCELLED' WHERE id = ?",
         args: [fixture.extraOrderId],
       });
+      await client.execute(
+        "UPDATE publications SET retention_delete_after_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+        [fixture.publicationId],
+      );
       const completed = await runPublicationLifecycle(env, { limit: 10, now: afterPayment });
       assert.equal(completed.erased, 1);
       const archived = await client.execute(
@@ -1261,7 +1458,58 @@ describe("publication expiration lifecycle", () => {
         asset_status: "DELETED",
       });
       assert.equal(await storage.get(fixture.sourceKey), null);
-      assert.equal(deletionAttempts.source.length, 3);
+      assert.equal(deletionAttempts.source.length, 2);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("retries legacy archived cleanup after reference backfill without losing the source object", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage({ sourceDeleteFailures: 1 });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await client.batch([
+        {
+          sql: `INSERT INTO design_asset_refs (
+                  design_id, asset_id, customer_id, revision, created_at
+                ) VALUES (?, ?, ?, 1, ?)`,
+          args: [fixture.designId, fixture.assetId, fixture.customerId, NOW.toISOString()],
+        },
+        {
+          sql: "UPDATE designs SET status = 'ARCHIVED' WHERE id = ?",
+          args: [fixture.designId],
+        },
+      ]);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+
+      const failedCleanup = await harness.deleteDesign(fixture.designId);
+      assert.equal(failedCleanup.status, 503);
+      const retained = await client.execute({
+        sql: `SELECT d.status AS design_status, a.status AS asset_status,
+                (SELECT COUNT(*) FROM design_asset_refs ref WHERE ref.asset_id = a.id) AS design_refs
+              FROM designs d JOIN assets a ON a.design_id = d.id WHERE d.id = ?`,
+        args: [fixture.designId],
+      });
+      assert.deepEqual(retained.rows[0], {
+        design_status: "ARCHIVED",
+        asset_status: "DELETION_PENDING",
+        design_refs: 0,
+      });
+      assert.ok(await storage.storage.get(fixture.sourceKey));
+
+      assert.equal((await harness.deleteDesign(fixture.designId)).status, 200);
+      assert.equal((await harness.deleteDesign(fixture.designId)).status, 200);
+      assert.equal(await storage.storage.get(fixture.sourceKey), null);
+      assert.equal((await client.execute(
+        "SELECT status FROM assets WHERE id = ?",
+        [fixture.assetId],
+      )).rows[0]?.status, "DELETED");
     } finally {
       client.close();
     }
@@ -1305,6 +1553,206 @@ describe("publication expiration lifecycle", () => {
     }
   });
 
+  it("protects assets for every active or retained publication state", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const cases = [
+        { status: "PUBLISHED" as const, expiresAt: "2100-01-01T00:00:00.000Z", retentionUntil: "2000-01-01T00:00:00.000Z" },
+        { status: "UNPUBLISHED" as const, expiresAt: "2100-01-01T00:00:00.000Z", retentionUntil: "2000-01-01T00:00:00.000Z" },
+        { status: "EXPIRED" as const, expiresAt: "2000-01-01T00:00:00.000Z", retentionUntil: "2099-02-01T00:00:00.000Z" },
+        { status: "REVOKED" as const, expiresAt: "2000-01-01T00:00:00.000Z", retentionUntil: "2099-02-01T00:00:00.000Z" },
+      ];
+      for (const testCase of cases) {
+        const fixture = await createFixture(client, { ...testCase, withAsset: true });
+        if (!("sourceKey" in fixture)) assert.fail("Expected source asset fixture");
+        await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+        const session = await createSession(client, fixture.customerId);
+        const harness = deletionContext(adapter, storage.storage, session);
+
+        const response = await assetRequest(
+          harness.env, session, `/assets/${fixture.assetId}`, { method: "DELETE" },
+        );
+        assert.equal(response.status, 409, `${testCase.status} must protect its source`);
+        const state = await client.execute({
+          sql: `SELECT a.status AS asset_status, p.status AS publication_status
+                FROM assets a JOIN publication_assets ref ON ref.asset_id = a.id
+                JOIN publications p ON p.id = ref.publication_id
+                WHERE a.id = ?`,
+          args: [fixture.assetId],
+        });
+        assert.deepEqual(state.rows[0], {
+          asset_status: "READY",
+          publication_status: testCase.status,
+        });
+        assert.ok(await storage.storage.get(fixture.sourceKey));
+      }
+    } finally {
+      client.close();
+    }
+  });
+
+  it("allows source cleanup only after expired or revoked retention ends", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      for (const status of ["EXPIRED", "REVOKED"] as const) {
+        const fixture = await createFixture(client, {
+          status,
+          expiresAt: "2000-01-01T00:00:00.000Z",
+          retentionUntil: "2000-02-01T00:00:00.000Z",
+          withAsset: true,
+        });
+        if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+          assert.fail("Expected retained publication asset fixture");
+        }
+        await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+        await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+        const session = await createSession(client, fixture.customerId);
+        const harness = deletionContext(adapter, storage.storage, session);
+
+        assert.equal((await assetRequest(
+          harness.env, session, `/assets/${fixture.assetId}`, { method: "DELETE" },
+        )).status, 200, `${status} no longer protects beyond its deadline`);
+        assert.equal((await assetRequest(
+          harness.env, session, `/assets/${fixture.assetId}`, { method: "DELETE" },
+        )).status, 200, "repeated deletion is idempotent");
+        assert.equal(await storage.storage.get(fixture.sourceKey), null);
+
+        const lifecycle = await runPublicationLifecycle({
+          DB: adapter,
+          STORAGE: storage.storage,
+          DATA_RETENTION_DAYS: "30",
+        } as Parameters<typeof runPublicationLifecycle>[0], {
+          limit: 10,
+          now: new Date("2100-01-01T00:00:00.000Z"),
+        });
+        assert.equal(lifecycle.erased, 1);
+        const erased = await client.execute({
+          sql: `SELECT a.status AS asset_status, p.snapshot_json, p.retention_delete_after_at
+                FROM assets a JOIN publication_assets ref ON ref.asset_id = a.id
+                JOIN publications p ON p.id = ref.publication_id WHERE a.id = ?`,
+          args: [fixture.assetId],
+        });
+        assert.deepEqual(erased.rows[0], {
+          asset_status: "DELETED",
+          snapshot_json: "{}",
+          retention_delete_after_at: null,
+        });
+      }
+    } finally {
+      client.close();
+    }
+  });
+
+  it("serializes retained publication reference creation against asset deletion", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const database = new PausableDatabase(adapter);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "REVOKED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        retentionUntil: "2000-02-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture)) assert.fail("Expected source asset fixture");
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await client.execute("DELETE FROM publication_assets WHERE id = ?", [fixture.publicationAssetId]);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(database, storage.storage, session);
+      const gate = database.pauseNextBatch();
+      const deletion = assetRequest(
+        harness.env, session, `/assets/${fixture.assetId}`, { method: "DELETE" },
+      );
+      await gate.entered;
+
+      const now = NOW.toISOString();
+      await client.execute({
+        sql: `INSERT INTO publication_assets (
+                id, publication_id, asset_id, customer_id, consent_version, consented_at,
+                derivative_status, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 'public-image-v1', ?, 'PENDING', ?, ?)`,
+        args: [randomUUID(), fixture.publicationId, fixture.assetId,
+          fixture.customerId, now, now, now],
+      });
+      await client.execute(
+        "UPDATE publications SET status = 'UNPUBLISHED', updated_at = ? WHERE id = ?",
+        [now, fixture.publicationId],
+      );
+      gate.release();
+
+      assert.notEqual((await deletion).status, 200);
+      const state = await client.execute({
+        sql: `SELECT a.status AS asset_status, p.status AS publication_status,
+                COUNT(ref.id) AS references_count
+              FROM assets a JOIN publications p ON p.id = ?
+              LEFT JOIN publication_assets ref ON ref.asset_id = a.id AND ref.publication_id = p.id
+              WHERE a.id = ? GROUP BY a.id`,
+        args: [fixture.publicationId, fixture.assetId],
+      });
+      assert.deepEqual(state.rows[0], {
+        asset_status: "READY",
+        publication_status: "UNPUBLISHED",
+        references_count: 1,
+      });
+      assert.ok(await storage.storage.get(fixture.sourceKey));
+    } finally {
+      client.close();
+    }
+  });
+
+  it("rejects retained publication references after asset deletion has committed", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "REVOKED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        retentionUntil: "2000-02-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture)) assert.fail("Expected source asset fixture");
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await client.execute("DELETE FROM publication_assets WHERE id = ?", [fixture.publicationAssetId]);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+
+      assert.equal((await assetRequest(
+        harness.env, session, `/assets/${fixture.assetId}`, { method: "DELETE" },
+      )).status, 200);
+      await assert.rejects(client.execute({
+        sql: `INSERT INTO publication_assets (
+                id, publication_id, asset_id, customer_id, consent_version, consented_at,
+                derivative_status, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 'public-image-v1', ?, 'PENDING', ?, ?)`,
+        args: [
+          randomUUID(), fixture.publicationId, fixture.assetId, fixture.customerId,
+          NOW.toISOString(), NOW.toISOString(), NOW.toISOString(),
+        ],
+      }));
+      assert.equal((await client.execute(
+        "SELECT status FROM assets WHERE id = ?",
+        [fixture.assetId],
+      )).rows[0]?.status, "DELETED");
+      assert.equal(await storage.storage.get(fixture.sourceKey), null);
+    } finally {
+      client.close();
+    }
+  });
+
   it("blocks deletion while payment or fulfillment is in progress", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -1343,6 +1791,284 @@ describe("publication expiration lifecycle", () => {
         [fixture.designId],
       );
       assert.equal(unchanged.rows[0]?.status, "DRAFT");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("preserves settled fulfillment when payment races with design deletion", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const database = new PausableDatabase(adapter);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const order = await createOrderSnapshot(client, fixture, { paid: false });
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(database, storage.storage, session);
+      const gate = database.pauseNextBatch();
+      const deletion = harness.deleteDesign(fixture.designId);
+      await gate.entered;
+
+      const secret = "local-webhook-test-secret";
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const payload = JSON.stringify({
+        id: order.transactionId,
+        accountNumber: "1234567890",
+        code: order.paymentReference,
+        transferType: "in",
+        transferAmount: 1000,
+      });
+      const signature = createHmac("sha256", secret)
+        .update(`${timestamp}.${payload}`)
+        .digest("hex");
+      const paymentEnv = {
+        ...harness.env,
+        PAYMENT_MODE: "mock",
+        SEPAY_WEBHOOK_SECRET: secret,
+        SEPAY_BANK_ACCOUNT: "1234567890",
+      } as Parameters<typeof handleApiRequest>[1];
+      const webhook = await handleApiRequest(
+        new Request("https://crushify.test/api/v1/payments/sepay/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-SePay-Timestamp": timestamp,
+            "X-SePay-Signature": `sha256=${signature}`,
+          },
+          body: payload,
+        }),
+        paymentEnv,
+      );
+      assert.equal(webhook.status, 200);
+      gate.release();
+      assert.notEqual((await deletion).status, 409);
+
+      const duplicateWebhook = await handleApiRequest(
+        new Request("https://crushify.test/api/v1/payments/sepay/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-SePay-Timestamp": timestamp,
+            "X-SePay-Signature": `sha256=${signature}`,
+          },
+          body: payload,
+        }),
+        paymentEnv,
+      );
+      assert.equal(duplicateWebhook.status, 200);
+      const state = await client.execute({
+        sql: `SELECT o.status AS order_status, f.status AS fulfillment_status,
+                p.status AS publication_status, s.data_json, s.content_sha256
+              FROM orders o JOIN fulfillment_jobs f ON f.order_id = o.id
+              JOIN publications p ON p.order_id = o.id
+              JOIN order_design_snapshots s ON s.order_id = o.id
+              WHERE o.id = ?`,
+        args: [order.orderId],
+      });
+      assert.equal(state.rows.length, 1);
+      assert.equal(state.rows[0]?.order_status, "FULFILLED");
+      assert.equal(state.rows[0]?.fulfillment_status, "COMPLETED");
+      assert.equal(state.rows[0]?.publication_status, "UNPUBLISHED");
+      assert.equal(state.rows[0]?.data_json, order.dataJson);
+      assert.equal(
+        state.rows[0]?.content_sha256,
+        createHash("sha256").update(order.dataJson).digest("hex"),
+      );
+    } finally {
+      client.close();
+    }
+  });
+
+  it("blocks deletion during paid fulfillment and fulfills the immutable snapshot", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      const session = await createSession(client, fixture.customerId);
+      const env = deletionContext(adapter, storage.storage, session).env;
+      assert.equal((await saveDesignWithAsset(
+        env, session, client, fixture.designId, fixture.assetId,
+      )).status, 200);
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      const order = await createOrderSnapshot(client, fixture, {
+        paid: true,
+        assetId: fixture.assetId,
+      });
+      const harness = deletionContext(adapter, storage.storage, session);
+
+      assert.equal((await harness.deleteDesign(fixture.designId)).status, 409);
+      assert.ok(await storage.storage.get(fixture.sourceKey));
+      const result = await handleFulfillmentForOrder({
+        ...env,
+        PAYMENT_MODE: "mock",
+      } as Parameters<typeof handleFulfillmentForOrder>[0], order.orderId, NOW);
+      assert.equal(result.completed, true);
+
+      const published = await client.execute({
+        sql: `SELECT o.status AS order_status, p.status AS publication_status,
+                s.data_json, pa.asset_id, a.status AS asset_status
+              FROM orders o JOIN publications p ON p.order_id = o.id
+              JOIN order_design_snapshots s ON s.order_id = o.id
+              JOIN publication_assets pa ON pa.publication_id = p.id
+              JOIN assets a ON a.id = pa.asset_id
+              WHERE o.id = ?`,
+        args: [order.orderId],
+      });
+      assert.equal(published.rows[0]?.order_status, "FULFILLED");
+      assert.equal(published.rows[0]?.publication_status, "PUBLISHED");
+      assert.equal(published.rows[0]?.data_json, order.dataJson);
+      assert.equal(published.rows[0]?.asset_id, fixture.assetId);
+      assert.equal(published.rows[0]?.asset_status, "READY");
+      assert.ok(await storage.storage.get(fixture.sourceKey));
+    } finally {
+      client.close();
+    }
+  });
+
+  it("serializes design deletion against an in-flight fulfillment claim", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const gate = deferred();
+    const entered = deferred();
+    const storage = createRaceStorage({
+      beforeDerivative: async () => {
+        entered.resolve();
+        await gate.promise;
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      const session = await createSession(client, fixture.customerId);
+      const env = deletionContext(adapter, storage.storage, session).env;
+      assert.equal((await saveDesignWithAsset(
+        env, session, client, fixture.designId, fixture.assetId,
+      )).status, 200);
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      const order = await createOrderSnapshot(client, fixture, {
+        paid: true,
+        assetId: fixture.assetId,
+      });
+      const fulfillment = handleFulfillmentForOrder(
+        { ...env, PAYMENT_MODE: "mock" } as Parameters<typeof handleFulfillmentForOrder>[0],
+        order.orderId,
+        NOW,
+      );
+      await entered.promise;
+
+      assert.equal((await deletionContext(adapter, storage.storage, session)
+        .deleteDesign(fixture.designId)).status, 409);
+      gate.resolve();
+      assert.equal((await fulfillment).completed, true);
+      assert.ok(await storage.storage.get(fixture.sourceKey));
+    } finally {
+      gate.resolve();
+      client.close();
+    }
+  });
+
+  it("retains paid content through failure, deletion request, retry, and post-fulfillment deletion", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const order = await createOrderSnapshot(client, fixture, { paid: true });
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const env = { ...harness.env, PAYMENT_MODE: "mock" } as Parameters<
+        typeof handleFulfillmentForOrder
+      >[1];
+      await client.execute(`CREATE TRIGGER fail_first_publication
+        BEFORE INSERT ON publications
+        BEGIN SELECT RAISE(ABORT, 'controlled fulfillment failure'); END`);
+
+      const failed = await handleFulfillmentForOrder(env, order.orderId, NOW);
+      assert.equal(failed.completed, false);
+      assert.equal(failed.retryable, true);
+      assert.equal((await harness.deleteDesign(fixture.designId)).status, 409);
+      await client.execute("DROP TRIGGER fail_first_publication");
+      await client.execute(
+        "UPDATE fulfillment_jobs SET next_attempt_at = ? WHERE order_id = ?",
+        [NOW.toISOString(), order.orderId],
+      );
+
+      const retried = await handleFulfillmentForOrder(env, order.orderId, NOW);
+      assert.equal(retried.completed, true);
+      const beforeDeletion = await client.execute(
+        "SELECT data_json FROM order_design_snapshots WHERE order_id = ?",
+        [order.orderId],
+      );
+      assert.equal(beforeDeletion.rows[0]?.data_json, order.dataJson);
+      assert.notEqual((await harness.deleteDesign(fixture.designId)).status, 409);
+
+      const afterDeletion = await client.execute({
+        sql: `SELECT o.status AS order_status, s.data_json, p.status AS publication_status
+              FROM orders o JOIN order_design_snapshots s ON s.order_id = o.id
+              JOIN publications p ON p.order_id = o.id WHERE o.id = ?`,
+        args: [order.orderId],
+      });
+      assert.equal(afterDeletion.rows[0]?.order_status, "FULFILLED");
+      assert.equal(afterDeletion.rows[0]?.data_json, order.dataJson);
+      assert.ok(["PUBLISHED", "UNPUBLISHED", "REVOKED"].includes(
+        String(afterDeletion.rows[0]?.publication_status),
+      ));
+    } finally {
+      client.close();
+    }
+  });
+
+  it("retains paid snapshot assets when deleting a revoked published design", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "REVOKED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected paid publication asset fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute({
+        sql: `INSERT INTO order_asset_refs (order_id, asset_id, created_at) VALUES (?, ?, ?)`,
+        args: [fixture.orderId, fixture.assetId, NOW.toISOString()],
+      });
+      const session = await createSession(client, fixture.customerId);
+      const response = await deletionContext(adapter, storage.storage, session)
+        .deleteDesign(fixture.designId);
+
+      assert.equal(response.status, 202);
+      const protectedState = await client.execute({
+        sql: `SELECT d.status AS design_status, a.status AS asset_status,
+                o.status AS order_status, p.status AS publication_status
+              FROM designs d JOIN assets a ON a.design_id = d.id
+              JOIN orders o ON o.design_id = d.id
+              JOIN publications p ON p.design_id = d.id
+              WHERE d.id = ?`,
+        args: [fixture.designId],
+      });
+      assert.deepEqual(protectedState.rows[0], {
+        design_status: "DELETION_PENDING",
+        asset_status: "READY",
+        order_status: "FULFILLED",
+        publication_status: "REVOKED",
+      });
+      assert.ok(await storage.storage.get(fixture.sourceKey));
     } finally {
       client.close();
     }
@@ -1442,7 +2168,360 @@ describe("publication expiration lifecycle", () => {
 
 });
 
+describe("checkout revision snapshot integrity", () => {
+  it("creates an immutable checkout snapshot and pins every referenced asset", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      const now = NOW.toISOString();
+      await client.batch([
+        {
+          sql: `INSERT INTO template_prices (
+            id, template_id, schema_version, currency, amount_minor, is_active, created_at, updated_at
+          ) VALUES (?, 'our-universe', 1, 'VND', 1000, 1, ?, ?)`,
+          args: [randomUUID(), now, now],
+        },
+        {
+          sql: `INSERT INTO storage_plan_prices (
+            id, storage_plan_id, currency, amount_minor, is_active, created_at, updated_at
+          ) VALUES (?, '1-month', 'VND', 1000, 1, ?, ?)`,
+          args: [randomUUID(), now, now],
+        },
+      ]);
+      const session = await createSession(client, fixture.customerId);
+      const env = {
+        DB: adapter,
+        STORAGE: storage.storage,
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+        LOCAL_TEST_CATALOG_OVERRIDE: "true",
+        LOCAL_TEST_PRICING_POLICY: "true",
+        PAYMENT_MODE: "mock",
+        APP_ORIGIN: "https://crushify.test",
+      } as Parameters<typeof handleApiRequest>[1];
+      assert.equal((await saveDesignWithAsset(
+        env, session, client, fixture.designId, fixture.assetId,
+      )).status, 200);
+      const checkout = await assetRequest(env, session, "/orders", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": randomUUID(),
+        },
+        body: JSON.stringify({
+          design_id: fixture.designId,
+          storage_plan_id: "1-month",
+          asset_consents: [],
+        }),
+      });
+      assert.equal(checkout.status, 201, await checkout.clone().text());
+      const order = await checkout.json() as { order_id: string; design_revision: number };
+      assert.equal(order.design_revision, 2);
+
+      const snapshot = await client.execute(
+        `SELECT snapshot.design_revision, snapshot.data_json, snapshot.content_sha256,
+           (SELECT COUNT(*) FROM order_asset_refs ref WHERE ref.order_id = snapshot.order_id) AS asset_pins
+         FROM order_design_snapshots snapshot WHERE snapshot.order_id = ?`,
+        [order.order_id],
+      );
+      assert.equal(snapshot.rows[0]?.design_revision, 2);
+      assert.equal(snapshot.rows[0]?.asset_pins, 1);
+      assert.equal(
+        createHash("sha256").update(String(snapshot.rows[0]?.data_json)).digest("hex"),
+        snapshot.rows[0]?.content_sha256,
+      );
+
+      const current = await client.execute(
+        "SELECT data_json FROM designs WHERE id = ?",
+        [fixture.designId],
+      );
+      const currentData = JSON.parse(String(current.rows[0]?.data_json)) as Record<string, unknown>;
+      currentData.photos = [];
+      const edited = await assetRequest(env, session, `/designs/${fixture.designId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schema_version: 1, expected_revision: 2, data: currentData }),
+      });
+      assert.equal(edited.status, 200);
+      const deletion = await assetRequest(
+        env, session, `/assets/${fixture.assetId}`, { method: "DELETE" },
+      );
+      assert.equal(deletion.status, 409);
+
+      const immutable = await client.execute(
+        "SELECT data_json FROM order_design_snapshots WHERE order_id = ?",
+        [order.order_id],
+      );
+      assert.ok(JSON.parse(String(immutable.rows[0]?.data_json)).photos.some(
+        (photo: { asset_id: string }) => photo.asset_id === fixture.assetId,
+      ));
+      await assert.rejects(client.execute(
+        "UPDATE order_design_snapshots SET data_json = '{}' WHERE order_id = ?",
+        [order.order_id],
+      ));
+    } finally {
+      client.close();
+    }
+  });
+
+  it("fulfills the checked-out revision after a pending-order edit and recovers idempotently", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const orderId = randomUUID();
+      const paymentId = randomUUID();
+      const providerPaymentId = randomUUID();
+      const now = NOW.toISOString();
+      const original = await client.execute(
+        "SELECT data_json FROM designs WHERE id = ?",
+        [fixture.designId],
+      );
+      const originalData = String(original.rows[0]?.data_json);
+      const snapshotHash = createHash("sha256").update(originalData).digest("hex");
+      await client.batch([
+        {
+          sql: `INSERT INTO orders (
+            id, customer_id, order_type, status, currency, subtotal_minor,
+            discount_minor, total_minor, design_id, idempotency_key,
+            created_at, updated_at, expires_at, order_reference, design_revision,
+            request_hash, payment_review_required
+          ) VALUES (?, ?, 'SELF_SERVICE', 'AWAITING_PAYMENT', 'VND', 1000, 0,
+            1000, ?, ?, ?, ?, '2100-01-01T00:00:00.000Z', ?, 1, ?, 0)`,
+          args: [orderId, fixture.customerId, fixture.designId, randomUUID(), now, now,
+            `CRF${randomUUID().replaceAll("-", "").slice(0, 16)}`, "a".repeat(64)],
+        },
+        {
+          sql: `INSERT INTO order_items (
+            id, order_id, item_type, reference_id, description_snapshot, quantity,
+            unit_amount_minor, line_total_minor, metadata_json, created_at
+          ) VALUES (?, ?, 'TEMPLATE_LICENSE', 'our-universe', 'Our Universe', 1,
+            1000, 1000, ?, ?)`,
+          args: [randomUUID(), orderId, '{"schema_version":1}', now],
+        },
+        {
+          sql: `INSERT INTO order_items (
+            id, order_id, item_type, reference_id, description_snapshot, quantity,
+            unit_amount_minor, line_total_minor, metadata_json, created_at
+          ) VALUES (?, ?, 'ADD_ON', '1-month', '1 month', 1, 0, 0, ?, ?)`,
+          args: [randomUUID(), orderId, JSON.stringify({
+            kind: "STORAGE_PLAN",
+            storage_plan_id: "1-month",
+            title: "1 month",
+            duration_months: 1,
+            lifetime: false,
+            pricing_snapshot: { total_minor: 1000 },
+            asset_consents: [],
+          }), now],
+        },
+        {
+          sql: `INSERT INTO payments (
+            id, order_id, provider, status, amount_minor, currency,
+            idempotency_key, created_at, updated_at, payment_reference, review_required
+          ) VALUES (?, ?, 'SEPAY', 'PENDING', 1000, 'VND', ?, ?, ?, ?, 0)`,
+          args: [paymentId, orderId, `order:${orderId}`, now, now, `CRP${randomUUID()}`],
+        },
+        {
+          sql: `INSERT INTO order_design_snapshots (
+            order_id, design_id, design_revision, template_id, schema_version,
+            data_json, content_sha256, created_at
+          ) VALUES (?, ?, 1, 'our-universe', 1, ?, ?, ?)`,
+          args: [orderId, fixture.designId, originalData, snapshotHash, now],
+        },
+        {
+          sql: `INSERT INTO fulfillment_jobs (
+            id, order_id, status, attempts, created_at, updated_at
+          ) VALUES (?, ?, 'PENDING', 0, ?, ?)`,
+          args: [randomUUID(), orderId, now, now],
+        },
+      ]);
+
+      const editedData = JSON.parse(originalData) as Record<string, unknown>;
+      editedData.headline = "Edited while checkout was pending";
+      const editedJson = JSON.stringify(editedData);
+      await client.batch([
+        {
+          sql: `UPDATE designs SET data_json = ?, revision = 2, updated_at = ?
+                WHERE id = ? AND revision = 1 AND status = 'DRAFT'`,
+          args: [editedJson, now, fixture.designId],
+        },
+        {
+          sql: `INSERT INTO design_revisions (design_id, revision, data_json, created_at)
+                VALUES (?, 2, ?, ?)`,
+          args: [fixture.designId, editedJson, now],
+        },
+      ]);
+
+      await client.batch([
+        {
+          sql: `UPDATE orders SET status = 'PAID', paid_at = ?, updated_at = ? WHERE id = ?`,
+          args: [now, now, orderId],
+        },
+        {
+          sql: `UPDATE payments SET status = 'SUCCEEDED', provider_payment_id = ?,
+                  succeeded_at = ?, updated_at = ? WHERE id = ?`,
+          args: [providerPaymentId, now, now, paymentId],
+        },
+        {
+          sql: `INSERT INTO payment_webhook_events (
+            id, provider, event_id, payload_hash, received_at, processed_at, outcome, raw_payload
+          ) VALUES (?, 'SEPAY', ?, ?, ?, ?, 'PROCESSED', '{}')`,
+          args: [randomUUID(), providerPaymentId, "b".repeat(64), now, now],
+        },
+      ]);
+
+      const session = await createSession(client, fixture.customerId);
+      const env = {
+        DB: adapter,
+        STORAGE: storage.storage,
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+        PAYMENT_MODE: "mock",
+        APP_ORIGIN: "https://crushify.test",
+      } as Parameters<typeof handleApiRequest>[1];
+      await client.execute(
+        `CREATE TRIGGER fail_snapshot_entitlement_once
+         BEFORE INSERT ON storage_entitlements
+         WHEN NEW.order_id = '${orderId}'
+         BEGIN SELECT RAISE(ABORT, 'controlled first-fulfillment failure'); END`,
+      );
+      const firstAttempt = await handleFulfillmentForOrder(env, orderId, NOW);
+      assert.equal(firstAttempt.completed, false);
+      assert.equal(firstAttempt.retryable, true);
+
+      const lateEdit = { ...editedData, headline: "Edit after payment" };
+      const lateEditResponse = await assetRequest(env, session, `/designs/${fixture.designId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schema_version: 1, expected_revision: 2, data: lateEdit }),
+      });
+      assert.equal(lateEditResponse.status, 200);
+
+      await client.execute("DROP TRIGGER fail_snapshot_entitlement_once");
+      const retryAt = await client.execute(
+        "SELECT next_attempt_at FROM fulfillment_jobs WHERE order_id = ?",
+        [orderId],
+      );
+      const retryTime = new Date(String(retryAt.rows[0]?.next_attempt_at));
+      retryTime.setTime(retryTime.getTime() + 1);
+      const retry = await handleFulfillmentForOrder(env, orderId, retryTime);
+      assert.deepEqual(retry, { completed: true, retryable: false });
+
+      const result = await client.execute({
+        sql:         `SELECT o.status AS order_status, d.revision AS current_revision, d.data_json,
+                snapshot.design_revision, p.published_revision, p.snapshot_json
+              FROM orders o
+              JOIN designs d ON d.id = o.design_id
+              JOIN order_design_snapshots snapshot ON snapshot.order_id = o.id
+              JOIN publications p ON p.order_id = o.id
+              WHERE o.id = ?`,
+        args: [orderId],
+      });
+      const row = result.rows[0]!;
+      assert.equal(row.order_status, "FULFILLED");
+      assert.equal(row.current_revision, 3);
+      assert.equal(row.design_revision, 1);
+      assert.equal(row.published_revision, 1);
+      assert.equal(
+        (JSON.parse(String(row.data_json)) as { headline: string }).headline,
+        "Edit after payment",
+      );
+      assert.equal(
+        (JSON.parse(String(row.snapshot_json)) as { data: { headline: string } }).data.headline,
+        (JSON.parse(originalData) as { headline: string }).headline,
+      );
+    } finally {
+      client.close();
+    }
+  });
+});
+
 describe("upload and design deletion concurrency", () => {
+  it("serializes design reference creation before asset deletion", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const database = new PausableDatabase(adapter);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(database, storage.storage, session);
+      const deletionGate = database.pauseNextBatch();
+      const deletion = assetRequest(
+        harness.env, session, `/assets/${fixture.assetId}`, { method: "DELETE" },
+      );
+      await deletionGate.entered;
+
+      const saved = await saveDesignWithAsset(
+        harness.env, session, client, fixture.designId, fixture.assetId,
+      );
+      assert.equal(saved.status, 200);
+      deletionGate.release();
+
+      assert.equal((await deletion).status, 409);
+      const state = await client.execute({
+        sql: `SELECT a.status, COUNT(ref.asset_id) AS references_count
+              FROM assets a LEFT JOIN design_asset_refs ref ON ref.asset_id = a.id
+              WHERE a.id = ? GROUP BY a.id`,
+        args: [fixture.assetId],
+      });
+      assert.deepEqual(state.rows[0], { status: "READY", references_count: 1 });
+      assert.equal(storage.objects.size, 1);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("refuses a design reference when asset deletion wins the serialization race", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const database = new PausableDatabase(adapter);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(database, storage.storage, session);
+      const saveGate = database.pauseNextBatch();
+      const save = saveDesignWithAsset(
+        harness.env, session, client, fixture.designId, fixture.assetId,
+      );
+      await saveGate.entered;
+
+      const deleted = await assetRequest(
+        harness.env, session, `/assets/${fixture.assetId}`, { method: "DELETE" },
+      );
+      assert.equal(deleted.status, 200);
+      saveGate.release();
+
+      assert.equal((await save).status, 409);
+      const state = await client.execute({
+        sql: `SELECT a.status, d.data_json,
+                (SELECT COUNT(*) FROM design_asset_refs ref WHERE ref.asset_id = a.id) AS references_count
+              FROM assets a JOIN designs d ON d.id = a.design_id WHERE a.id = ?`,
+        args: [fixture.assetId],
+      });
+      assert.equal(state.rows[0]?.status, "DELETED");
+      assert.equal(state.rows[0]?.references_count, 0);
+      assert.equal(JSON.parse(String(state.rows[0]?.data_json)).photos.length, 0);
+      assert.equal(storage.objects.size, 0);
+    } finally {
+      client.close();
+    }
+  });
+
   it("reproduces upload initiation racing after deletion and refuses the archived design", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -1610,10 +2689,17 @@ describe("upload and design deletion concurrency", () => {
     }
   });
 
-  it("recovers an expired upload lease before retrying deletion", async () => {
+  it("reconciles late provider success after an expired upload lease and design deletion", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
-    const storage = createRaceStorage();
+    const uploadStarted = deferred();
+    const releaseUpload = deferred();
+    const storage = createRaceStorage({
+      beforeUpload: async () => {
+        uploadStarted.resolve();
+        await releaseUpload.promise;
+      },
+    });
     try {
       await client.execute("PRAGMA foreign_keys = ON");
       await applyMigrations(client, await loadMigrations());
@@ -1622,22 +2708,7 @@ describe("upload and design deletion concurrency", () => {
       const harness = deletionContext(adapter, storage.storage, session);
       const grant = await createUploadGrant(harness.env, session, fixture.designId);
       assert.equal(grant.response.status, 201);
-      const asset = await client.execute(
-        "SELECT object_key FROM assets WHERE id = ?",
-        [grant.body.asset_id],
-      );
-      const objectKey = String(asset.rows[0]?.object_key);
-      await storage.storage.upload(objectKey, UPLOAD_PNG, { contentType: "image/png" });
-      await client.execute(
-        `UPDATE asset_upload_sessions
-         SET status = 'UPLOADING', used_at = ?, lease_expires_at = '2000-01-01T00:00:00.000Z'
-         WHERE asset_id = ?`,
-        [NOW.toISOString(), grant.body.asset_id],
-      );
-
-      const deleted = await harness.deleteDesign(fixture.designId);
-      assert.equal(deleted.status, 200);
-      const staleUpload = await assetRequest(
+      const upload = assetRequest(
         harness.env,
         session,
         grant.body.upload_url.replace("/api/v1", ""),
@@ -1650,8 +2721,30 @@ describe("upload and design deletion concurrency", () => {
           body: new Blob([UPLOAD_PNG], { type: "image/png" }),
         },
       );
-      assert.equal(staleUpload.status, 409);
-      assert.equal(storage.objects.size, 0);
+      await uploadStarted.promise;
+      const attempt = await client.execute(
+        "SELECT object_key FROM asset_upload_attempts WHERE asset_id = ? AND status = 'UPLOADING'",
+        [grant.body.asset_id],
+      );
+      const objectKey = String(attempt.rows[0]?.object_key);
+      await client.execute(
+        `UPDATE asset_upload_sessions
+         SET status = 'UPLOADING', used_at = ?, lease_expires_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ?`,
+        [NOW.toISOString(), grant.body.asset_id],
+      );
+      await client.execute(
+        `UPDATE asset_upload_attempts
+         SET lease_expires_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ? AND status = 'UPLOADING'`,
+        [grant.body.asset_id],
+      );
+
+      const deleted = await harness.deleteDesign(fixture.designId);
+      assert.equal(deleted.status, 200);
+      releaseUpload.resolve();
+      assert.equal((await upload).status, 503);
+      assert.equal(storage.objects.size, 1);
       const state = await client.execute({
         sql: `SELECT d.status AS design_status, a.status AS asset_status, u.status AS upload_status
               FROM designs d JOIN assets a ON a.design_id = d.id
@@ -1663,11 +2756,13 @@ describe("upload and design deletion concurrency", () => {
         asset_status: "DELETED",
         upload_status: "CANCELLED",
       });
-      await storage.storage.upload(objectKey, UPLOAD_PNG, { contentType: "image/png" });
-      assert.equal(storage.objects.size, 1);
-      assert.equal((await harness.deleteDesign(fixture.designId)).status, 200);
+      const reconciled = await reconcileUploadAttemptCleanup(harness.env, {
+        now: new Date(Date.now() + 2 * 60 * 60_000),
+      });
+      assert.equal(reconciled.cleaned, 1);
       assert.equal(storage.objects.size, 0);
     } finally {
+      releaseUpload.resolve();
       client.close();
     }
   });
@@ -1712,6 +2807,166 @@ describe("upload and design deletion concurrency", () => {
     }
   });
 
+  it("fences an expired upload worker and cleans only its unique stale object", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const uploadStarted = deferred();
+    const releaseFirstUpload = deferred();
+    let uploadCount = 0;
+    const storage = createRaceStorage({
+      beforeUpload: async () => {
+        uploadCount++;
+        if (uploadCount === 1) {
+          uploadStarted.resolve();
+          await releaseFirstUpload.promise;
+        }
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      const firstUpload = assetRequest(
+        harness.env, session, grant.body.upload_url.replace("/api/v1", ""), {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/png",
+          },
+          body: new Blob([UPLOAD_PNG], { type: "image/png" }),
+        },
+      );
+      await uploadStarted.promise;
+      await client.execute(
+        `UPDATE asset_upload_sessions
+         SET lease_expires_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ?`,
+        [grant.body.asset_id],
+      );
+
+      const takeover = await assetRequest(
+        harness.env, session, grant.body.upload_url.replace("/api/v1", ""), {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/png",
+          },
+          body: new Blob([UPLOAD_PNG], { type: "image/png" }),
+        },
+      );
+      assert.equal(takeover.status, 204);
+      const completed = await assetRequest(
+        harness.env, session, `/assets/${grant.body.asset_id}/complete`, { method: "POST" },
+      );
+      assert.equal(completed.status, 200);
+      releaseFirstUpload.resolve();
+      assert.equal((await firstUpload).status, 503);
+
+      const current = await client.execute(
+        "SELECT object_key FROM assets WHERE id = ? AND status = 'READY'",
+        [grant.body.asset_id],
+      );
+      const currentKey = String(current.rows[0]?.object_key);
+      const stale = await client.execute(
+        `SELECT id, object_key, next_cleanup_at FROM asset_upload_attempts
+         WHERE asset_id = ? AND status = 'CLEANUP_PENDING'`,
+        [grant.body.asset_id],
+      );
+      assert.equal(stale.rows.length, 1);
+      assert.notEqual(stale.rows[0]?.object_key, currentKey);
+      assert.equal((await saveDesignWithAsset(
+        harness.env, session, client, fixture.designId, grant.body.asset_id,
+      )).status, 200);
+
+      const cleanupAt = new Date(String(stale.rows[0]?.next_cleanup_at));
+      cleanupAt.setTime(cleanupAt.getTime() + 1);
+      const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: cleanupAt });
+      assert.equal(cleanup.cleaned, 1);
+      assert.deepEqual([...storage.objects.keys()], [currentKey]);
+      const references = await client.execute(
+        "SELECT COUNT(*) AS count FROM design_asset_refs WHERE asset_id = ?",
+        [grant.body.asset_id],
+      );
+      assert.equal(references.rows[0]?.count, 1);
+    } finally {
+      releaseFirstUpload.resolve();
+      client.close();
+    }
+  });
+
+  it("reconciles an uncertain provider timeout without deleting a retried referenced asset", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    let uploadCount = 0;
+    const storage = createRaceStorage({
+      afterUpload: async () => {
+        uploadCount++;
+        if (uploadCount === 1) throw new Error("provider accepted upload but response timed out");
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      const requestUpload = () => assetRequest(
+        harness.env, session, grant.body.upload_url.replace("/api/v1", ""), {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/png",
+          },
+          body: new Blob([UPLOAD_PNG], { type: "image/png" }),
+        },
+      );
+      assert.equal((await requestUpload()).status, 503);
+      const uncertain = await client.execute(
+        `SELECT object_key, next_cleanup_at, status FROM asset_upload_attempts
+         WHERE asset_id = ?`,
+        [grant.body.asset_id],
+      );
+      assert.equal(uncertain.rows[0]?.status, "CLEANUP_PENDING");
+      assert.equal(storage.objects.size, 1);
+
+      assert.equal((await requestUpload()).status, 204);
+      assert.equal((await assetRequest(
+        harness.env, session, `/assets/${grant.body.asset_id}/complete`, { method: "POST" },
+      )).status, 200);
+      assert.equal((await saveDesignWithAsset(
+        harness.env, session, client, fixture.designId, grant.body.asset_id,
+      )).status, 200);
+      const current = await client.execute(
+        "SELECT object_key FROM assets WHERE id = ? AND status = 'READY'",
+        [grant.body.asset_id],
+      );
+      const currentKey = String(current.rows[0]?.object_key);
+
+      const cleanupAt = new Date(String(uncertain.rows[0]?.next_cleanup_at));
+      cleanupAt.setTime(cleanupAt.getTime() + 1);
+      const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: cleanupAt });
+      assert.equal(cleanup.cleaned, 1);
+      assert.deepEqual([...storage.objects.keys()], [currentKey]);
+      const state = await client.execute(
+        `SELECT a.status, a.object_key,
+           (SELECT COUNT(*) FROM design_asset_refs ref WHERE ref.asset_id = a.id) AS references_count
+         FROM assets a WHERE a.id = ?`,
+        [grant.body.asset_id],
+      );
+      assert.deepEqual(state.rows[0], {
+        status: "READY",
+        object_key: currentKey,
+        references_count: 1,
+      });
+    } finally {
+      client.close();
+    }
+  });
+
   it("retries cleanup when upload persistence and initial object deletion both fail", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -1746,11 +3001,24 @@ describe("upload and design deletion concurrency", () => {
         args: [grant.body.asset_id],
       });
       assert.deepEqual(pending.rows[0], {
-        asset_status: "DELETION_PENDING",
-        upload_status: "CANCELLED",
+        asset_status: "PENDING",
+        upload_status: "PENDING",
       });
-      assert.equal(storage.objects.size, 1);
       await client.execute("DROP TRIGGER reject_upload_metadata");
+
+      const firstDelete = await assetRequest(
+        harness.env, session, `/assets/${grant.body.asset_id}`, { method: "DELETE" },
+      );
+      assert.equal(firstDelete.status, 503);
+      const cleanupTime = await client.execute(
+        "SELECT next_cleanup_at FROM asset_upload_attempts WHERE asset_id = ?",
+        [grant.body.asset_id],
+      );
+      const cleanupAt = new Date(String(cleanupTime.rows[0]?.next_cleanup_at));
+      cleanupAt.setTime(cleanupAt.getTime() + 1);
+      const reconciled = await reconcileUploadAttemptCleanup(harness.env, { now: cleanupAt });
+      assert.equal(reconciled.cleaned, 1);
+      assert.equal(storage.objects.size, 0);
 
       const retriedCleanup = await assetRequest(
         harness.env, session, `/assets/${grant.body.asset_id}`, { method: "DELETE" },
@@ -1765,6 +3033,274 @@ describe("upload and design deletion concurrency", () => {
         "SELECT status FROM assets WHERE id = ?",
         [grant.body.asset_id],
       )).rows[0]?.status, "DELETED");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("reconciles an abandoned expired lease but leaves a live upload lease untouched", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const abandoned = await createUploadGrant(harness.env, session, fixture.designId);
+      const live = await createUploadGrant(harness.env, session, fixture.designId);
+      const now = new Date();
+      await insertUploadAttemptFixture(client, abandoned.body.asset_id, {
+        status: "UPLOADING",
+        leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+        nextCleanupAt: "2000-01-01T00:00:00.000Z",
+      });
+      await insertUploadAttemptFixture(client, live.body.asset_id, { status: "UPLOADING" });
+
+      const reconciled = await reconcileUploadAttemptCleanup(harness.env, { now });
+      assert.deepEqual(reconciled, {
+        processed: 1,
+        cleaned: 1,
+        preserved: 0,
+        retryable: 0,
+        manualReview: 0,
+      });
+      const abandonedState = await client.execute({
+        sql: `SELECT attempt.status AS attempt_status, session.status AS session_status,
+                asset.status AS asset_status
+              FROM asset_upload_attempts attempt
+              JOIN asset_upload_sessions session ON session.id = attempt.session_id
+              JOIN assets asset ON asset.id = attempt.asset_id
+              WHERE attempt.asset_id = ?`,
+        args: [abandoned.body.asset_id],
+      });
+      assert.deepEqual(abandonedState.rows[0], {
+        attempt_status: "CLEANED",
+        session_status: "CANCELLED",
+        asset_status: "REJECTED",
+      });
+
+      const liveCleanup = await reconcileUploadAttemptCleanup(harness.env, { now });
+      assert.equal(liveCleanup.processed, 0);
+      assert.equal((await client.execute(
+        "SELECT status FROM asset_upload_attempts WHERE asset_id = ?",
+        [live.body.asset_id],
+      )).rows[0]?.status, "UPLOADING");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("does not clean a valid ATTACHED attempt or an asset it no longer owns", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      assert.equal((await assetRequest(
+        harness.env, session, grant.body.upload_url.replace("/api/v1", ""), {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/png",
+          },
+          body: new Blob([UPLOAD_PNG], { type: "image/png" }),
+        },
+      )).status, 204);
+      assert.equal((await assetRequest(
+        harness.env, session, `/assets/${grant.body.asset_id}/complete`, { method: "POST" },
+      )).status, 200);
+      const attempt = await client.execute(
+        "SELECT object_key FROM asset_upload_attempts WHERE asset_id = ?",
+        [grant.body.asset_id],
+      );
+      const attachedKey = String(attempt.rows[0]?.object_key);
+      const currentKey = `private/current-${grant.body.asset_id}.png`;
+      await storage.storage.upload(currentKey, UPLOAD_PNG, { contentType: "image/png" });
+      await client.execute(
+        `UPDATE assets SET object_key = ? WHERE id = ?`,
+        [currentKey, grant.body.asset_id],
+      );
+      await client.execute(
+        `UPDATE asset_upload_attempts
+         SET next_cleanup_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ?`,
+        [grant.body.asset_id],
+      );
+
+      const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: new Date() });
+      assert.deepEqual(cleanup, {
+        processed: 1,
+        cleaned: 1,
+        preserved: 0,
+        retryable: 0,
+        manualReview: 0,
+      });
+      assert.equal(await storage.storage.get(attachedKey), null);
+      assert.ok(await storage.storage.get(currentKey));
+      const state = await client.execute(
+        "SELECT status, object_key FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      );
+      assert.deepEqual(state.rows[0], { status: "READY", object_key: currentKey });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("fences concurrent cleanup and retries late provider success on the next reconciliation", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const uploadStarted = deferred();
+    const releaseUpload = deferred();
+    const releaseDelete = deferred();
+    const deleteStarted = deferred();
+    const storage = createRaceStorage({
+      beforeUpload: async () => {
+        uploadStarted.resolve();
+        await releaseUpload.promise;
+      },
+      beforeDelete: async () => {
+        deleteStarted.resolve();
+        await releaseDelete.promise;
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      const upload = assetRequest(
+        harness.env, session, grant.body.upload_url.replace("/api/v1", ""), {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/png",
+          },
+          body: new Blob([UPLOAD_PNG], { type: "image/png" }),
+        },
+      );
+      await uploadStarted.promise;
+      await client.execute(
+        `UPDATE asset_upload_sessions SET lease_expires_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ?`,
+        [grant.body.asset_id],
+      );
+      await client.execute(
+        `UPDATE asset_upload_attempts
+         SET lease_expires_at = '2000-01-01T00:00:00.000Z',
+             next_cleanup_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ? AND status = 'UPLOADING'`,
+        [grant.body.asset_id],
+      );
+
+      const firstCleanup = reconcileUploadAttemptCleanup(harness.env, { now: NOW });
+      await deleteStarted.promise;
+      const overlappingCleanup = await reconcileUploadAttemptCleanup(harness.env, { now: NOW });
+      assert.equal(overlappingCleanup.processed, 0);
+      releaseDelete.resolve();
+      assert.equal((await firstCleanup).cleaned, 1);
+      releaseUpload.resolve();
+      assert.equal((await upload).status, 503);
+      assert.equal(storage.objects.size, 1, "late provider success is not cancelled by DB fencing");
+
+      const lateRetry = await reconcileUploadAttemptCleanup(harness.env, {
+        now: new Date(NOW.getTime() + 7 * 24 * 60 * 60_000 + 1),
+      });
+      assert.equal(lateRetry.cleaned, 1);
+      assert.equal(storage.objects.size, 0);
+      assert.equal((await client.execute(
+        "SELECT reconciliation_state FROM asset_upload_attempts WHERE asset_id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.reconciliation_state, "ACTIVE");
+    } finally {
+      releaseDelete.resolve();
+      releaseUpload.resolve();
+      client.close();
+    }
+  });
+
+  it("moves exhausted cleanup retries to manual review and stops automated retries", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage({ sourceDeleteFailures: 8 });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      const attempt = await insertUploadAttemptFixture(client, grant.body.asset_id);
+      const objectKey = attempt.objectKey;
+      await storage.storage.upload(objectKey, UPLOAD_PNG, { contentType: "image/png" });
+      await client.execute(
+        `UPDATE asset_upload_attempts
+         SET status = 'CLEANUP_PENDING', cleanup_attempts = 7,
+             next_cleanup_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ?`,
+        [grant.body.asset_id],
+      );
+
+      const exhausted = await reconcileUploadAttemptCleanup(harness.env, { now: NOW });
+      assert.equal(exhausted.retryable, 1);
+      assert.equal(exhausted.manualReview, 1);
+      const state = await client.execute(
+        `SELECT status, reconciliation_state, cleanup_attempts
+         FROM asset_upload_attempts WHERE asset_id = ?`,
+        [grant.body.asset_id],
+      );
+      assert.deepEqual(state.rows[0], {
+        status: "CLEANUP_PENDING",
+        reconciliation_state: "MANUAL_REVIEW",
+        cleanup_attempts: 8,
+      });
+      const later = await reconcileUploadAttemptCleanup(harness.env, {
+        now: new Date(NOW.getTime() + 30 * 24 * 60 * 60_000),
+      });
+      assert.equal(later.processed, 0);
+      assert.ok(await storage.storage.get(objectKey));
+    } finally {
+      client.close();
+    }
+  });
+
+  it("runs upload cleanup through the scheduled lifecycle", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      await insertUploadAttemptFixture(client, grant.body.asset_id, {
+        nextCleanupAt: "2000-01-01T00:00:00.000Z",
+      });
+
+      const run = await runScheduledPublicationLifecycle(harness.env, { now: NOW, limit: 10 });
+      assert.equal(run.acquired, true);
+      const recorded = await client.execute(
+        "SELECT result_json FROM scheduled_task_runs WHERE status = 'COMPLETED'",
+      );
+      const result = JSON.parse(String(recorded.rows[0]?.result_json)) as {
+        uploadCleanup: { cleaned: number };
+      };
+      assert.equal(result.uploadCleanup.cleaned, 1);
+      assert.equal((await client.execute(
+        "SELECT status FROM asset_upload_attempts WHERE asset_id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.status, "CLEANED");
     } finally {
       client.close();
     }

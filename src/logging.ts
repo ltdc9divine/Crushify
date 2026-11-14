@@ -16,6 +16,10 @@ export interface SafeLogContext {
     retryable?: number;
     completed?: number;
     manual_review?: number;
+    upload_cleanup_processed?: number;
+    upload_cleanup_cleaned?: number;
+    upload_cleanup_retryable?: number;
+    upload_cleanup_manual_review?: number;
   };
 }
 
@@ -37,7 +41,11 @@ const safeCategories = new Set<LogCategory>([
   "payment",
   "storage",
 ]);
-const safeCountKeys = ["expired", "erased", "retryable", "completed", "manual_review"] as const;
+const safeCountKeys = [
+  "expired", "erased", "retryable", "completed", "manual_review",
+  "upload_cleanup_processed", "upload_cleanup_cleaned", "upload_cleanup_retryable",
+  "upload_cleanup_manual_review",
+] as const;
 const eventPattern = /^[a-z][a-z0-9._-]{0,80}$/;
 
 function errorType(error: unknown): string {
