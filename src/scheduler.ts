@@ -1,7 +1,13 @@
 import { randomToken, safeId } from "./http.ts";
-import { logSafeError } from "./logging.ts";
+import { logSafeError, logSafeInfo } from "./logging.ts";
 import { resolvePaymentEnvironmentPolicy } from "./payments/policy.ts";
-import { recoverPendingFulfillments, runPublicationLifecycle } from "./publications.ts";
+import { recoverPendingSePayWebhookEvents } from "./payments.ts";
+import {
+  reconcilePublicationDerivativeCleanup,
+  recoverPendingFulfillments,
+  runPublicationLifecycle,
+  type PublicationDerivativeCleanupResult,
+} from "./publications.ts";
 import { reconcileUploadAttemptCleanup } from "./assets.ts";
 import { DatabaseError } from "./database.ts";
 import type { Env } from "./types.ts";
@@ -59,10 +65,15 @@ export async function runScheduledPublicationLifecycle(
 ): Promise<{
   acquired: boolean;
   failed?: boolean;
+  pending?: boolean;
   expired?: number;
   erased?: number;
   retryable?: number;
   operations?: {
+    sepayWebhookRecovery: ScheduledOperation<{
+      attempted: number;
+      pending: number;
+    }>;
     fulfillmentRecovery: ScheduledOperation<{
       attempted: number;
       completed: number;
@@ -79,6 +90,16 @@ export async function runScheduledPublicationLifecycle(
       cleaned: number;
       retryable: number;
       manualReview: number;
+    }>;
+    publicationDerivativeCleanup: ScheduledOperation<{
+      status: PublicationDerivativeCleanupResult["status"];
+      processed: number;
+      cleaned: number;
+      pending: number;
+      deferred: number;
+      retryable: number;
+      manualReview: number;
+      hasMore: boolean;
     }>;
   };
 }> {
@@ -97,7 +118,16 @@ export async function runScheduledPublicationLifecycle(
       `INSERT INTO scheduled_task_runs (id, task_name, status, started_at)
        VALUES (?, ?, 'RUNNING', ?)`,
     ).bind(runId, TASK_NAME, startedAt).run();
-    const fulfillmentRecovery = resolvePaymentEnvironmentPolicy(env).fulfillmentEnabled
+    const paymentPolicy = resolvePaymentEnvironmentPolicy(env);
+    const sepayWebhookRecovery = paymentPolicy.sepayWebhookEnabled
+      ? await runOperation(
+        "sepay_webhook_recovery",
+        "payment",
+        env,
+        () => recoverPendingSePayWebhookEvents(env, limit),
+      )
+      : { status: "skipped", reason: "runtime_policy" } as const;
+    const fulfillmentRecovery = paymentPolicy.fulfillmentEnabled
       ? await runOperation(
         "fulfillment_recovery",
         "payment",
@@ -117,16 +147,59 @@ export async function runScheduledPublicationLifecycle(
       env,
       () => reconcileUploadAttemptCleanup(env, { now, limit }),
     );
-    const failed = [fulfillmentRecovery, publicationLifecycle, uploadCleanup]
-      .some((operation) => operation.status === "failed");
+    const publicationDerivativeCleanup = await runOperation(
+      "publication_derivative_cleanup",
+      "lifecycle",
+      env,
+      () => reconcilePublicationDerivativeCleanup(env, { now, limit }),
+    );
+    if (publicationDerivativeCleanup.status === "completed") {
+      const cleanup = publicationDerivativeCleanup.result;
+      logSafeInfo(`scheduler.derivative_cleanup_${cleanup.status}`, "lifecycle", {
+        environment: env.ENVIRONMENT,
+        counts: {
+          derivative_cleanup_processed: cleanup.processed,
+          derivative_cleanup_cleaned: cleanup.cleaned,
+          derivative_cleanup_pending: cleanup.pending,
+          derivative_cleanup_deferred: cleanup.deferred,
+          derivative_cleanup_failed: cleanup.status === "failed" ? cleanup.retryable : 0,
+          derivative_cleanup_retryable: cleanup.retryable,
+          derivative_cleanup_manual_review: cleanup.manualReview,
+          derivative_cleanup_has_more: cleanup.hasMore ? 1 : 0,
+        },
+      });
+    }
+    const cleanupResult = publicationDerivativeCleanup.status === "completed"
+      ? publicationDerivativeCleanup.result
+      : null;
+    const cleanupFailed = cleanupResult?.status === "failed" ||
+      cleanupResult?.status === "manual_review";
+    const pending = cleanupResult?.status === "pending" ||
+      cleanupResult?.status === "deferred" ||
+      (publicationLifecycle.status === "completed" &&
+        publicationLifecycle.result.retryable > 0) ||
+      (uploadCleanup.status === "completed" &&
+        (uploadCleanup.result.retryable > 0 || uploadCleanup.result.manualReview > 0)) ||
+      (fulfillmentRecovery.status === "completed" &&
+        (fulfillmentRecovery.result.retryable > 0 || fulfillmentRecovery.result.manualReview > 0)) ||
+      (sepayWebhookRecovery.status === "completed" &&
+        sepayWebhookRecovery.result.pending > 0);
+    const failed = [
+      sepayWebhookRecovery, fulfillmentRecovery, publicationLifecycle, uploadCleanup,
+      publicationDerivativeCleanup,
+    ]
+      .some((operation) => operation.status === "failed") || cleanupFailed;
     const result = {
       acquired: true,
       failed,
+      pending: Boolean(pending),
       ...(publicationLifecycle.status === "completed" ? publicationLifecycle.result : {}),
       operations: {
+        sepayWebhookRecovery,
         fulfillmentRecovery,
         publicationLifecycle,
         uploadCleanup,
+        publicationDerivativeCleanup,
       },
     };
     await env.DB.prepare(

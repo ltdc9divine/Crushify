@@ -14,6 +14,7 @@ import {
   resolvePaymentEnvironmentPolicy,
   type PaymentProviderId,
 } from "./payments/policy.ts";
+import { verifiedSettlementEvidence } from "./payments/evidence.ts";
 import { assetReferences, type TemplateData } from "./template-registry.ts";
 import { handleFulfillmentForOrder } from "./publications.ts";
 import {
@@ -36,6 +37,7 @@ import { entitlementExpiry } from "./storage-plans.ts";
 import type { Env } from "./types.ts";
 
 const ORDER_LIFETIME_MINUTES = 15;
+const MANUAL_ORDER_LIFETIME_MINUTES = 24 * 60;
 const SEPAY_PROVIDER = sepayPaymentProvider.id;
 
 interface OrderRow {
@@ -61,6 +63,7 @@ interface OrderRow {
   storage_lifetime: number;
   pricing_snapshot_json: string | null;
   fulfillment_status: string | null;
+  settlement_evidence_verified: number;
 }
 
 interface PaymentRow {
@@ -94,15 +97,31 @@ function selectedPaymentProvider(env: Env): PaymentProviderId {
   return provider;
 }
 
+function validManualBankTransferSettings(env: Env): boolean {
+  return Boolean(
+    env.MANUAL_BANK_CODE &&
+      /^[A-Z0-9]{2,20}$/i.test(env.MANUAL_BANK_CODE) &&
+      env.MANUAL_BANK_ACCOUNT &&
+      /^\d{5,20}$/.test(env.MANUAL_BANK_ACCOUNT) &&
+      env.MANUAL_ACCOUNT_NAME &&
+      env.MANUAL_ACCOUNT_NAME.trim().length <= 100 &&
+      !/[\u0000-\u001f\u007f]/.test(env.MANUAL_ACCOUNT_NAME),
+  );
+}
+
+function orderCreationAvailable(env: Env): boolean {
+  const policy = resolvePaymentEnvironmentPolicy(env);
+  return policy.orderCreationEnabled &&
+    (policy.mode !== "manual-bank-transfer" || validManualBankTransferSettings(env));
+}
+
 function paymentModeError(
   requestId: string,
   env: Env,
   requiresWebhookSecret = false,
+  requiresManualConfiguration = false,
 ): Response | null {
   const policy = resolvePaymentEnvironmentPolicy(env);
-  if (!policy.orderCreationEnabled) {
-    return apiError(requestId, 503, "PAYMENTS_DISABLED", "Payments are disabled for this runtime");
-  }
   if (requiresWebhookSecret && !policy.sepayWebhookEnabled) {
     return apiError(
       requestId,
@@ -112,6 +131,14 @@ function paymentModeError(
         ? "Mock payments cannot be settled through the SePay webhook"
         : "SePay webhook processing is disabled for this runtime",
     );
+  }
+  if (!policy.orderCreationEnabled) {
+    return apiError(requestId, 503, "PAYMENTS_DISABLED", "Payments are disabled for this runtime");
+  }
+  if (requiresManualConfiguration && policy.mode === "manual-bank-transfer" &&
+      !validManualBankTransferSettings(env)) {
+    return apiError(requestId, 503, "PAYMENT_CONFIGURATION_ERROR",
+      "Manual bank-transfer details are not configured for this runtime");
   }
   if ((requiresWebhookSecret || policy.mode === "sepay-test") &&
       (!env.SEPAY_WEBHOOK_SECRET || env.SEPAY_WEBHOOK_SECRET.length < 16)) {
@@ -147,6 +174,17 @@ function termFromPlan(planId: string): StandardHostingTerm | null {
 
 function paymentInstructions(env: Env, amount: number, reference: string) {
   const mode = resolvePaymentEnvironmentPolicy(env).mode;
+  if (mode === "manual-bank-transfer") {
+    if (!validManualBankTransferSettings(env)) return null;
+    return {
+      bankCode: env.MANUAL_BANK_CODE!.toUpperCase(),
+      bankAccount: env.MANUAL_BANK_ACCOUNT!,
+      accountName: env.MANUAL_ACCOUNT_NAME!.trim(),
+      amountMinor: amount,
+      reference,
+      qrUrl: null,
+    };
+  }
   if (mode !== "sepay-test") return null;
   return sepayPaymentProvider.createInstructions({
     mode,
@@ -161,14 +199,22 @@ function paymentInstructions(env: Env, amount: number, reference: string) {
 function responseOrder(row: OrderRow, env: Env) {
   const policy = resolvePaymentEnvironmentPolicy(env);
   const provider = selectedPaymentProvider(env);
-  const status = row.payment_review_required || row.payment_review_required_item
+  const settlementEvidenceRequired = row.payment_status === "SUCCEEDED" ||
+    ["PAID", "FULFILLING", "FULFILLED"].includes(row.status);
+  const settlementEvidenceMissing = settlementEvidenceRequired &&
+    !row.settlement_evidence_verified;
+  const status = row.payment_review_required || row.payment_review_required_item ||
+      settlementEvidenceMissing
     ? "MANUAL_REVIEW"
     : row.status;
-  const paymentStatus = row.payment_review_required_item
+  const paymentStatus = row.payment_review_required_item || settlementEvidenceMissing
     ? "MANUAL_REVIEW"
     : row.payment_status;
+  const transferReference = policy.mode === "manual-bank-transfer"
+    ? row.order_reference
+    : row.payment_reference;
   const instructions = status === "AWAITING_PAYMENT" && paymentStatus === "PENDING"
-    ? paymentInstructions(env, row.total_minor, row.payment_reference)
+    ? paymentInstructions(env, row.total_minor, transferReference)
     : null;
   return {
     order_id: row.id,
@@ -231,7 +277,8 @@ async function loadOrder(
             json_extract(storage_item.metadata_json, '$.duration_months') AS storage_duration_months,
             json_extract(storage_item.metadata_json, '$.lifetime') AS storage_lifetime,
             json_extract(storage_item.metadata_json, '$.pricing_snapshot') AS pricing_snapshot_json,
-            fj.status AS fulfillment_status
+            fj.status AS fulfillment_status,
+            ${verifiedSettlementEvidence("p", "o")} AS settlement_evidence_verified
      FROM orders o
      JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
      JOIN payments p ON p.order_id = o.id AND p.provider = ?
@@ -282,7 +329,7 @@ async function createOrder(
   env: Env,
   requestId: string,
 ): Promise<Response> {
-  const unavailable = paymentModeError(requestId, env);
+  const unavailable = paymentModeError(requestId, env, false, true);
   if (unavailable) return unavailable;
   const required = await requireSession(request, env, requestId);
   if (required.response) return required.response;
@@ -632,7 +679,10 @@ async function createOrder(
   const orderReference = createOrderReference();
   const paymentReference = createPaymentReference();
   const now = nowIso();
-  const expiresAt = new Date(Date.now() + ORDER_LIFETIME_MINUTES * 60_000).toISOString();
+  const orderLifetimeMinutes = resolvePaymentEnvironmentPolicy(env).mode === "manual-bank-transfer"
+    ? MANUAL_ORDER_LIFETIME_MINUTES
+    : ORDER_LIFETIME_MINUTES;
+  const expiresAt = new Date(Date.now() + orderLifetimeMinutes * 60_000).toISOString();
   const amount = authoritativeTotal;
   if (!Number.isSafeInteger(amount)) {
     return apiError(requestId, 503, "CATALOG_CONFIGURATION_ERROR", "Order total is invalid");
@@ -830,7 +880,7 @@ async function listStoragePlans(env: Env, requestId: string): Promise<Response> 
     env.LOCAL_TEST_CATALOG_OVERRIDE === "true";
   if (!localFixturePricing) {
     return jsonResponse({
-      checkout_enabled: resolvePaymentEnvironmentPolicy(env).orderCreationEnabled,
+      checkout_enabled: orderCreationAvailable(env),
       renewal_month_price_minor: STANDARD_HOSTING_MONTHLY_ADDITION_MINOR,
       plans: STORAGE_DURATIONS.map((plan) => {
         const amountMinor = standardRenewalAmountMinor(plan);
@@ -865,7 +915,7 @@ async function listStoragePlans(env: Env, requestId: string): Promise<Response> 
     currency: string | null;
   }>();
   return jsonResponse({
-    checkout_enabled: resolvePaymentEnvironmentPolicy(env).orderCreationEnabled,
+    checkout_enabled: orderCreationAvailable(env),
     ...(!localApprovedPricingEnabled(env)
       ? { renewal_month_price_minor: STANDARD_HOSTING_MONTHLY_ADDITION_MINOR }
       : {}),
@@ -1020,17 +1070,59 @@ async function processWebhookEvent(
   try {
     await env.DB.batch([
       env.DB.prepare(
+        `INSERT INTO payment_settlement_evidence (
+           id, payment_id, provider, evidence_source, source_transaction_id,
+           receiving_bank_account_id, amount_minor, currency, verified_at,
+           payload_hash, status, created_at
+         )
+         SELECT ?, p.id, p.provider, 'SEPAY_WEBHOOK', ?, NULL, p.amount_minor,
+           p.currency, ?, e.payload_hash, 'VERIFIED', ?
+         FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         JOIN payment_webhook_events e ON e.provider = p.provider AND e.event_id = ?
+         WHERE p.id = ? AND p.provider = ? AND p.payment_reference = ?
+           AND p.status = 'PENDING' AND p.provider_payment_id IS NULL
+           AND p.review_required = 0 AND p.amount_minor = ?
+           AND p.currency = 'VND' AND o.status = 'AWAITING_PAYMENT'
+           AND o.payment_review_required = 0 AND o.expires_at > ?
+           AND o.total_minor = p.amount_minor AND o.currency = p.currency
+           AND NOT EXISTS (
+             SELECT 1 FROM order_items pricing_item
+             WHERE pricing_item.order_id = o.id AND pricing_item.item_type = 'ADD_ON'
+               AND json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') IS NOT NULL
+               AND CAST(json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER)
+                 <> p.amount_minor
+           )
+           AND e.event_id = ? AND e.provider_transaction_id = ?
+           AND e.outcome = 'RECEIVED' AND e.actual_amount_minor = p.amount_minor
+           AND e.payload_hash IS NOT NULL AND length(e.payload_hash) = 64
+         ON CONFLICT(provider, evidence_source, source_transaction_id) DO NOTHING`,
+      ).bind(
+        safeId(), transactionId, now, now, eventId, payment.id, SEPAY_PROVIDER,
+        transaction.paymentReference, transaction.amountMinor, now, eventId, transactionId,
+      ),
+      env.DB.prepare(
         `UPDATE payments SET status = 'SUCCEEDED', provider_payment_id = ?,
            succeeded_at = ?, updated_at = ?
          WHERE id = ? AND status = 'PENDING' AND provider_payment_id IS NULL
            AND review_required = 0 AND amount_minor = ?
            AND EXISTS (
+             SELECT 1 FROM payment_settlement_evidence evidence
+             WHERE evidence.payment_id = payments.id
+               AND evidence.provider = payments.provider
+               AND evidence.evidence_source = 'SEPAY_WEBHOOK'
+               AND evidence.source_transaction_id = ?
+               AND evidence.status = 'VERIFIED'
+               AND evidence.amount_minor = payments.amount_minor
+               AND evidence.currency = payments.currency
+           )
+           AND EXISTS (
              SELECT 1 FROM orders WHERE id = ? AND status = 'AWAITING_PAYMENT'
                AND payment_review_required = 0 AND expires_at > ?
              AND total_minor = ? AND currency = ?
            )`,
-      ).bind(transactionId, now, now, payment.id, payment.amount_minor, payment.order_id, now,
-        payment.order_total_minor, payment.order_currency),
+      ).bind(transactionId, now, now, payment.id, payment.amount_minor, transactionId,
+        payment.order_id, now, payment.order_total_minor, payment.order_currency),
       env.DB.prepare(
         `UPDATE orders SET status = 'PAID', paid_at = ?, updated_at = ?
          WHERE id = ? AND status = 'AWAITING_PAYMENT' AND payment_review_required = 0
@@ -1039,26 +1131,55 @@ async function processWebhookEvent(
                AND provider_payment_id = ?
                AND amount_minor = (SELECT total_minor FROM orders WHERE id = ?)
                AND currency = (SELECT currency FROM orders WHERE id = ?)
+               AND EXISTS (
+                 SELECT 1 FROM payment_settlement_evidence evidence
+                 WHERE evidence.payment_id = payments.id
+                   AND evidence.provider = payments.provider
+                   AND evidence.evidence_source = 'SEPAY_WEBHOOK'
+                   AND evidence.source_transaction_id = ?
+                   AND evidence.status = 'VERIFIED'
+                   AND evidence.amount_minor = payments.amount_minor
+                   AND evidence.currency = payments.currency
+               )
            )`,
       ).bind(now, now, payment.order_id, payment.id, transactionId,
-        payment.order_id, payment.order_id),
+        payment.order_id, payment.order_id, transactionId),
       env.DB.prepare(
         `UPDATE payment_webhook_events
          SET outcome = CASE WHEN EXISTS (
              SELECT 1 FROM orders o JOIN payments p ON p.order_id = o.id
              WHERE o.id = ? AND o.status = 'PAID' AND p.id = ?
                AND p.status = 'SUCCEEDED' AND p.provider_payment_id = ?
+               AND EXISTS (
+                 SELECT 1 FROM payment_settlement_evidence evidence
+                 WHERE evidence.payment_id = p.id AND evidence.provider = p.provider
+                   AND evidence.evidence_source = 'SEPAY_WEBHOOK'
+                   AND evidence.source_transaction_id = ?
+                   AND evidence.status = 'VERIFIED'
+                   AND evidence.amount_minor = p.amount_minor
+                   AND evidence.currency = p.currency
+               )
            ) THEN 'PROCESSED' ELSE 'MANUAL_REVIEW' END,
            review_reason = CASE WHEN EXISTS (
              SELECT 1 FROM orders o JOIN payments p ON p.order_id = o.id
              WHERE o.id = ? AND o.status = 'PAID' AND p.id = ?
                AND p.status = 'SUCCEEDED' AND p.provider_payment_id = ?
+               AND EXISTS (
+                 SELECT 1 FROM payment_settlement_evidence evidence
+                 WHERE evidence.payment_id = p.id AND evidence.provider = p.provider
+                   AND evidence.evidence_source = 'SEPAY_WEBHOOK'
+                   AND evidence.source_transaction_id = ?
+                   AND evidence.status = 'VERIFIED'
+                   AND evidence.amount_minor = p.amount_minor
+                   AND evidence.currency = p.currency
+               )
            ) THEN NULL ELSE 'Order or payment state changed while processing webhook' END,
            processed_at = ?, order_reference = ?, expected_amount_minor = ?,
            actual_amount_minor = ?
          WHERE provider = ? AND event_id = ? AND outcome = 'RECEIVED'`,
       ).bind(payment.order_id, payment.id, transactionId,
-        payment.order_id, payment.id, transactionId, now, payment.order_reference,
+        transactionId, payment.order_id, payment.id, transactionId, transactionId,
+        now, payment.order_reference,
         payment.amount_minor, transaction.amountMinor, SEPAY_PROVIDER, eventId),
       env.DB.prepare(
         `INSERT INTO fulfillment_jobs (id, order_id, status, created_at, updated_at)
@@ -1066,11 +1187,10 @@ async function processWebhookEvent(
          WHERE EXISTS (
            SELECT 1 FROM orders o
            JOIN payments p ON p.order_id = o.id
-           JOIN payment_webhook_events e ON e.provider = p.provider
-             AND e.event_id = p.provider_payment_id AND e.outcome = 'PROCESSED'
            WHERE o.id = ? AND o.status = 'PAID' AND p.id = ?
              AND p.status = 'SUCCEEDED' AND p.provider_payment_id = ?
              AND p.amount_minor = o.total_minor AND p.currency = o.currency
+             AND ${verifiedSettlementEvidence("p", "o")}
          )
          ON CONFLICT(order_id) DO NOTHING`,
       ).bind(safeId(), payment.order_id, now, now, payment.order_id, payment.id, transactionId),
@@ -1094,6 +1214,21 @@ async function processWebhookEvent(
   ).bind(SEPAY_PROVIDER, eventId).first<{ outcome: string }>();
   if (processed?.outcome === "PROCESSED") {
     await handleFulfillmentForOrder(env, payment.order_id);
+  } else if (processed?.outcome === "MANUAL_REVIEW") {
+    const conflictingEvidence = await env.DB.prepare(
+      `SELECT payment_id FROM payment_settlement_evidence
+       WHERE provider = ? AND evidence_source = 'SEPAY_WEBHOOK'
+         AND source_transaction_id = ?`,
+    ).bind(SEPAY_PROVIDER, transactionId).first<{ payment_id: string }>();
+    await markWebhookReview(
+      env,
+      eventId,
+      conflictingEvidence && conflictingEvidence.payment_id !== payment.id
+        ? "Provider source transaction is already associated with another payment"
+        : "Settlement evidence could not be verified and associated with this payment",
+      payment,
+      { actualAmountMinor: transaction.amountMinor, preserveOutcome: true },
+    );
   }
 }
 
@@ -1160,6 +1295,56 @@ export async function recoverPendingSePayWebhookEvents(
   return { attempted: events.results.length, pending: Number(pending?.count ?? 0) };
 }
 
+async function persistAndProcessWebhook(
+  env: Env,
+  parsed: Awaited<ReturnType<typeof sepayPaymentProvider.parseWebhook>>,
+  rawBody: Uint8Array,
+  payloadHash: string,
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO payment_webhook_events (
+           id, provider, event_id, payload_hash, received_at, outcome, raw_payload, review_reason,
+           provider_transaction_id, actual_amount_minor
+         ) VALUES (?, ?, ?, ?, ?, 'RECEIVED', ?, NULL, ?, ?)
+         ON CONFLICT(provider, event_id) DO NOTHING`,
+      ).bind(safeId(), SEPAY_PROVIDER, parsed.eventId, payloadHash, nowIso(),
+        new TextDecoder().decode(rawBody), parsed.transactionId,
+        typeof parsed.payload?.transferAmount === "number" &&
+            Number.isSafeInteger(parsed.payload.transferAmount)
+          ? parsed.payload.transferAmount
+          : null).run();
+
+      const prior = await env.DB.prepare(
+        `SELECT payload_hash, outcome FROM payment_webhook_events
+         WHERE provider = ? AND event_id = ?`,
+      ).bind(SEPAY_PROVIDER, parsed.eventId).first<{
+        payload_hash: string;
+        outcome: string | null;
+      }>();
+      if (!prior) throw new Error("Webhook event was not persisted");
+      if (prior.payload_hash !== payloadHash) {
+        await reviewWebhookCollision(env, parsed.eventId, parsed.payload);
+      } else {
+        await processWebhookEvent(
+          env,
+          parsed.eventId,
+          parsed.transactionId,
+          parsed.payload,
+          parsed.reviewReason,
+        );
+      }
+      return;
+    } catch (error) {
+      if (!(error instanceof DatabaseError) || error.code !== "BUSY" || attempt >= 3) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+}
+
 async function handleSepayWebhook(
   request: Request,
   env: Env,
@@ -1193,29 +1378,7 @@ async function handleSepayWebhook(
     return apiError(requestId, 400, "INVALID_ENCODING", "Webhook payload must be valid UTF-8");
   }
   const payloadHash = await sha256(rawBody);
-  await env.DB.prepare(
-    `INSERT INTO payment_webhook_events (
-       id, provider, event_id, payload_hash, received_at, outcome, raw_payload, review_reason,
-       provider_transaction_id, actual_amount_minor
-     ) VALUES (?, ?, ?, ?, ?, 'RECEIVED', ?, NULL, ?, ?)
-     ON CONFLICT(provider, event_id) DO NOTHING`,
-  ).bind(safeId(), SEPAY_PROVIDER, parsed.eventId, payloadHash, nowIso(),
-    new TextDecoder().decode(rawBody), parsed.transactionId,
-    typeof parsed.payload?.transferAmount === "number" &&
-        Number.isSafeInteger(parsed.payload.transferAmount)
-      ? parsed.payload.transferAmount
-      : null).run();
-
-  const prior = await env.DB.prepare(
-    `SELECT payload_hash, outcome FROM payment_webhook_events
-     WHERE provider = ? AND event_id = ?`,
-  ).bind(SEPAY_PROVIDER, parsed.eventId).first<{ payload_hash: string; outcome: string | null }>();
-  if (!prior) throw new Error("Webhook event was not persisted");
-  if (prior.payload_hash !== payloadHash) {
-    await reviewWebhookCollision(env, parsed.eventId, parsed.payload);
-  } else {
-    await processWebhookEvent(env, parsed.eventId, parsed.transactionId, parsed.payload, parsed.reviewReason);
-  }
+  await persistAndProcessWebhook(env, parsed, rawBody, payloadHash);
   return jsonResponse({ success: true }, 200, requestId);
 }
 
@@ -1230,7 +1393,7 @@ export async function handlePaymentRoutes(
     return jsonResponse(
       {
         ...publicProductCatalog({ catalogEnabled: isStandardPricingEnabled(env) }),
-        checkout_enabled: resolvePaymentEnvironmentPolicy(env).orderCreationEnabled,
+        checkout_enabled: orderCreationAvailable(env),
       },
       200,
       requestId,

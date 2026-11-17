@@ -40,6 +40,53 @@
     }));
   }
 
+  function publicationQrPath(row) {
+    return `/api/v1/publications/${encodeURIComponent(row.publication_id)}/qr.svg`;
+  }
+
+  function requestQr(row, card) {
+    const panel = card.querySelector("[data-qr-panel]");
+    const image = card.querySelector("[data-qr-image]");
+    const status = card.querySelector("[data-qr-status]");
+    const download = card.querySelector('[data-action="download-qr"]');
+    const retry = card.querySelector('[data-action="qr"]');
+    if (!(panel instanceof HTMLElement) || !(image instanceof HTMLImageElement) ||
+        !(status instanceof HTMLElement) || !(download instanceof HTMLButtonElement) ||
+        !(retry instanceof HTMLButtonElement)) {
+      setNotice("Không thể hiển thị mã QR cho website này.", "error");
+      return;
+    }
+    status.textContent = "Đang tải mã QR website…";
+    image.hidden = false;
+    download.disabled = true;
+    retry.hidden = true;
+    image.removeAttribute("src");
+    image.src = publicationQrPath(row);
+  }
+
+  function downloadQr(row, card) {
+    const image = card.querySelector("[data-qr-image]");
+    if (!(image instanceof HTMLImageElement) || !image.complete || image.naturalWidth === 0) {
+      throw new Error("Hãy tải mã QR trước khi tải xuống.");
+    }
+    const size = 1200;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Trình duyệt không thể tạo ảnh PNG cho mã QR.");
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, size, size);
+    context.imageSmoothingEnabled = false;
+    context.drawImage(image, 0, 0, size, size);
+    const link = document.createElement("a");
+    link.href = canvas.toDataURL("image/png");
+    link.download = `crushify-${row.template_id}-website-qr.png`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }
+
   function addText(parent, tag, value, className = "") {
     const element = document.createElement(tag);
     element.textContent = value || "";
@@ -157,6 +204,54 @@
       card.append(link);
     }
 
+    if (row.publication_id && row.publication_status === "PUBLISHED") {
+      const qrPanel = document.createElement("section");
+      qrPanel.className = "qr-panel";
+      qrPanel.dataset.qrPanel = "";
+      const figure = document.createElement("figure");
+      figure.className = "qr-figure";
+      const image = document.createElement("img");
+      image.width = 256;
+      image.height = 256;
+      image.alt = `Mã QR mở website ${row.template_title}`;
+      image.loading = "lazy";
+      image.dataset.qrImage = "";
+      const caption = document.createElement("figcaption");
+      caption.textContent = "Quét để mở website quà tặng; mã QR không chứa nội dung riêng tư và không phải mã thanh toán.";
+      figure.append(image, caption);
+      const status = addText(qrPanel, "p", "", "qr-status");
+      status.dataset.qrStatus = "";
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      status.textContent = "Đang tải mã QR website…";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "Thử tải lại mã QR";
+      retry.dataset.action = "qr";
+      retry.hidden = true;
+      const download = document.createElement("button");
+      download.type = "button";
+      download.textContent = "Tải QR dạng PNG";
+      download.dataset.action = "download-qr";
+      download.disabled = true;
+      image.addEventListener("load", () => {
+        status.textContent = "Mã QR mở trực tiếp website quà tặng. Bạn có thể gửi ảnh này hoặc in lên thiệp.";
+        retry.hidden = true;
+        retry.disabled = false;
+        download.disabled = false;
+      });
+      image.addEventListener("error", () => {
+        image.removeAttribute("src");
+        status.textContent = "Không tải được mã QR website. Hãy kiểm tra kết nối rồi thử lại.";
+        retry.hidden = false;
+        retry.disabled = false;
+        download.disabled = true;
+      });
+      qrPanel.append(figure, status, retry, download);
+      image.src = publicationQrPath(row);
+      card.append(qrPanel);
+    }
+
     const actions = document.createElement("div");
     actions.className = "actions";
     if (row.order_id) {
@@ -221,6 +316,11 @@
         copy.textContent = "Sao chép liên kết";
         copy.dataset.action = "copy";
         actions.append(copy);
+        const qr = document.createElement("button");
+        qr.className = "primary";
+        qr.textContent = "Hiển thị mã QR website";
+        qr.dataset.action = "qr";
+        actions.append(qr);
       }
       if (row.publication_id && row.entitlement_status !== "LIFETIME" &&
           row.publication_status !== "REVOKED" && row.publication_status !== "DELETION_PENDING") {
@@ -338,12 +438,16 @@
       box.className = "renewal-checkout";
       addText(box, "h3", "Thanh toán gia hạn");
       addText(box, "p", `Ngân hàng: ${instructions.bank_code || "—"} · Tài khoản: ${instructions.bank_account || "—"}`);
+      addText(box, "p", `Chủ tài khoản: ${instructions.account_name || "—"}`);
       addText(box, "p", `Số tiền: ${instructions.amount_minor.toLocaleString("vi-VN")} ${order.currency}`);
       addText(box, "p", `Nội dung chuyển khoản: ${instructions.reference}`);
+      addText(box, "p", order.payment?.provider === "MANUAL_BANK_TRANSFER"
+        ? "Quản trị viên sẽ xác nhận sau khi đối chiếu tiền thực nhận; không gửi ảnh chụp thay cho giao dịch."
+        : "Chỉ dùng tài khoản Test mode của SePay. Không chuyển tiền thật.");
       if (typeof instructions.qr_url === "string") {
         try {
           const qrUrl = new URL(instructions.qr_url, location.origin);
-          if (qrUrl.protocol === "https:") {
+          if (qrUrl.protocol === "https:" && qrUrl.origin === "https://vietqr.app") {
             const link = document.createElement("a");
             link.href = qrUrl.href;
             link.target = "_blank";
@@ -422,18 +526,21 @@
       item.design_id === card?.dataset.designId &&
       (item.publication_id || "") === (card?.dataset.publicationId || ""));
     if (!row || !(button instanceof HTMLButtonElement)) return;
+    const action = button.dataset.action;
     button.disabled = true;
     try {
-      if (button.dataset.action === "create") await createPublication(row, card);
-      else if (button.dataset.action === "publish") await publishPublication(row);
-      else if (button.dataset.action === "unpublish") await unpublishPublication(row);
-      else if (button.dataset.action === "revoke") await revokePublication(row);
-      else if (button.dataset.action === "update") await updatePublication(row, card);
-      else if (button.dataset.action === "renew") await createRenewalOrder(row, card);
-      else if (button.dataset.action === "retry-delete") {
+      if (action === "create") await createPublication(row, card);
+      else if (action === "publish") await publishPublication(row);
+      else if (action === "unpublish") await unpublishPublication(row);
+      else if (action === "revoke") await revokePublication(row);
+      else if (action === "update") await updatePublication(row, card);
+      else if (action === "renew") await createRenewalOrder(row, card);
+      else if (action === "qr") requestQr(row, card);
+      else if (action === "download-qr") downloadQr(row, card);
+      else if (action === "retry-delete") {
         await api(`/designs/${encodeURIComponent(row.design_id)}`, { method: "DELETE" });
       }
-      else if (button.dataset.action === "revoke-consent") {
+      else if (action === "revoke-consent") {
         const assetId = button.dataset.asset;
         if (!assetId) throw new Error("Không tìm thấy ảnh cần thu hồi quyền.");
         await api(`/publications/${encodeURIComponent(row.publication_id)}/assets/${encodeURIComponent(assetId)}/consent`, {
@@ -441,11 +548,12 @@
           body: JSON.stringify({}),
         });
       }
-      else if (button.dataset.action === "copy") {
+      else if (action === "copy") {
         await navigator.clipboard.writeText(row.public_url);
         setNotice("Đã sao chép liên kết website.");
       }
-      if (button.dataset.action !== "renew") await refresh();
+      if (action !== "renew" && action !== "qr" && action !== "download-qr") await refresh();
+      else if (action !== "qr") button.disabled = false;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể hoàn tất yêu cầu.", "error");
       button.disabled = false;

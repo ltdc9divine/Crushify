@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <title>Quản trị vận hành | Crushify</title>
+  <link rel="stylesheet" href="/admin/admin.css">
+  <script src="/admin/admin.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Crushify</a>
+    <nav aria-label="Điều hướng">
+      <a href="/">Trang chủ</a>
+      <a href="/custom-design/">Yêu cầu thiết kế</a>
+      <button id="signout" type="button" hidden>Đăng xuất</button>
+    </nav>
+  </header>
+  <main class="shell">
+    <p class="eyebrow">CRUSHIFY · VẬN HÀNH</p>
+    <h1>Quản trị vận hành</h1>
+    <p class="intro">Chỉ dành cho tài khoản được cho phép. Chỉ xác nhận chuyển khoản sau khi đối chiếu tiền thực nhận trên tài khoản ngân hàng; ảnh chụp do khách gửi không phải bằng chứng thanh toán.</p>
+    <p id="notice" role="status" aria-live="polite">Đang kiểm tra quyền truy cập…</p>
+    <div id="dashboard" hidden>
+      <section class="actions" aria-label="Tác vụ khôi phục">
+        <button id="recover-fulfillments" type="button">Thử lại fulfillment đủ điều kiện</button>
+        <button id="reconcile-derivatives" type="button">Đối soát dọn ảnh lỗi</button>
+        <button id="refresh" type="button" class="secondary">Làm mới</button>
+      </section>
+      <section class="panel" aria-labelledby="requests-title">
+        <h2 id="requests-title">Yêu cầu thiết kế riêng</h2>
+        <div id="custom-requests" class="request-list"></div>
+      </section>
+      <section class="panel" aria-labelledby="orders-title">
+        <h2 id="orders-title">Đơn hàng</h2>
+        <div id="orders"></div>
+      </section>
+      <section class="panel" aria-labelledby="manual-payments-title">
+        <h2 id="manual-payments-title">Chuyển khoản chờ xác nhận</h2>
+        <div id="manual-payments" class="manual-payment-list"></div>
+        <h3>Lịch sử xác nhận</h3>
+        <div id="manual-payment-history"></div>
+      </section>
+      <section class="panel" aria-labelledby="payments-title">
+        <h2 id="payments-title">Thanh toán và bằng chứng</h2>
+        <div id="payments"></div>
+        <h3>Bằng chứng settlement</h3>
+        <div id="settlement-evidence"></div>
+      </section>
+      <section class="panel" aria-labelledby="reviews-title">
+        <h2 id="reviews-title">Webhook cần xem xét</h2>
+        <div id="webhook-reviews"></div>
+      </section>
+      <section class="panel" aria-labelledby="fulfillment-title">
+        <h2 id="fulfillment-title">Fulfillment jobs</h2>
+        <div id="fulfillment-jobs"></div>
+      </section>
+      <section class="panel" aria-labelledby="publication-title">
+        <h2 id="publication-title">Website, hết hạn và gia hạn</h2>
+        <div id="publications"></div>
+      </section>
+      <section class="panel" aria-labelledby="derivative-title">
+        <h2 id="derivative-title">Dọn dẹp media</h2>
+        <div id="derivative-operations"></div>
+      </section>
+      <section class="panel" aria-labelledby="activity-title">
+        <h2 id="activity-title">Nhật ký hoạt động quản trị</h2>
+        <div id="admin-activity"></div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

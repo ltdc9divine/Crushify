@@ -133,8 +133,20 @@ describe("SePay local-only payment safeguards", () => {
     });
     assert.equal(preview.provider, "MOCK");
     assert.equal(preview.mode, "mock");
+    assert.equal(preview.orderCreationEnabled, false);
     assert.equal(preview.sepayWebhookEnabled, false);
     assert.equal(preview.fulfillmentEnabled, false);
+
+    const enabledPreview = resolvePaymentEnvironmentPolicy({
+      ENVIRONMENT: "staging",
+      PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PAYMENT_MODE: "sepay-test",
+    });
+    assert.equal(enabledPreview.provider, "SEPAY");
+    assert.equal(enabledPreview.mode, "sepay-test");
+    assert.equal(enabledPreview.orderCreationEnabled, true);
+    assert.equal(enabledPreview.sepayWebhookEnabled, true);
+    assert.equal(enabledPreview.fulfillmentEnabled, true);
 
     const localMock = resolvePaymentEnvironmentPolicy({
       ENVIRONMENT: "local",
@@ -148,11 +160,65 @@ describe("SePay local-only payment safeguards", () => {
       LOCAL_TEST_MODE: "true",
       PAYMENT_MODE: "sepay-test",
     }).provider, "SEPAY");
+    const manualPreview = resolvePaymentEnvironmentPolicy({
+      ENVIRONMENT: "staging",
+      PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PAYMENT_MODE: "manual-bank-transfer",
+    });
+    assert.equal(manualPreview.provider, "MANUAL_BANK_TRANSFER");
+    assert.equal(manualPreview.mode, "manual-bank-transfer");
+    assert.equal(manualPreview.orderCreationEnabled, true);
+    assert.equal(manualPreview.sepayWebhookEnabled, false);
+    assert.equal(manualPreview.fulfillmentEnabled, true);
+    const productionManual = resolvePaymentEnvironmentPolicy({
+      ENVIRONMENT: "production",
+      PAYMENT_MODE: "manual-bank-transfer",
+    });
+    assert.equal(productionManual.orderCreationEnabled, false);
+    assert.equal(productionManual.mode, null);
     assert.equal(resolvePaymentEnvironmentPolicy({
       ENVIRONMENT: "local",
       PAYMENT_MODE: "sepay-test",
     }).provider, null);
     assert.equal(resolvePaymentEnvironmentPolicy({}).provider, null);
+  });
+
+  it("reports manual transfer checkout unavailable until valid bank details are configured", async () => {
+    const unusedDatabase: Database = {
+      prepare() {
+        throw new Error("catalog must not access the database");
+      },
+      async batch() {
+        throw new Error("catalog must not access the database");
+      },
+    };
+    const request = () => handleApiRequest(
+      new Request("https://crushify.test/api/v1/catalog"),
+      {
+        DB: unusedDatabase,
+        ENVIRONMENT: "staging",
+        PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PAYMENT_MODE: "manual-bank-transfer",
+      },
+    );
+    const missingConfiguration = await request();
+    assert.equal(missingConfiguration.status, 200);
+    assert.equal((await missingConfiguration.json() as { checkout_enabled: boolean }).checkout_enabled, false);
+
+    const configured = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/catalog"),
+      {
+        DB: unusedDatabase,
+        ENVIRONMENT: "staging",
+        PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PAYMENT_MODE: "manual-bank-transfer",
+        MANUAL_BANK_CODE: "MB",
+        MANUAL_BANK_ACCOUNT: "1234567890",
+        MANUAL_ACCOUNT_NAME: "Crushify Test",
+      },
+    );
+    assert.equal(configured.status, 200);
+    assert.equal((await configured.json() as { checkout_enabled: boolean }).checkout_enabled, true);
   });
 
   it("maps Vercel Preview to mock payments without opening checkout while Preview auth is disabled", async () => {
@@ -192,6 +258,15 @@ describe("SePay local-only payment safeguards", () => {
         return { database: unusedDatabase, close() {} };
       },
     });
+    const catalog = await handler(new Request(
+      "https://crushify-preview.vercel.app/api/v1/catalog",
+      {
+        headers: { Origin: "https://crushify-preview.vercel.app" },
+      },
+    ));
+    assert.equal(catalog.status, 200);
+    assert.equal((await catalog.json() as { checkout_enabled: boolean }).checkout_enabled, false);
+
     const response = await handler(new Request(
       "https://crushify-preview.vercel.app/api/v1/orders",
       {
@@ -204,7 +279,8 @@ describe("SePay local-only payment safeguards", () => {
       },
     ));
     assert.equal(response.status, 503);
-    assert.equal((await response.json() as { error: { code: string } }).error.code, "AUTH_UNAVAILABLE");
+    assert.equal((await response.json() as { error: { code: string } }).error.code,
+      "PAYMENTS_DISABLED");
     assert.equal(queries, 0);
   });
 

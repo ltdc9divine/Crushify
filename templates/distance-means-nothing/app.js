@@ -1,13 +1,11 @@
 import {CITIES,THEMES,blank,validTz,distanceKm,clockInfo,diffLabel,countdown,daysTogether} from './core.js';
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
-const KEY='crushify.distance.v1';let S=blank(),scene=null,glOK=false;
-const b64e=o=>btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_'),b64d=s=>JSON.parse(decodeURIComponent(escape(atob(s.replace(/-/g,'+').replace(/_/g,'/')))));
+let S=blank(),scene=null,glOK=false;
 const get=(o,p)=>p.split('.').reduce((a,k)=>a?.[k],o),set=(o,p,v)=>{const k=p.split('.'),l=k.pop();k.reduce((a,x)=>a[x],o)[l]=v};
 const merge=d=>{const b=blank();for(const k in b){if(d?.[k]===undefined)continue;b[k]=b[k]&&typeof b[k]==='object'&&!Array.isArray(b[k])?{...b[k],...d[k]}:d[k]}return b};
 const publicationData=window.CRUSHIFY_PUBLICATION_DATA;
-const recipient=Boolean(publicationData)||location.hash.startsWith('#v=');
-try{S=merge(publicationData||(recipient?b64d(location.hash.slice(3)):JSON.parse(localStorage.getItem(KEY)||'null')))}catch{}
-const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(S))}catch{}};
+const recipient=Boolean(publicationData);
+S=merge(publicationData);
 const th=()=>THEMES[S.theme]||THEMES['midnight-distance'];
 // ---------- editor ----------
 const tzs=Intl.supportedValuesOf?Intl.supportedValuesOf('timeZone'):['UTC'];
@@ -24,7 +22,7 @@ function listMsgs(){const L=$('#msgList');L.innerHTML='';S.messages.forEach((m,i
  $('.e',d).oninput=e=>{m.emoji=e.target.value;changed(2)};$('.t',d).oninput=e=>{m.title=e.target.value;changed(2)};$('.c',d).oninput=e=>{m.body=e.target.value;changed(2)};
  $('button',d).onclick=()=>{S.messages.splice(i,1);listMsgs();changed(2)};L.append(d)})}
 $('#addMsg').onclick=()=>{S.messages.push({emoji:'💌',title:'',body:''});listMsgs();changed(2)};
-let tm;function changed(rebuild){window.dispatchEvent(new Event('crushify:changed'));save();render();clearTimeout(tm);if(rebuild)tm=setTimeout(()=>scene?.apply(S,th()),rebuild===2?400:0)}
+let tm;function changed(rebuild){window.dispatchEvent(new Event('crushify:changed'));render();clearTimeout(tm);if(rebuild)tm=setTimeout(()=>scene?.apply(S,th()),rebuild===2?400:0)}
 // ---------- HUD ----------
 const lab=p=>p.name||'';
 function render(){const t=th(),r=document.documentElement.style;r.setProperty('--ui',t.c1);
@@ -64,7 +62,8 @@ addEventListener('keydown',e=>{if(e.key==='Escape'){panel.hidden=true;$('#final'
 function setView(v){document.body.classList.toggle('view',v);document.body.classList.toggle('view-preview',v);scene?.resize();if(v)$('#backEdit').focus();else $('#viewAs').focus()}
 $('#viewAs').onclick=()=>{setView(true);scene?.start();history.replaceState(null,'','#preview')};
 $('#backEdit').onclick=()=>{setView(false);history.replaceState(null,'',location.pathname+location.search)};
-$('#copyLink').onclick=async e=>{const d={...S,memories:[]},u=location.href.split('#')[0]+'#v='+b64e(d);try{await navigator.clipboard.writeText(u);e.target.textContent='Đã sao chép liên kết'}catch{prompt('Sao chép liên kết này',u)}setTimeout(()=>e.target.textContent='Sao chép liên kết người nhận',2000)};
+let lastCopyStatus='';const reportCopyStatus=(status,message)=>{status.textContent=message===lastCopyStatus?`${message}\u00a0`:message;lastCopyStatus=message};
+$('#copyLink').onclick=async()=>{const status=$('#copyStatus');try{const url=await window.crushifyCreatePreviewLink();await navigator.clipboard.writeText(url);reportCopyStatus(status,'Đã sao chép liên kết xem trước riêng tư.')}catch(error){reportCopyStatus(status,'Không thể sao chép liên kết xem trước. Hãy đăng nhập, lưu thiết kế và kiểm tra quyền clipboard.')}};
 const mobileTabs=matchMedia('(max-width:800px)');let mobileTabChosen=false;
 const selectMobileTab=stage=>{$$('#tabs button').forEach(b=>{const selected=b.dataset.t===(stage?'stage':'editor');b.classList.toggle('on',selected);b.setAttribute('aria-pressed',String(selected))});document.body.classList.toggle('tab-stage',stage);scene?.resize()};
 $$('#tabs button').forEach(b=>b.onclick=()=>{mobileTabChosen=true;selectMobileTab(b.dataset.t==='stage')});

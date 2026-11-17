@@ -205,10 +205,10 @@ explicit Preview origin.
 and `docs/VERCEL_STAGING.md`. The legacy Worker setting is in
 `wrangler.staging.jsonc`.
 
-**Candidate names only** (proposed, not currently supported):
-`PREVIEW_MAIL_PROVIDER`, `PREVIEW_MAIL_API_KEY`, `PREVIEW_MAIL_FROM_EMAIL`,
-`PREVIEW_MAIL_ALLOWED_RECIPIENTS`. If the owner chooses not to provision a
-sandbox, leave Preview login disabled and retain the discard/unavailable
+**Supported Preview-safe pattern** (current runtime): `PREVIEW_EMAIL_SINK=discard`
+plus `PREVIEW_AUTH_ALLOWED_EMAILS` for the exact allowlist; local test capture can
+use `PREVIEW_TEST_EMAIL_SINK` without sending mail. If the owner chooses not to
+provision a sandbox, leave Preview login disabled and retain the discard/unavailable
 behavior.
 
 **Cost and security:** Email sandbox plan and per-message limits were not

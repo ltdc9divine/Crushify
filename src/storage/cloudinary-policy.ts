@@ -25,10 +25,29 @@ export function resolveCloudinaryConfiguration(
   environment: CloudinaryEnvironment,
 ): CloudinaryConfig {
   if (environment.ENVIRONMENT === "staging") {
-    throw new CloudinaryConfigurationError(
-      "STORAGE_ISOLATION_ERROR",
-      "Cloudinary storage is disabled in staging until account isolation is independently verified",
-    );
+    if (environment.CLOUDINARY_CLOUD_NAME !== undefined ||
+        environment.CLOUDINARY_API_KEY !== undefined ||
+        environment.CLOUDINARY_API_SECRET !== undefined) {
+      throw new CloudinaryConfigurationError(
+        "STORAGE_ISOLATION_ERROR",
+        "Production Cloudinary credentials are not valid in staging",
+      );
+    }
+    const cloudName = environment.CLOUDINARY_STAGING_CLOUD_NAME;
+    const apiKey = environment.CLOUDINARY_STAGING_API_KEY;
+    const apiSecret = environment.CLOUDINARY_STAGING_API_SECRET;
+    const productionCloudName = environment.CLOUDINARY_PRODUCTION_CLOUD_NAME;
+    if (!cloudName || !/^[A-Za-z0-9_-]+$/.test(cloudName) ||
+        !apiKey || !/^[A-Za-z0-9_-]+$/.test(apiKey) ||
+        !apiSecret?.trim() ||
+        !productionCloudName || !/^[A-Za-z0-9_-]+$/.test(productionCloudName) ||
+        cloudName.toLocaleLowerCase("en-US") === productionCloudName.toLocaleLowerCase("en-US")) {
+      throw new CloudinaryConfigurationError(
+        "STORAGE_ISOLATION_ERROR",
+        "Staging requires complete dedicated credentials and a distinct Cloudinary cloud",
+      );
+    }
+    return { cloudName, apiKey, apiSecret };
   }
   if (environment.ENVIRONMENT === "local") {
     throw new CloudinaryConfigurationError(
@@ -44,7 +63,8 @@ export function resolveCloudinaryConfiguration(
   }
   if (environment.CLOUDINARY_STAGING_CLOUD_NAME !== undefined ||
       environment.CLOUDINARY_STAGING_API_KEY !== undefined ||
-      environment.CLOUDINARY_STAGING_API_SECRET !== undefined) {
+  environment.CLOUDINARY_STAGING_API_SECRET !== undefined ||
+  environment.CLOUDINARY_PRODUCTION_CLOUD_NAME !== undefined) {
     throw new CloudinaryConfigurationError(
       "STORAGE_CONFIGURATION_ERROR",
       "Staging-specific Cloudinary configuration is not valid for this runtime",

@@ -19,6 +19,12 @@ export interface Env {
   MAIL_PROVIDER?: "resend";
   MAIL_API_KEY?: string;
   MAIL_FROM_EMAIL?: string;
+  PREVIEW_MAIL_PROVIDER?: "resend";
+  PREVIEW_MAIL_API_KEY?: string;
+  PREVIEW_MAIL_FROM_EMAIL?: string;
+  PREVIEW_CUSTOMER_FLOW_ENABLED?: string;
+  PREVIEW_AUTH_ALLOWED_EMAILS?: string;
+  PREVIEW_TEST_EMAIL_SINK?: (message: import("./auth.ts").EmailMessage) => Promise<void>;
   PREVIEW_EMAIL_SINK?: "discard";
   LOCAL_TEST_EMAIL_SINK?: (message: import("./auth.ts").EmailMessage) => Promise<void>;
   LOCAL_TEST_MAIL_SINK_URL?: string;
@@ -26,14 +32,18 @@ export interface Env {
   MAILER_AUTH_TOKEN?: string;
   CRON_SECRET?: string;
   APP_ORIGIN?: string;
+  ADMIN_EMAILS?: string;
   LOCAL_TEST_MODE?: string;
   LOCAL_TEST_CATALOG_OVERRIDE?: string;
   LOCAL_TEST_PRICING_POLICY?: string;
-  PAYMENT_MODE?: "mock" | "sepay-test";
+  PAYMENT_MODE?: "mock" | "sepay-test" | "manual-bank-transfer";
   SEPAY_WEBHOOK_SECRET?: string;
   SEPAY_BANK_CODE?: string;
   SEPAY_BANK_ACCOUNT?: string;
   SEPAY_ACCOUNT_NAME?: string;
+  MANUAL_BANK_CODE?: string;
+  MANUAL_BANK_ACCOUNT?: string;
+  MANUAL_ACCOUNT_NAME?: string;
   UPLOAD_MAX_BYTES?: number;
   DATA_RETENTION_DAYS?: string;
 }

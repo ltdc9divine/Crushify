@@ -11,12 +11,12 @@ const validTursoEnvironment = {
   CRUSHIFY_STAGING_PROFILE: "local",
   ENVIRONMENT: "staging",
   DATABASE_PROVIDER: "turso",
-  TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+  TURSO_STAGING_DATABASE_URL: "libsql://crushify-preview-crushify.aws-ap-southeast-1.turso.io",
   TURSO_STAGING_AUTH_TOKEN: "synthetic-turso-token",
-  TURSO_CONFIRM_DATABASE: "crushify-staging",
-  TURSO_CONFIRM_GROUP: "crushify-staging-sg",
+  TURSO_CONFIRM_DATABASE: "crushify-preview",
+  TURSO_CONFIRM_GROUP: "crushify-preview",
   TURSO_CONFIRM_REGION: "Singapore",
-  TURSO_CONFIRM_HOSTNAME: "crushify-staging-test-org.turso.io",
+  TURSO_CONFIRM_HOSTNAME: "crushify-preview-crushify.aws-ap-southeast-1.turso.io",
 };
 
 const validCloudinaryEnvironment = {
@@ -60,9 +60,9 @@ describe("staging script environment guards", () => {
     }
   });
 
-  it("requires staging mode, the expected database, group, and Singapore region", () => {
+  it("requires the exact Preview database, group, and Singapore region", () => {
     for (const override of [
-      { TURSO_CONFIRM_DATABASE: "crushify-production" },
+      { TURSO_CONFIRM_DATABASE: "crushify-preview-other" },
       { TURSO_CONFIRM_GROUP: "another-group" },
       { TURSO_CONFIRM_REGION: "Frankfurt" },
       { TURSO_CONFIRM_DATABASE: undefined },
@@ -106,6 +106,93 @@ describe("staging script environment guards", () => {
     }
   });
 
+  it("allows Preview only for explicitly marked local preflight", () => {
+    const previewEnvironment = {
+      ...validTursoEnvironment,
+      VERCEL_ENV: "preview",
+    };
+
+    assert.doesNotThrow(() => resolveTursoStagingMigrationTarget({
+      ...previewEnvironment,
+      CRUSHIFY_LOCAL_STAGING_PREFLIGHT: "1",
+    }, "--preflight"));
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget(previewEnvironment, "--preflight"),
+      /local staging profile/,
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget({
+        ...previewEnvironment,
+        CRUSHIFY_LOCAL_STAGING_PREFLIGHT: "true",
+      }, "--preflight"),
+      /local staging profile/,
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget({
+        ...previewEnvironment,
+        CRUSHIFY_STAGING_PROFILE: "remote",
+        CRUSHIFY_LOCAL_STAGING_PREFLIGHT: "1",
+      }, "--preflight"),
+      /local staging profile/,
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget({
+        ...previewEnvironment,
+        VERCEL_ENV: "production",
+        CRUSHIFY_LOCAL_STAGING_PREFLIGHT: "1",
+      }, "--preflight"),
+      /local staging profile/,
+    );
+    assert.throws(
+      () => resolveTursoStagingMigrationTarget({
+        ...previewEnvironment,
+        CRUSHIFY_LOCAL_STAGING_PREFLIGHT: "1",
+        TURSO_MIGRATE_CONFIRM: "I_CONFIRM_APPLY_STAGING_MIGRATIONS",
+      }, "--migrate"),
+      /local staging profile/,
+    );
+    assert.doesNotThrow(() =>
+      resolveTursoStagingMigrationTarget(validTursoEnvironment, "--preflight"));
+    assert.doesNotThrow(() => resolveTursoStagingMigrationTarget({
+      ...validTursoEnvironment,
+      VERCEL_ENV: "development",
+    }, "--preflight"));
+    assert.throws(
+      () => assertCloudinaryStagingConfiguration({
+        ...validCloudinaryEnvironment,
+        VERCEL_ENV: "preview",
+        CRUSHIFY_LOCAL_STAGING_PREFLIGHT: "1",
+      }),
+      /local staging profile/,
+    );
+  });
+
+  it("keeps Preview preflight identity and Production credential guards", () => {
+    const previewEnvironment = {
+      ...validTursoEnvironment,
+      VERCEL_ENV: "preview",
+      CRUSHIFY_LOCAL_STAGING_PREFLIGHT: "1",
+    };
+
+    for (const override of [
+      { TURSO_CONFIRM_DATABASE: "other-database" },
+      { TURSO_CONFIRM_GROUP: "other-group" },
+      { TURSO_CONFIRM_REGION: "Frankfurt" },
+      { DATABASE_PROVIDER: "d1" },
+      { TURSO_CONFIRM_HOSTNAME: "crushify-preview-other.aws-ap-southeast-1.turso.io" },
+      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-preview-other.aws-ap-southeast-1.turso.io" },
+      { TURSO_DATABASE_URL: "libsql://production.example.turso.io" },
+      { TURSO_AUTH_TOKEN: "synthetic-production-token" },
+    ]) {
+      assert.throws(
+        () => resolveTursoStagingMigrationTarget({
+          ...previewEnvironment,
+          ...override,
+        }, "--preflight"),
+      );
+    }
+  });
+
   it("rejects non-staging hosts and never includes credentials in errors", () => {
     const secretUrl = "libsql://production-secret.turso.io";
     const secretToken = "synthetic-turso-token";
@@ -123,14 +210,30 @@ describe("staging script environment guards", () => {
     );
   });
 
-  it("pins staging migration identity to the exact confirmed hostname", () => {
+  it("accepts only the confirmed Preview hostname", () => {
     for (const override of [
       { TURSO_CONFIRM_HOSTNAME: undefined },
-      { TURSO_CONFIRM_HOSTNAME: "crushify-staging-another-org.turso.io" },
-      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-another-org.turso.io" },
-      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io/path" },
-      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io:443" },
-      { TURSO_STAGING_DATABASE_URL: " libsql://crushify-staging-test-org.turso.io" },
+      { TURSO_CONFIRM_HOSTNAME: "crushify-preview-other.aws-ap-southeast-1.turso.io" },
+      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-preview-other.aws-ap-southeast-1.turso.io" },
+      {
+        TURSO_STAGING_DATABASE_URL: "libsql://crushify-preview-crushify.aws-us-east-1.turso.io",
+        TURSO_CONFIRM_HOSTNAME: "crushify-preview-crushify.aws-us-east-1.turso.io",
+      },
+      {
+        TURSO_STAGING_DATABASE_URL: "libsql://crushify-preview-crushify.aws-ap-southeast-1.turso.io.evil",
+        TURSO_CONFIRM_HOSTNAME: "crushify-preview-crushify.aws-ap-southeast-1.turso.io.evil",
+      },
+      {
+        TURSO_STAGING_DATABASE_URL: "libsql://crushify-preview-crushify.aws-ap-southeast-1.example",
+        TURSO_CONFIRM_HOSTNAME: "crushify-preview-crushify.aws-ap-southeast-1.example",
+      },
+      {
+        TURSO_STAGING_DATABASE_URL: "libsql://crushify-production-crushify.aws-ap-southeast-1.turso.io",
+        TURSO_CONFIRM_HOSTNAME: "crushify-production-crushify.aws-ap-southeast-1.turso.io",
+      },
+      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-preview-crushify.aws-ap-southeast-1.turso.io/path" },
+      { TURSO_STAGING_DATABASE_URL: "libsql://crushify-preview-crushify.aws-ap-southeast-1.turso.io:443" },
+      { TURSO_STAGING_DATABASE_URL: " libsql://crushify-preview-crushify.aws-ap-southeast-1.turso.io" },
     ]) {
       assert.throws(
         () => assertTursoStagingConfiguration({
@@ -194,7 +297,7 @@ describe("staging script environment guards", () => {
     assert.throws(
       () => resolveTursoStagingMigrationTarget({
         ...validTursoEnvironment,
-        TURSO_CONFIRM_HOSTNAME: "crushify-staging-unverified-org.turso.io",
+        TURSO_CONFIRM_HOSTNAME: "crushify-preview-unverified.aws-ap-southeast-1.turso.io",
       }, "--preflight"),
       /confirmed staging database identity/,
     );
@@ -244,10 +347,9 @@ describe("staging script environment guards", () => {
     );
   });
 
-  it("rejects Cloudinary staging until account isolation is independently verified", () => {
+  it("requires a distinct dedicated Cloudinary staging identity and synthetic-data opt-in", () => {
     for (const override of [
       { STORAGE_PROVIDER: "mock" },
-      { CLOUDINARY_STAGING_CLOUD_NAME: "hgtcizux" },
       { CLOUDINARY_STAGING_CLOUD_NAME: "CRUSHIFY-PRODUCTION-CLOUD" },
       { CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined },
       { CLOUDINARY_SMOKE_TEST: undefined },
@@ -262,10 +364,11 @@ describe("staging script environment guards", () => {
         /Cloudinary staging/,
       );
     }
-    assert.throws(
-      () => assertCloudinaryStagingConfiguration(validCloudinaryEnvironment),
-      /disabled until account isolation is independently verified/,
-    );
+    assert.deepEqual(assertCloudinaryStagingConfiguration(validCloudinaryEnvironment), {
+      cloudName: validCloudinaryEnvironment.CLOUDINARY_STAGING_CLOUD_NAME,
+      apiKey: validCloudinaryEnvironment.CLOUDINARY_STAGING_API_KEY,
+      apiSecret: validCloudinaryEnvironment.CLOUDINARY_STAGING_API_SECRET,
+    });
   });
 
   it("does not expose Cloudinary credentials in guard errors", () => {

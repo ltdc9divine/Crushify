@@ -27,10 +27,20 @@ export async function runPaymentContract({
   otherOwner,
   expireOrder,
   cancelOrder,
-  failOrderPayment,
-  restoreOrderPayment,
+  failSettlementStep,
+  restoreSettlementStep,
   inspectWebhookOutcomes,
   inspectWebhookEvent,
+  inspectSettlementEvidence,
+  inspectSettlementEvidenceOwner,
+  inspectEvidenceSources,
+  inspectSettlementState,
+  insertApiObservation,
+  seedRecoveryOrder,
+  setManualReviewFlags,
+  insertPendingFulfillmentJob,
+  callFulfillmentForOrder,
+  recoverFulfillments,
   setPublicationExpiry,
   setPublicationEntitlementStatus,
   countOrdersForDesign,
@@ -45,7 +55,6 @@ export async function runPaymentContract({
   restorePaymentCurrency,
   failPublicationCreation,
   restorePublicationCreation,
-  recoverFulfillments,
   inspectFulfillmentJob,
   makeFulfillmentJobDue,
   setFulfillmentJobLease,
@@ -476,6 +485,9 @@ export async function runPaymentContract({
     transferType: "in",
     transferAmount: created.body.total_minor,
   });
+  if (insertApiObservation) {
+    await insertApiObservation(created.body.order_id, String(JSON.parse(validPayload).id));
+  }
   const validHeaders = signedHeaders(webhookSecret, validPayload);
   const concurrentDeliveries = await Promise.all([
     request("/payments/sepay/webhook", null, {
@@ -490,7 +502,12 @@ export async function runPaymentContract({
     }),
   ]);
   assert.deepEqual(concurrentDeliveries.map((item) => item.response.status), [200, 200],
-    `${label}: concurrent duplicate webhook is acknowledged idempotently`);
+    `${label}: concurrent duplicate webhook is acknowledged idempotently; responses=${
+      JSON.stringify(concurrentDeliveries.map((item) => ({
+        status: item.response.status,
+        body: item.body,
+      })))
+    }`);
   const paid = await request(`/orders/${created.body.order_id}/status`, owner);
   assert.equal(paid.response.status, 200);
   assert.equal(paid.body.status, "FULFILLED", `${label}: verified payment and publication complete fulfillment`);
@@ -504,6 +521,10 @@ export async function runPaymentContract({
   assert.equal(replay.response.status, 200, `${label}: provider retry is acknowledged`);
   const stillPaid = await request(`/orders/${created.body.order_id}/status`, owner);
   assert.equal(stillPaid.body.status, "FULFILLED", `${label}: replay does not apply the payment twice`);
+  if (inspectSettlementEvidence) {
+    assert.equal(await inspectSettlementEvidence(String(JSON.parse(validPayload).id)), 1,
+      `${label}: duplicate deliveries persist one settlement evidence row`);
+  }
   if (inspectOrderArtifacts) {
     const artifacts = await inspectOrderArtifacts(created.body.order_id);
     assert.deepEqual(artifacts, {
@@ -513,6 +534,13 @@ export async function runPaymentContract({
       entitlements: 1,
       fulfillmentJobs: 1,
     }, `${label}: replay creates no duplicate settlement or fulfillment records`);
+  }
+  if (inspectEvidenceSources && insertApiObservation) {
+    assert.deepEqual(await inspectEvidenceSources(created.body.order_id), {
+      SEPAY_WEBHOOK: 1,
+      SEPAY_API_V2: 0,
+      API_OBSERVATIONS: 1,
+    }, `${label}: API observations remain separate from webhook settlement evidence`);
   }
 
   if (allTemplates) {
@@ -1090,9 +1118,26 @@ export async function runPaymentContract({
     assert.deepEqual(outcomes.sort(), ["MANUAL_REVIEW", "PROCESSED"],
       `${label}: only the transaction linked to the payment is processed`);
   }
+  let collidingTransactionId = String(JSON.parse(validPayload).id);
+  if (inspectWebhookEvent) {
+    for (const candidate of transactionIds) {
+      const event = await inspectWebhookEvent(String(candidate));
+      if (event.outcome === "PROCESSED") {
+        collidingTransactionId = String(candidate);
+        break;
+      }
+    }
+  }
+  const evidenceOwnerBeforeCollision = inspectSettlementEvidenceOwner
+    ? await inspectSettlementEvidenceOwner(collidingTransactionId)
+    : null;
+  if (evidenceOwnerBeforeCollision) {
+    assert.equal(evidenceOwnerBeforeCollision.length, 1,
+      `${label}: source transaction has exactly one evidence owner before collision`);
+  }
   const duplicateOrder = await createRequest(`same-transaction-${randomUUID()}`);
   const duplicateTransactionPayload = JSON.stringify({
-    id: validPayload && JSON.parse(validPayload).id,
+    id: collidingTransactionId,
     accountNumber: receivingAccount,
     code: duplicateOrder.body.payment.reference,
     transferType: "in",
@@ -1107,6 +1152,19 @@ export async function runPaymentContract({
   const collisionReview = await request(`/orders/${duplicateOrder.body.order_id}/status`, owner);
   assert.equal(collisionReview.body.status, expectedMode === "mock" ? "AWAITING_PAYMENT" : "MANUAL_REVIEW",
     `${label}: one provider transaction cannot pay a second order`);
+  if (inspectSettlementEvidence) {
+    assert.equal(await inspectSettlementEvidence(collidingTransactionId), 1,
+      `${label}: a colliding source transaction is not reassigned`);
+  }
+  if (inspectSettlementEvidenceOwner && evidenceOwnerBeforeCollision) {
+    assert.deepEqual(
+      await inspectSettlementEvidenceOwner(collidingTransactionId),
+      evidenceOwnerBeforeCollision,
+      `${label}: a colliding source transaction retains its original payment owner`,
+    );
+    assert.notEqual(evidenceOwnerBeforeCollision[0].order_id, duplicateOrder.body.order_id,
+      `${label}: the second order never owns the existing transaction evidence`);
+  }
 
   const expiredOrder = await createRequest(`expired-${randomUUID()}`);
   assert.equal(expiredOrder.response.status, 201);
@@ -1157,42 +1215,164 @@ export async function runPaymentContract({
     await assertRecoveryIgnoresOrder(expiredOrder.body.order_id);
   }
 
-  if (failOrderPayment && restoreOrderPayment && inspectWebhookEvent) {
-    const recoveryOrder = await createRequest(`recovery-${randomUUID()}`);
-    const recoveryTransactionId = String(Number(`${Date.now()}`.slice(-8)) + 10);
-    const recoveryPayload = JSON.stringify({
-      id: recoveryTransactionId,
+  if (failSettlementStep && restoreSettlementStep && inspectSettlementState) {
+    for (const [step, title] of [
+      ["evidence", "evidence insertion"],
+      ["payment", "payment update"],
+      ["order", "order update"],
+      ["webhook-outcome", "webhook outcome update"],
+      ["fulfillment-job", "fulfillment job insertion"],
+    ]) {
+      const rollbackDesign = await request("/designs", owner, {
+        method: "POST",
+        mutating: true,
+        json: { template_id: "our-universe", schema_version: 1 },
+      });
+      assert.equal(rollbackDesign.response.status, 201,
+        `${label}: create an isolated design for ${title} rollback`);
+      const failedOrder = await createRequest(
+        `rollback-${step}-${randomUUID()}`,
+        rollbackDesign.body.design_id,
+      );
+      const transactionId = `rollback-${step}-${randomUUID()}`;
+      const payload = JSON.stringify({
+        id: transactionId,
+        accountNumber: receivingAccount,
+        code: failedOrder.body.payment.reference,
+        transferType: "in",
+        transferAmount: failedOrder.body.total_minor,
+      });
+      await failSettlementStep(step, failedOrder.body.order_id);
+      try {
+        const failedProcessing = await request("/payments/sepay/webhook", null, {
+          method: "POST",
+          headers: signedHeaders(webhookSecret, payload),
+          body: payload,
+        });
+        assert.equal(failedProcessing.response.status, 500,
+          `${label}: forced ${title} failure is retriable`);
+        assert.deepEqual(
+          await inspectSettlementState(failedOrder.body.order_id, transactionId),
+          {
+            order_status: "AWAITING_PAYMENT",
+            payment_status: "PENDING",
+            provider_payment_id: null,
+            review_required: 0,
+            payment_review_required: 0,
+            webhook_outcome: "RECEIVED",
+            evidence_count: 0,
+            fulfillment_job_status: null,
+            fulfillment_job_count: 0,
+            publication_count: 0,
+          },
+          `${label}: ${title} failure rolls back every settlement write`,
+        );
+      } finally {
+        await restoreSettlementStep(step);
+      }
+
+      const retried = await request("/payments/sepay/webhook", null, {
+        method: "POST",
+        headers: signedHeaders(webhookSecret, payload),
+        body: payload,
+      });
+      assert.equal(retried.response.status, 200,
+        `${label}: valid retry after ${title} rollback is accepted`);
+      assert.deepEqual(
+        await inspectSettlementState(failedOrder.body.order_id, transactionId),
+        {
+          order_status: "FULFILLED",
+          payment_status: "SUCCEEDED",
+          provider_payment_id: transactionId,
+          review_required: 0,
+          payment_review_required: 0,
+          webhook_outcome: "PROCESSED",
+          evidence_count: 1,
+          fulfillment_job_status: "COMPLETED",
+          fulfillment_job_count: 1,
+          publication_count: 1,
+        },
+        `${label}: retry after ${title} failure creates one settlement and fulfillment`,
+      );
+    }
+  }
+
+  if (seedRecoveryOrder && inspectSettlementState &&
+      callFulfillmentForOrder && recoverFulfillments) {
+    for (const evidenceCase of ["missing", "revoked", "mismatched", "api-only"]) {
+      const recoveryOrder = await createRequest(`recovery-${evidenceCase}-${randomUUID()}`);
+      const transactionId = await seedRecoveryOrder(recoveryOrder.body.order_id, evidenceCase);
+      const direct = await callFulfillmentForOrder(recoveryOrder.body.order_id);
+      assert.equal(direct.completed, false,
+        `${label}: direct fulfillment rejects ${evidenceCase} evidence`);
+      const recovery = await recoverFulfillments();
+      assert.equal(recovery.attempted, 0,
+        `${label}: recovery does not authorize ${evidenceCase} evidence`);
+      assert.deepEqual(
+        await inspectSettlementState(recoveryOrder.body.order_id, transactionId),
+        {
+          order_status: "PAID",
+          payment_status: "SUCCEEDED",
+          provider_payment_id: evidenceCase === "api-only" ? null : transactionId,
+          review_required: 0,
+          payment_review_required: 0,
+          webhook_outcome: evidenceCase === "revoked" || evidenceCase === "mismatched"
+            ? "PROCESSED"
+            : null,
+          evidence_count: evidenceCase === "missing" || evidenceCase === "api-only" ? 0 : 1,
+          fulfillment_job_status: "PENDING",
+          fulfillment_job_count: 1,
+          publication_count: 0,
+        },
+        `${label}: ${evidenceCase} evidence leaves recovery artifacts untouched`,
+      );
+    }
+  }
+
+  if (setManualReviewFlags && insertPendingFulfillmentJob &&
+      inspectSettlementState && inspectWebhookEvent &&
+      callFulfillmentForOrder && recoverFulfillments) {
+    const reviewOrder = await createRequest(`manual-review-${randomUUID()}`);
+    const transactionId = `manual-review-${randomUUID()}`;
+    await setManualReviewFlags(reviewOrder.body.order_id);
+    const payload = JSON.stringify({
+      id: transactionId,
       accountNumber: receivingAccount,
-      code: recoveryOrder.body.payment.reference,
+      code: reviewOrder.body.payment.reference,
       transferType: "in",
-      transferAmount: recoveryOrder.body.total_minor,
+      transferAmount: reviewOrder.body.total_minor,
     });
-    await failOrderPayment(recoveryOrder.body.order_id);
-    const failedProcessing = await request("/payments/sepay/webhook", null, {
+    const rejectedSettlement = await request("/payments/sepay/webhook", null, {
       method: "POST",
-      headers: signedHeaders(webhookSecret, recoveryPayload),
-      body: recoveryPayload,
+      headers: signedHeaders(webhookSecret, payload),
+      body: payload,
     });
-    assert.equal(failedProcessing.response.status, 500,
-      `${label}: database transaction failure is retriable`);
-    const stillPending = await request(`/orders/${recoveryOrder.body.order_id}/status`, owner);
-    assert.equal(stillPending.body.status, "AWAITING_PAYMENT",
-      `${label}: failed batch does not partially mark order paid`);
-    const pendingEvent = await inspectWebhookEvent(recoveryTransactionId);
-    assert.equal(pendingEvent.outcome, "RECEIVED");
-    await restoreOrderPayment(recoveryOrder.body.order_id);
-    const recovered = await request("/payments/sepay/webhook", null, {
-      method: "POST",
-      headers: signedHeaders(webhookSecret, recoveryPayload),
-      body: recoveryPayload,
-    });
-    assert.equal(recovered.response.status, 200);
-    const recoveredStatus = await request(`/orders/${recoveryOrder.body.order_id}/status`, owner);
-    assert.equal(recoveredStatus.body.status, "FULFILLED",
-      `${label}: provider retry recovers an event persisted before a failed transaction`);
-    const recoveredEvent = await inspectWebhookEvent(recoveryTransactionId);
-    assert.equal(recoveredEvent.outcome, "PROCESSED");
-    assert.ok(recoveredEvent.processing_attempts >= 2);
+    assert.equal(rejectedSettlement.response.status, 200);
+    assert.equal((await inspectWebhookEvent(transactionId)).outcome, "MANUAL_REVIEW",
+      `${label}: an already flagged payment remains in manual review`);
+    await insertPendingFulfillmentJob(reviewOrder.body.order_id);
+    const direct = await callFulfillmentForOrder(reviewOrder.body.order_id);
+    assert.equal(direct.completed, false,
+      `${label}: direct fulfillment rejects a manual-review payment`);
+    const recovery = await recoverFulfillments();
+    assert.equal(recovery.attempted, 0,
+      `${label}: recovery cannot fulfill a manual-review payment`);
+    assert.deepEqual(
+      await inspectSettlementState(reviewOrder.body.order_id, transactionId),
+      {
+        order_status: "AWAITING_PAYMENT",
+        payment_status: "PENDING",
+        provider_payment_id: null,
+        review_required: 1,
+        payment_review_required: 1,
+        webhook_outcome: "MANUAL_REVIEW",
+        evidence_count: 0,
+        fulfillment_job_status: "PENDING",
+        fulfillment_job_count: 1,
+        publication_count: 0,
+      },
+      `${label}: manual-review settlement and recovery produce no paid artifacts`,
+    );
   }
 
   const outgoingOrder = await createRequest(`outgoing-${randomUUID()}`);
@@ -1420,7 +1600,10 @@ export async function runPaymentContract({
       await restorePublicationPublishing(renewal.body.order_id);
       await makeFulfillmentJobDue(renewal.body.order_id);
       const recovered = await recoverFulfillments();
-      assert.equal(recovered.completed, 1);
+      assert.equal(recovered.completed, 1,
+        `${label}: evidence-backed renewal recovery completes; job=${JSON.stringify(
+          await inspectFulfillmentJob(renewal.body.order_id),
+        )}`);
       assert.equal((await request(`/orders/${renewal.body.order_id}/status`, owner)).body.status, "FULFILLED");
       assert.deepEqual(await inspectEntitlement(renewal.body.order_id), entitlementBeforeRetry,
         `${label}: recovery reuses the entitlement without extending it twice`);

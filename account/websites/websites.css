@@ -41,6 +41,12 @@ button.primary { background: linear-gradient(110deg, #f873ad, #c377df); color: #
 button.danger { color: #ffb0b8; border-color: rgba(255, 100, 120, .35); background: rgba(120, 35, 48, .18); }
 button:disabled { opacity: .5; cursor: wait; }
 .public-link { overflow-wrap: anywhere; color: #ffa7d2; }
+.qr-panel { margin: 16px 0; padding: 16px; border: 1px solid rgba(255, 157, 201, .2); border-radius: 14px; background: rgba(15, 11, 22, .72); }
+.qr-figure { width: min(100%, 280px); margin: 0 auto 12px; padding: 10px; border-radius: 12px; background: #fff; color: #211728; text-align: center; }
+.qr-figure img { display: block; width: 100%; height: auto; aspect-ratio: 1; image-rendering: pixelated; }
+.qr-figure figcaption { margin-top: 8px; font-size: .82rem; line-height: 1.4; }
+.qr-status { min-height: 1.5em; color: #d8c9d6; text-align: center; }
+.qr-panel button { display: flex; margin: 0 auto; }
 .empty { grid-column: 1 / -1; padding: 24px; border: 1px dashed rgba(255, 157, 201, .25); border-radius: 16px; color: #c5acbd; }
 [hidden] { display: none !important; }
 @media (max-width: 480px) { .shell { padding-top: 32px; } .card { padding: 18px; } }

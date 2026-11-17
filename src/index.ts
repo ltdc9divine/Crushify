@@ -1,9 +1,11 @@
 import { handleSessionRoutes } from "./auth.ts";
-import { handleAssetRoutes, reconcileUploadAttemptCleanup } from "./assets.ts";
+import { handleAssetRoutes } from "./assets.ts";
 import { handleDesignRoutes, handlePreviewRoutes } from "./designs.ts";
+import { handleCustomDesignRoutes } from "./custom-design.ts";
+import { handleAdminRoutes } from "./admin.ts";
 import { handlePaymentRoutes } from "./payments.ts";
 import { handlePublicationRoutes } from "./publications.ts";
-import { recoverPendingFulfillments, runPublicationLifecycle } from "./publications.ts";
+import { runScheduledPublicationLifecycle } from "./scheduler.ts";
 import { D1DatabaseAdapter } from "./database/d1.ts";
 import {
   CloudinaryConfigurationError,
@@ -26,6 +28,22 @@ interface CloudflareEnv extends Omit<Env, "DB" | "ASSETS"> {
   DATABASE_PROVIDER: "d1";
   TURSO_STAGING_DATABASE_URL?: string;
   TURSO_STAGING_AUTH_TOKEN?: string;
+  PREVIEW_CUSTOMER_FLOW_ENABLED?: string;
+  PREVIEW_AUTH_ALLOWED_EMAILS?: string;
+  PREVIEW_PAYMENT_MODE?: string;
+  PREVIEW_SEPAY_WEBHOOK_SECRET?: string;
+  PREVIEW_SEPAY_BANK_CODE?: string;
+  PREVIEW_SEPAY_BANK_ACCOUNT?: string;
+  PREVIEW_SEPAY_ACCOUNT_NAME?: string;
+  PREVIEW_MANUAL_BANK_CODE?: string;
+  PREVIEW_MANUAL_BANK_ACCOUNT?: string;
+  PREVIEW_MANUAL_ACCOUNT_NAME?: string;
+  PREVIEW_SEPAY_RECONCILIATION_ENABLED?: string;
+  PREVIEW_SEPAY_API_TOKEN?: string;
+  PREVIEW_SEPAY_API_BANK_ACCOUNT_ID?: string;
+  PREVIEW_SEPAY_RECONCILIATION_SECRET?: string;
+  PREVIEW_SEPAY_RECONCILIATION_START_AT?: string;
+  STAGING_LIFECYCLE_SECRET?: string;
 }
 
 interface WorkerRequestScope {
@@ -45,6 +63,9 @@ function hasLocalOnlyConfiguration(env: CloudflareEnv): boolean {
     env.SEPAY_BANK_CODE,
     env.SEPAY_BANK_ACCOUNT,
     env.SEPAY_ACCOUNT_NAME,
+    env.MANUAL_BANK_CODE,
+    env.MANUAL_BANK_ACCOUNT,
+    env.MANUAL_ACCOUNT_NAME,
   ].some((value) => value !== undefined);
 }
 
@@ -55,7 +76,27 @@ function hasStagingConfiguration(env: CloudflareEnv): boolean {
     env.CLOUDINARY_STAGING_CLOUD_NAME,
     env.CLOUDINARY_STAGING_API_KEY,
     env.CLOUDINARY_STAGING_API_SECRET,
+    env.CLOUDINARY_PRODUCTION_CLOUD_NAME,
+    env.PREVIEW_CUSTOMER_FLOW_ENABLED,
+    env.PREVIEW_AUTH_ALLOWED_EMAILS,
+    env.PREVIEW_PAYMENT_MODE,
+    env.PREVIEW_SEPAY_WEBHOOK_SECRET,
+    env.PREVIEW_SEPAY_BANK_CODE,
+    env.PREVIEW_SEPAY_BANK_ACCOUNT,
+    env.PREVIEW_SEPAY_ACCOUNT_NAME,
+    env.PREVIEW_MANUAL_BANK_CODE,
+    env.PREVIEW_MANUAL_BANK_ACCOUNT,
+    env.PREVIEW_MANUAL_ACCOUNT_NAME,
+    env.PREVIEW_SEPAY_RECONCILIATION_ENABLED,
+    env.PREVIEW_SEPAY_API_TOKEN,
+    env.PREVIEW_SEPAY_API_BANK_ACCOUNT_ID,
+    env.PREVIEW_SEPAY_RECONCILIATION_SECRET,
+    env.PREVIEW_SEPAY_RECONCILIATION_START_AT,
+    env.STAGING_LIFECYCLE_SECRET,
     env.PREVIEW_EMAIL_SINK,
+    env.PREVIEW_MAIL_PROVIDER,
+    env.PREVIEW_MAIL_API_KEY,
+    env.PREVIEW_MAIL_FROM_EMAIL,
   ].some((value) => value !== undefined);
 }
 
@@ -148,6 +189,10 @@ export async function handleApiRequest(
 
     const authResponse = await handleSessionRoutes(request, env, url.pathname, requestId);
     if (authResponse) return authResponse;
+    const adminResponse = await handleAdminRoutes(request, env, url.pathname, requestId);
+    if (adminResponse) return adminResponse;
+    const customDesignResponse = await handleCustomDesignRoutes(request, env, url.pathname, requestId);
+    if (customDesignResponse) return customDesignResponse;
     const designResponse = await handleDesignRoutes(request, env, url.pathname, requestId);
     if (designResponse) return designResponse;
     const assetResponse = await handleAssetRoutes(request, env, url.pathname, requestId);
@@ -190,21 +235,44 @@ export default {
       STORAGE: storage,
     };
     ctx.waitUntil((async () => {
-      const fulfillment = await recoverPendingFulfillments(runtimeEnv, 50);
-      const lifecycle = await runPublicationLifecycle(runtimeEnv, { limit: 50 });
-      const uploadCleanup = await reconcileUploadAttemptCleanup(runtimeEnv, { limit: 50 });
-      logSafeInfo("scheduler.publication_maintenance_completed", "lifecycle", {
+      const maintenance = await runScheduledPublicationLifecycle(runtimeEnv, { limit: 50 });
+      const fulfillment = maintenance.operations?.fulfillmentRecovery;
+      const lifecycle = maintenance.operations?.publicationLifecycle;
+      const derivativeCleanup = maintenance.operations?.publicationDerivativeCleanup;
+      const uploadCleanup = maintenance.operations?.uploadCleanup;
+      const fulfillmentResult = fulfillment?.status === "completed" ? fulfillment.result : undefined;
+      const lifecycleResult = lifecycle?.status === "completed" ? lifecycle.result : undefined;
+      const derivativeResult = derivativeCleanup?.status === "completed"
+        ? derivativeCleanup.result
+        : undefined;
+      const uploadResult = uploadCleanup?.status === "completed" ? uploadCleanup.result : undefined;
+      const maintenanceOutcome = maintenance.failed
+        ? "failed"
+        : maintenance.pending || !maintenance.acquired
+          ? "pending"
+          : "completed";
+      logSafeInfo(`scheduler.publication_maintenance_${maintenanceOutcome}`, "lifecycle", {
         environment: runtimeEnv.ENVIRONMENT,
         counts: {
-          completed: fulfillment.completed,
-          manual_review: fulfillment.manualReview,
-          expired: lifecycle.expired,
-          erased: lifecycle.erased,
-          retryable: lifecycle.retryable,
-          upload_cleanup_processed: uploadCleanup.processed,
-          upload_cleanup_cleaned: uploadCleanup.cleaned,
-          upload_cleanup_retryable: uploadCleanup.retryable,
-          upload_cleanup_manual_review: uploadCleanup.manualReview,
+          completed: fulfillmentResult?.completed ?? 0,
+          manual_review: fulfillmentResult?.manualReview ?? 0,
+          expired: lifecycleResult?.expired ?? 0,
+          erased: lifecycleResult?.erased ?? 0,
+          retryable: lifecycleResult?.retryable ?? 0,
+          derivative_cleanup_processed: derivativeResult?.processed ?? 0,
+          derivative_cleanup_cleaned: derivativeResult?.cleaned ?? 0,
+          derivative_cleanup_pending: derivativeResult?.pending ?? 0,
+          derivative_cleanup_deferred: derivativeResult?.deferred ?? 0,
+          derivative_cleanup_failed: derivativeResult?.status === "failed"
+            ? derivativeResult.retryable
+            : 0,
+          derivative_cleanup_retryable: derivativeResult?.retryable ?? 0,
+          derivative_cleanup_manual_review: derivativeResult?.manualReview ?? 0,
+          derivative_cleanup_has_more: derivativeResult?.hasMore ? 1 : 0,
+          upload_cleanup_processed: uploadResult?.processed ?? 0,
+          upload_cleanup_cleaned: uploadResult?.cleaned ?? 0,
+          upload_cleanup_retryable: uploadResult?.retryable ?? 0,
+          upload_cleanup_manual_review: uploadResult?.manualReview ?? 0,
         },
       });
     })().catch((error) => {

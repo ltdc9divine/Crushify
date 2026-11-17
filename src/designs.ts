@@ -1,6 +1,9 @@
 import { requireCsrf, requireSession } from "./auth.ts";
 import { logSafeError } from "./logging.ts";
-import { cleanupAssets } from "./publications.ts";
+import {
+  cleanupAssets,
+  type PublicationDerivativeCleanupStatus,
+} from "./publications.ts";
 import { apiError, jsonResponse, nowIso, randomToken, readJson, safeId, sha256 } from "./http.ts";
 import { isJsonWithinLimit } from "./universe.ts";
 import {
@@ -460,12 +463,22 @@ async function deleteDesign(
     const publications = await env.DB.prepare(
       "SELECT id FROM publications WHERE design_id = ?",
     ).bind(designId).all<{ id: string }>();
-    let cleanupSucceeded = true;
+    const cleanupStatuses: PublicationDerivativeCleanupStatus[] = [];
     for (const publication of publications.results) {
-      if (!await cleanupAssets(env, publication.id)) cleanupSucceeded = false;
+      cleanupStatuses.push((await cleanupAssets(env, publication.id)).status);
     }
-    if (!cleanupSucceeded) {
-      return apiError(requestId, 503, "DELETION_PENDING",
+    const cleanupStatus = ([
+      "manual_review", "failed", "pending", "deferred",
+    ] as const).find((status) => cleanupStatuses.includes(status));
+    if (cleanupStatus) {
+      const code = cleanupStatus === "manual_review"
+        ? "MEDIA_CLEANUP_MANUAL_REVIEW"
+        : cleanupStatus === "failed"
+          ? "MEDIA_CLEANUP_FAILED"
+          : cleanupStatus === "deferred"
+            ? "MEDIA_CLEANUP_DEFERRED"
+            : "DELETION_PENDING";
+      return apiError(requestId, 503, code,
         "Public media cleanup is pending; payment and source data remain preserved");
     }
     return jsonResponse({

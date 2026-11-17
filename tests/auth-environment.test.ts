@@ -48,7 +48,11 @@ class SyntheticAuthDatabase implements Database {
             id: "synthetic-session-id",
             customer_id: "synthetic-customer-id",
             csrf_token_hash: "synthetic-csrf-hash",
+            email_normalized: "qa-auth@example.test",
           } as T;
+        }
+        if (normalized.startsWith("SELECT status, email_normalized FROM customers")) {
+          return { status: "ACTIVE", email_normalized: "qa-auth@example.test" } as T;
         }
         if (normalized.startsWith("SELECT email FROM customers")) {
           return { email: "qa-auth@example.test" } as T;
@@ -244,6 +248,101 @@ describe("environment-scoped authentication", () => {
     assert.match(cookies, /crushify_session=;[^,]*Max-Age=0/);
     assert.match(cookies, /crushify_csrf=;[^,]*Max-Age=0/);
     assert.doesNotMatch(cookies, /crushify_session=[^;,]+/);
+  });
+
+  it("enables Preview magic links only for an allowlisted address and keeps cookies secure", async () => {
+    const db = new SyntheticAuthDatabase();
+    const messages: EmailMessage[] = [];
+    const env: Env = {
+      DB: db,
+      ENVIRONMENT: "staging",
+      PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PREVIEW_AUTH_ALLOWED_EMAILS: "qa-auth@example.test",
+      APP_ORIGIN: "https://preview.crushify.test",
+      PREVIEW_TEST_EMAIL_SINK: async (message) => messages.push(message),
+    };
+    const responseMessage = "If the address can be used, a sign-in link has been sent.";
+    const blocked = await handleApiRequest(
+      makeRequest("/customers/session", "POST", {
+        body: JSON.stringify({ email: "other@example.test" }),
+      }),
+      env,
+    );
+    assert.equal(blocked.status, 202);
+    assert.equal((await blocked.json() as { message: string }).message, responseMessage);
+    assert.deepEqual(db.queries, []);
+    assert.deepEqual(messages, []);
+
+    const login = await handleApiRequest(
+      makeRequest("/customers/session", "POST", {
+        body: JSON.stringify({ email: "QA-Auth@example.test" }),
+      }),
+      env,
+    );
+    assert.equal(login.status, 202);
+    const loginBody = await login.json();
+    assert.equal((loginBody as { message: string }).message, responseMessage);
+    assert.doesNotMatch(JSON.stringify(loginBody), /magic_token|https:\/\/preview\.crushify\.test/);
+    assert.equal(messages.length, 1);
+    const token = messages[0].text.match(/#magic_token=([A-Za-z0-9_-]+)/)?.[1];
+    assert.ok(token);
+
+    const verified = await handleApiRequest(
+      makeRequest("/customers/session/verify", "POST", {
+        body: JSON.stringify({ token }),
+      }),
+      env,
+    );
+    assert.equal(verified.status, 200);
+    assert.match(verified.headers.get("set-cookie") ?? "", /crushify_session=[^;,]+;[^,]*Secure/);
+    assert.match(verified.headers.get("set-cookie") ?? "", /crushify_csrf=[^;,]+;[^,]*Secure/);
+
+    const sessionCookie = verified.headers.get("set-cookie")
+      ?.match(/crushify_session=[^;,]+/)?.[0];
+    assert.ok(sessionCookie);
+    const session = await handleApiRequest(
+      makeRequest("/customers/me", "GET", { cookie: sessionCookie }),
+      env,
+    );
+    assert.equal(session.status, 200);
+  });
+
+  it("does not expose Preview magic-link content when email delivery fails", async () => {
+    const db = new SyntheticAuthDatabase();
+    let messageText = "";
+    const env: Env = {
+      DB: db,
+      ENVIRONMENT: "staging",
+      PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PREVIEW_AUTH_ALLOWED_EMAILS: "qa-auth@example.test",
+      APP_ORIGIN: "https://preview.crushify.test",
+      PREVIEW_TEST_EMAIL_SINK: async (message) => {
+        messageText = message.text;
+        throw new Error(message.text);
+      },
+    };
+    const originalError = console.error;
+    const logged: string[] = [];
+    console.error = (...values: unknown[]) => logged.push(values.map(String).join(" "));
+    try {
+      const response = await handleApiRequest(
+        makeRequest("/customers/session", "POST", {
+          body: JSON.stringify({ email: "qa-auth@example.test" }),
+        }),
+        env,
+      );
+      assert.equal(response.status, 502);
+      const responseText = await response.text();
+      const token = messageText.match(/#magic_token=([A-Za-z0-9_-]+)/)?.[1];
+      assert.ok(token);
+      for (const output of [responseText, logged.join("\n")]) {
+        assert.equal(output.includes(token), false);
+        assert.equal(output.includes("https://preview.crushify.test"), false);
+        assert.equal(output.includes("qa-auth@example.test"), false);
+      }
+    } finally {
+      console.error = originalError;
+    }
   });
 
   it("keeps a public read-only health route available in Preview", async () => {

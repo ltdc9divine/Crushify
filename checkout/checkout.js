@@ -7,6 +7,7 @@ const durationNote = document.querySelector("#duration-note");
 const orderPanel = document.querySelector("#order-panel");
 const qrPanel = document.querySelector("#qr-panel");
 const qrImage = document.querySelector("#payment-qr");
+const qrContainer = document.querySelector("#payment-qr-container");
 const qrError = document.querySelector("#qr-error");
 const mockNote = document.querySelector("#mock-note");
 const copyFeedback = document.querySelector("#copy-feedback");
@@ -175,6 +176,13 @@ function showCatalog(catalogData) {
     `${formatAmount(product.base_price_minor)} · gồm tháng đầu tiên`;
   document.querySelector("#design-summary").textContent =
     `Bản xem trước sử dụng phiên bản nội dung ${design.revision} đã lưu. Có thể quay lại trình chỉnh sửa trước khi tạo đơn.`;
+  const editDesignLink = document.querySelector("#edit-design-link");
+  const editUrl = new URL(
+    `/templates/${encodeURIComponent(product.id)}/index.html`,
+    location.origin,
+  );
+  editUrl.searchParams.set("design", designId);
+  editDesignLink.href = `${editUrl.pathname}${editUrl.search}`;
   addConsentOptions(design.data);
   checkoutPanel.hidden = false;
   updatePrice();
@@ -223,11 +231,23 @@ function showOrder(order) {
       trustedQrUrl = null;
     }
   }
-  qrPanel.hidden = !trustedQrUrl || !instructions;
-  if (trustedQrUrl && instructions) {
-    qrError.hidden = true;
-    qrImage.referrerPolicy = "no-referrer";
-    qrImage.src = trustedQrUrl;
+  qrPanel.hidden = !instructions;
+  qrContainer.hidden = !trustedQrUrl || !instructions;
+  qrError.hidden = true;
+  const manualTransfer = order.payment?.provider === "MANUAL_BANK_TRANSFER";
+  document.querySelector("#payment-method").textContent = manualTransfer
+    ? "Chuyển khoản ngân hàng · xác nhận thủ công"
+    : "Thông tin thanh toán";
+  document.querySelector("#transfer-safety-note").textContent = manualTransfer
+    ? "Chỉ chuyển đúng số tiền và nội dung. Quản trị viên xác nhận sau khi đối chiếu giao dịch thực nhận; ảnh chụp giao dịch không thay thế khoản tiền đã nhận."
+    : "Chỉ dùng tài khoản Test mode của SePay. Không quét mã này bằng tài khoản ngân hàng thật.";
+  if (instructions) {
+    if (trustedQrUrl) {
+      qrImage.referrerPolicy = "no-referrer";
+      qrImage.src = trustedQrUrl;
+    } else {
+      qrImage.removeAttribute("src");
+    }
     document.querySelector("#payment-bank").textContent = instructions.bank_code;
     document.querySelector("#payment-account").textContent = instructions.bank_account;
     document.querySelector("#payment-account-name").textContent = instructions.account_name || "—";
@@ -242,7 +262,9 @@ function showOrder(order) {
 
   const help = document.querySelector("#tracking-help");
   const messages = {
-    AWAITING_PAYMENT: "Chỉ giao dịch được máy chủ xác minh mới cập nhật trạng thái. Không chuyển tiền thật trên bản thử nghiệm.",
+    AWAITING_PAYMENT: manualTransfer
+      ? "Đơn đang chờ quản trị viên đối chiếu giao dịch ngân hàng. Không gửi ảnh chụp thay cho giao dịch và không tạo đơn khác."
+      : "Chỉ giao dịch được máy chủ xác minh mới cập nhật trạng thái. Không chuyển tiền thật trong SePay Test mode.",
     MANUAL_REVIEW: "Có điểm cần kiểm tra. Không gửi thêm khoản thanh toán; liên hệ hỗ trợ nếu cần.",
     PAID: "Thanh toán đã được xác minh. Món quà đang chờ xử lý.",
     FULFILLING: "Thanh toán đã xác minh nhưng xuất bản đang chậm. Bạn không cần tạo đơn khác; liên hệ hỗ trợ nếu tình trạng kéo dài.",
@@ -300,9 +322,12 @@ function updateCountdown() {
     return;
   }
   const seconds = Math.floor(remaining / 1000);
-  const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
-  const remainder = String(seconds % 60).padStart(2, "0");
-  document.querySelector("#order-expiry").textContent = `${minutes}:${remainder}`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  document.querySelector("#order-expiry").textContent = hours > 0
+    ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
 function stopPolling() {
@@ -317,9 +342,11 @@ async function pollOrder(orderId) {
 
 async function startTracking(orderId) {
   await pollOrder(orderId);
+  window.clearInterval(pollTimer);
+  window.clearInterval(expiryTimer);
   pollTimer = window.setInterval(() => {
     pollOrder(orderId).catch((error) => showNotice(error.message, "error"));
-  }, 3000);
+  }, currentOrder?.payment?.provider === "MANUAL_BANK_TRANSFER" ? 30_000 : 3000);
   expiryTimer = window.setInterval(updateCountdown, 1000);
 }
 
@@ -354,9 +381,11 @@ async function createOrder(event) {
     });
     if (orderStorageKey) sessionStorage.setItem(orderStorageKey, order.order_id);
     showOrder(order);
+    window.clearInterval(pollTimer);
+    window.clearInterval(expiryTimer);
     pollTimer = window.setInterval(() => {
       pollOrder(order.order_id).catch((error) => showNotice(error.message, "error"));
-    }, 3000);
+    }, order.payment?.provider === "MANUAL_BANK_TRANSFER" ? 30_000 : 3000);
     expiryTimer = window.setInterval(updateCountdown, 1000);
   } catch (error) {
     showNotice(error instanceof Error ? error.message : "Không thể tạo đơn hàng.", "error");

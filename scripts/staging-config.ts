@@ -7,10 +7,10 @@ type Environment = Record<string, string | undefined>;
 
 export class StagingConfigurationError extends Error {}
 
-const expectedDatabase = "crushify-staging";
-const expectedGroup = "crushify-staging-sg";
+const expectedDatabase = "crushify-preview";
+const expectedGroup = "crushify-preview";
 const expectedRegion = "Singapore";
-const stagingDatabaseHostname = /^crushify-staging-[a-z0-9-]+\.turso\.io$/i;
+const expectedHostname = "crushify-preview-crushify.aws-ap-southeast-1.turso.io";
 
 export function assertTursoMigrationConfirmation(environment: Environment): void {
   if (environment.TURSO_MIGRATE_CONFIRM !== "I_CONFIRM_APPLY_STAGING_MIGRATIONS") {
@@ -20,11 +20,19 @@ export function assertTursoMigrationConfirmation(environment: Environment): void
   }
 }
 
-function assertStagingEnvironment(environment: Environment): void {
+function assertStagingEnvironment(
+  environment: Environment,
+  allowLocalPreviewPreflight = false,
+): void {
+  const isLocalPreviewPreflight = allowLocalPreviewPreflight &&
+    environment.VERCEL_ENV === "preview" &&
+    environment.CRUSHIFY_LOCAL_STAGING_PREFLIGHT === "1" &&
+    environment.CRUSHIFY_STAGING_PROFILE === "local";
   if (environment.CRUSHIFY_STAGING_PROFILE !== "local" ||
       environment.ENVIRONMENT !== "staging" ||
       (environment.VERCEL_ENV !== undefined &&
-        environment.VERCEL_ENV !== "development") ||
+        environment.VERCEL_ENV !== "development" &&
+        !isLocalPreviewPreflight) ||
       environment.TURSO_DATABASE_URL !== undefined ||
       environment.TURSO_AUTH_TOKEN !== undefined) {
     throw new StagingConfigurationError(
@@ -33,11 +41,12 @@ function assertStagingEnvironment(environment: Environment): void {
   }
 }
 
-export function assertTursoStagingConfiguration(
+function assertTursoStagingConfigurationInternal(
   environment: Environment,
-  requireSyntheticOptIn = false,
+  requireSyntheticOptIn: boolean,
+  allowLocalPreviewPreflight: boolean,
 ): { url: string; authToken: string } {
-  assertStagingEnvironment(environment);
+  assertStagingEnvironment(environment, allowLocalPreviewPreflight);
   if (environment.DATABASE_PROVIDER !== "turso" ||
       environment.TURSO_CONFIRM_DATABASE !== expectedDatabase ||
       environment.TURSO_CONFIRM_GROUP !== expectedGroup ||
@@ -66,15 +75,23 @@ export function assertTursoStagingConfiguration(
   } catch {
     throw new StagingConfigurationError("Turso URL does not match the confirmed staging database identity");
   }
+  const hostname = url.hostname.toLowerCase();
   if (url.protocol !== "libsql:" ||
       url.username || url.password || url.port || url.search || url.hash ||
       (url.pathname && url.pathname !== "/") ||
-      !stagingDatabaseHostname.test(url.hostname) ||
-      url.hostname !== confirmedHostname) {
+      hostname !== expectedHostname ||
+      hostname !== confirmedHostname) {
     throw new StagingConfigurationError("Turso URL does not match the confirmed staging database identity");
   }
 
   return { url: url.toString(), authToken };
+}
+
+export function assertTursoStagingConfiguration(
+  environment: Environment,
+  requireSyntheticOptIn = false,
+): { url: string; authToken: string } {
+  return assertTursoStagingConfigurationInternal(environment, requireSyntheticOptIn, false);
 }
 
 export function resolveTursoStagingMigrationTarget(
@@ -85,7 +102,11 @@ export function resolveTursoStagingMigrationTarget(
     throw new StagingConfigurationError("Turso staging migration mode must be explicit");
   }
   if (mode === "--migrate") assertTursoMigrationConfirmation(environment);
-  return assertTursoStagingConfiguration(environment);
+  return assertTursoStagingConfigurationInternal(
+    environment,
+    false,
+    mode === "--preflight",
+  );
 }
 
 export function assertCloudinaryStagingConfiguration(

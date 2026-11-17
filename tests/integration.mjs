@@ -3,33 +3,118 @@ import { randomBytes } from "node:crypto";
 import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { runDatabaseContract } from "./database-contract.mjs";
 import { runPaymentContract } from "./payment-contract.mjs";
 import { createLocalEmailSink } from "./local-email-sink.mjs";
 
-const root = process.cwd();
-const persistDirectory = await mkdtemp(join(tmpdir(), "crushify-d1-contract-"));
-const port = 8787;
+const root = await realpath(process.cwd());
+const systemTempRoot = await realpath(tmpdir());
+function isWithin(parent, candidate) {
+  const path = relative(parent, candidate);
+  return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`));
+}
+if (isWithin(root, systemTempRoot) || isWithin(systemTempRoot, root)) {
+  throw new Error("System temporary directory must be separate from the repository");
+}
+const createdPersistDirectory = await mkdtemp(join(systemTempRoot, "crushify-d1-contract-"));
+const persistDirectory = await realpath(createdPersistDirectory);
+const emptyEnvFile = join(persistDirectory, "integration.env");
+await writeFile(emptyEnvFile, "", { flag: "wx" });
+function assertDisposablePersistenceDirectory() {
+  if (!isWithin(systemTempRoot, persistDirectory) ||
+      isWithin(root, persistDirectory) ||
+      isWithin(persistDirectory, root) ||
+      !basename(persistDirectory).startsWith("crushify-d1-contract-")) {
+    throw new Error("Refusing to run integration tests without an isolated temporary D1 directory");
+  }
+}
+assertDisposablePersistenceDirectory();
+async function findAvailablePort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await new Promise((resolve) => server.close(resolve));
+    throw new Error("Could not reserve a local integration port");
+  }
+  const availablePort = address.port;
+  await new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+  return availablePort;
+}
+const localD1Flags = () => {
+  assertDisposablePersistenceDirectory();
+  return ["--local", "--persist-to", persistDirectory];
+};
+const port = await findAvailablePort();
 const origin = `http://127.0.0.1:${port}`;
 const webhookSecret = randomBytes(32).toString("hex");
 const receivingAccount = "0000000000";
 const emailSink = await createLocalEmailSink();
-const child = spawn(
-  process.execPath,
-  [
+const workerEnvironmentNames = new Set([
+  "APPDATA",
+  "CI",
+  "COMSPEC",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LOCALAPPDATA",
+  "NUMBER_OF_PROCESSORS",
+  "PATH",
+  "PATHEXT",
+  "PROCESSOR_ARCHITECTURE",
+  "SYSTEMROOT",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USERPROFILE",
+  "WINDIR",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+]);
+const workerProcessEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => workerEnvironmentNames.has(name.toUpperCase())),
+);
+let child;
+let logs = "";
+let localWorkerAvailable = false;
+let spawnError;
+const capture = (chunk) => {
+  logs += chunk.toString();
+  if (logs.length > 64 * 1024) logs = logs.slice(-64 * 1024);
+};
+
+function startWorker(
+  adminEmails = "  PHASE2-ADMIN@EXAMPLE.TEST  ",
+  paymentMode = "sepay-test",
+) {
+  localWorkerAvailable = false;
+  spawnError = undefined;
+  logs = "";
+  const args = [
     "node_modules/wrangler/bin/wrangler.js",
     "dev",
+    "tests/integration-worker.mjs",
+    ...localD1Flags(),
+    "--env-file",
+    emptyEnvFile,
     "--ip",
     "127.0.0.1",
     "--port",
     String(port),
     "--local-protocol",
     "http",
-    "--persist-to",
-    persistDirectory,
     "--var",
     "ENVIRONMENT:local",
     "--var",
@@ -38,41 +123,77 @@ const child = spawn(
     `LOCAL_TEST_MAIL_SINK_URL:${emailSink.url}`,
     "--var",
     "LOCAL_TEST_CATALOG_OVERRIDE:true",
-    "--var",
-    "PAYMENT_MODE:sepay-test",
-    "--var",
-    `SEPAY_WEBHOOK_SECRET:${webhookSecret}`,
-    "--var",
-    "SEPAY_BANK_CODE:MB",
-    "--var",
-    `SEPAY_BANK_ACCOUNT:${receivingAccount}`,
-    "--var",
-    "SEPAY_ACCOUNT_NAME:Crushify Test",
-  ],
-  { cwd: root, stdio: ["ignore", "pipe", "pipe"] },
-);
-let logs = "";
-let ready = false;
-const capture = (chunk) => {
-  logs += chunk.toString();
-  if (logs.includes("Ready on")) ready = true;
-};
-child.stdout.on("data", capture);
-child.stderr.on("data", capture);
-
-function sanitizedLogs() {
-  return logs.replace(/magic_token=[A-Za-z0-9_-]+/g, "magic_token=[redacted]");
+  ];
+  if (adminEmails !== null) args.push("--var", `ADMIN_EMAILS:${adminEmails}`);
+  if (paymentMode === "manual-bank-transfer") {
+    args.push(
+      "--var",
+      "PAYMENT_MODE:manual-bank-transfer",
+      "--var",
+      "MANUAL_BANK_CODE:MB",
+      "--var",
+      `MANUAL_BANK_ACCOUNT:${receivingAccount}`,
+      "--var",
+      "MANUAL_ACCOUNT_NAME:Crushify Test",
+    );
+  } else {
+    args.push(
+      "--var",
+      "PAYMENT_MODE:sepay-test",
+      "--var",
+      `SEPAY_WEBHOOK_SECRET:${webhookSecret}`,
+      "--var",
+      "SEPAY_BANK_CODE:MB",
+      "--var",
+      `SEPAY_BANK_ACCOUNT:${receivingAccount}`,
+      "--var",
+      "SEPAY_ACCOUNT_NAME:Crushify Test",
+    );
+  }
+  child = spawn(
+    process.execPath,
+    args,
+    {
+      cwd: root,
+      env: workerProcessEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  child.stdout.on("data", capture);
+  child.stderr.on("data", capture);
+  child.on("error", (error) => {
+    spawnError = error;
+    capture(Buffer.from(`Worker process error: ${error.message}`));
+  });
 }
 
-function executeLocalD1(sql) {
+function sanitizedLogs() {
+  return logs
+    .split(webhookSecret).join("[redacted]")
+    .split(emailSink.url).join("[local email sink]")
+    .replace(/magic_token=[A-Za-z0-9_-]+/g, "magic_token=[redacted]");
+}
+
+function executeLocalD1(sql, action = "run") {
+  assertDisposablePersistenceDirectory();
+  if (child && child.exitCode === null && !localWorkerAvailable) {
+    throw new Error("Refusing to execute local D1 SQL while the Worker is starting");
+  }
+  if (localWorkerAvailable) {
+    return execFileSync(process.execPath, [
+      "tests/integration-sql.mjs",
+      origin,
+      action,
+      sql,
+    ], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  }
   return execFileSync(process.execPath, [
     "node_modules/wrangler/bin/wrangler.js",
     "d1",
     "execute",
     "crushify-local",
-    "--local",
-    "--persist-to",
-    persistDirectory,
+    ...localD1Flags(),
     "--command",
     sql,
     "--json",
@@ -80,7 +201,7 @@ function executeLocalD1(sql) {
 }
 
 function queryLocalD1(sql) {
-  const result = JSON.parse(executeLocalD1(sql));
+  const result = JSON.parse(executeLocalD1(sql, "query"));
   return result[0]?.results || [];
 }
 
@@ -98,19 +219,43 @@ function assertD1Failure(sql, pattern) {
 }
 
 async function stopWorker() {
-  if (child.exitCode === null && child.signalCode === null) {
-    child.kill();
-    await new Promise((resolveExit) => child.once("exit", resolveExit));
+  if (!child) return;
+  const worker = child;
+  child = null;
+  localWorkerAvailable = false;
+  if (worker.exitCode === null && worker.signalCode === null) {
+    worker.kill();
+    await new Promise((resolveExit) => worker.once("exit", resolveExit));
   }
 }
 
 async function waitReady() {
-  for (let attempt = 0; attempt < 120; attempt++) {
-    if (ready) return;
-    if (child.exitCode !== null) throw new Error(`Wrangler exited before ready.\n${sanitizedLogs()}`);
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    if (spawnError) {
+      throw new Error(`Could not start Wrangler.\n${sanitizedLogs()}`);
+    }
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`Wrangler exited before becoming healthy.\n${sanitizedLogs()}`);
+    }
+    let response;
+    try {
+      response = await fetch(`${origin}/api/v1/health/live`, {
+        signal: AbortSignal.timeout(1_000),
+      });
+    } catch {
+      // Wrangler may still be binding its local listener.
+    }
+    if (response?.status === 200) {
+      if (/Using secrets defined in .*\.dev\.vars/i.test(logs)) {
+        throw new Error("Wrangler loaded the repository's developer vars during integration");
+      }
+      localWorkerAvailable = true;
+      return;
+    }
     await delay(250);
   }
-  throw new Error(`Wrangler did not become ready.\n${sanitizedLogs()}`);
+  throw new Error(`Wrangler did not become healthy within 60 seconds.\n${sanitizedLogs()}`);
 }
 
 async function waitForMagicToken(after) {
@@ -138,6 +283,230 @@ async function json(path, session, options = {}) {
   return { response, body };
 }
 
+async function integrationFulfillmentAction(action, orderId) {
+  const response = await fetch(origin + "/api/__integration/fulfillment", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Connection: "close" },
+    body: JSON.stringify({ action, order_id: orderId }),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200, `integration fulfillment action ${action}`);
+  return body;
+}
+
+async function integrationSePayScan(input) {
+  const response = await fetch(origin + "/api/__integration/sepay-scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Connection: "close" },
+    body: JSON.stringify(input),
+  });
+  return { response, body: await response.json() };
+}
+
+async function integrationSePayLeaseContract() {
+  const response = await fetch(origin + "/api/__integration/sepay-lease-contract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Connection: "close" },
+    body: "{}",
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  for (const [name, passed] of Object.entries(body)) {
+    assert.equal(passed, true, `SePay D1 lease contract: ${name}`);
+  }
+}
+
+async function runSePayD1ReconciliationContract() {
+  const scanKey = "local-contract-sepay-api-v2";
+  const bankAccountId = "f9e8d7c6-b5a4-3210-fedc-ba0987654321";
+  const transactions = [
+    {
+      id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      bank_account_id: bankAccountId,
+      transaction_date: "2026-01-01T10:00:00+07:00",
+      transfer_type: "in",
+      amount_in: 50_000,
+      amount_out: 0,
+      reference_number: "FT26069ABC",
+      code: "CRPLOCAL000000000001",
+      webhook_success: 1,
+    },
+    {
+      id: "b2c3d4e5-f678-4123-8123-456789abcdef",
+      bank_account_id: bankAccountId,
+      transaction_date: "2026-01-01T10:01:00+07:00",
+      transfer_type: "in",
+      amount_in: 50_000,
+      amount_out: 0,
+      reference_number: "FT26069DEF",
+      code: "CRPLOCAL000000000002",
+      webhook_success: null,
+    },
+  ];
+  const input = {
+    scan_key: scanKey,
+    bank_account_id: bankAccountId,
+    transactions,
+    per_page: 1,
+  };
+  const failed = await integrationSePayScan({ ...input, fail_page: 2 });
+  assert.equal(failed.response.status, 500);
+  assert.equal(failed.body.error, "HTTP_ERROR");
+  assert.deepEqual(queryLocalD1(
+    `SELECT window_end, scan_completed_at, lease_token,
+            pending_window_start, pending_window_end, pending_next_page,
+            pending_complete
+       FROM sepay_api_reconciliation_cursors
+      WHERE scan_key = ${sqlText(scanKey)} AND scan_mode = 'DATE_WINDOW'`,
+  )[0], {
+    window_end: null,
+    scan_completed_at: null,
+    lease_token: null,
+    pending_window_start: "2026-01-01T00:00:00.000Z",
+    pending_window_end: "2026-01-02T00:00:00.000Z",
+    pending_next_page: 2,
+    pending_complete: 0,
+  });
+  assert.equal(Number(queryLocalD1(
+    `SELECT COUNT(*) AS count FROM sepay_api_observations`,
+  )[0]?.count), 1, "the fetched page is safely persisted without advancing the cursor");
+
+  const completed = await integrationSePayScan(input);
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.status, "completed");
+  assert.equal(completed.body.pages, 1);
+  assert.equal(completed.body.observations, 1);
+  assert.equal(completed.body.lastTransactionId, transactions[1].id);
+  const repeated = await integrationSePayScan(input);
+  assert.equal(repeated.response.status, 200);
+  assert.equal(Number(queryLocalD1(
+    "SELECT COUNT(*) AS count FROM sepay_api_observations",
+  )[0]?.count), 2, "repeated API observations are idempotent");
+  assert.equal(Number(queryLocalD1(
+    "SELECT COUNT(*) AS count FROM payment_settlement_evidence WHERE evidence_source = 'SEPAY_API_V2'",
+  )[0]?.count), 0, "API observations do not create settlement evidence");
+  const cursor = queryLocalD1(
+    `SELECT window_end, scan_completed_at, lease_token
+       FROM sepay_api_reconciliation_cursors
+      WHERE scan_key = ${sqlText(scanKey)} AND scan_mode = 'DATE_WINDOW'`,
+  )[0];
+  assert.equal(cursor.window_end, "2026-01-02T00:00:00.000Z");
+  assert.equal(cursor.lease_token, null);
+
+  const denseScanKey = "local-contract-sepay-api-v2-over-400";
+  const denseTransactions = Array.from({ length: 401 }, (_, index) => ({
+    ...transactions[0],
+    id: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+    transaction_date: new Date(Date.parse("2026-01-01T10:00:00.000Z") + index * 1000)
+      .toISOString(),
+  }));
+  const denseInput = {
+    scan_key: denseScanKey,
+    bank_account_id: bankAccountId,
+    transactions: denseTransactions,
+    per_page: 100,
+    max_pages: 4,
+  };
+  const partial = await integrationSePayScan(denseInput);
+  assert.equal(partial.response.status, 206);
+  assert.equal(partial.body.status, "partial");
+  assert.equal(partial.body.pages, 4);
+  assert.equal(partial.body.observations, 400);
+  assert.equal(partial.body.continuationPage, 5);
+  assert.equal(partial.body.remainingPages, 1);
+  const partialCursor = queryLocalD1(
+    `SELECT window_end, pending_next_page, pending_last_page,
+            pending_total_records, pending_complete, lease_token
+       FROM sepay_api_reconciliation_cursors
+      WHERE scan_key = ${sqlText(denseScanKey)} AND scan_mode = 'DATE_WINDOW'`,
+  )[0];
+  assert.deepEqual(partialCursor, {
+    window_end: null,
+    pending_next_page: 5,
+    pending_last_page: 5,
+    pending_total_records: 401,
+    pending_complete: 0,
+    lease_token: null,
+  });
+  const continued = await integrationSePayScan(denseInput);
+  assert.equal(continued.response.status, 200);
+  assert.equal(continued.body.status, "completed");
+  assert.equal(continued.body.pages, 1);
+  assert.equal(continued.body.observations, 1);
+  assert.equal(Number(queryLocalD1(
+    `SELECT COUNT(*) AS count FROM sepay_api_observations
+      WHERE transaction_uuid BETWEEN
+        '00000000-0000-4000-8000-000000000000' AND
+        '00000000-0000-4000-8000-000000000190'`,
+  )[0]?.count), 401, "the 400-record run resumes at page 5 without losing records");
+  const denseCursor = queryLocalD1(
+    `SELECT window_end, pending_window_start, pending_next_page, pending_complete
+       FROM sepay_api_reconciliation_cursors
+      WHERE scan_key = ${sqlText(denseScanKey)} AND scan_mode = 'DATE_WINDOW'`,
+  )[0];
+  assert.equal(denseCursor.window_end, "2026-01-02T00:00:00.000Z");
+  assert.equal(denseCursor.pending_window_start, null);
+  assert.equal(denseCursor.pending_next_page, 1);
+  assert.equal(denseCursor.pending_complete, 0);
+
+  const atomicScanKey = "local-contract-sepay-api-v2-page-rollback";
+  const atomicTransactions = [
+    {
+      ...transactions[0],
+      id: "c1111111-1111-4111-8111-111111111111",
+    },
+    {
+      ...transactions[1],
+      id: "d2222222-2222-4222-8222-222222222222",
+    },
+  ];
+  const atomicInput = {
+    scan_key: atomicScanKey,
+    bank_account_id: bankAccountId,
+    transactions: atomicTransactions,
+    per_page: 2,
+  };
+  executeLocalD1(
+    "CREATE TRIGGER d1_sepay_reject_observation BEFORE INSERT ON sepay_api_observations " +
+    "WHEN NEW.transaction_uuid = 'd2222222-2222-4222-8222-222222222222' " +
+    "BEGIN SELECT RAISE(ABORT, 'forced reconciliation page failure'); END",
+  );
+  try {
+    const failedPagePersistence = await integrationSePayScan(atomicInput);
+    assert.equal(failedPagePersistence.response.status, 500);
+    assert.equal(failedPagePersistence.body.error, "INTEGRATION_SCAN_FAILED");
+    assert.equal(Number(queryLocalD1(
+      `SELECT COUNT(*) AS count FROM sepay_api_observations
+        WHERE transaction_uuid IN (
+          'c1111111-1111-4111-8111-111111111111',
+          'd2222222-2222-4222-8222-222222222222'
+        )`,
+    )[0]?.count), 0, "failed page batches do not leave partial observation rows");
+    const atomicCursor = queryLocalD1(
+      `SELECT pending_next_page, pending_complete
+         FROM sepay_api_reconciliation_cursors
+        WHERE scan_key = ${sqlText(atomicScanKey)} AND scan_mode = 'DATE_WINDOW'`,
+    )[0];
+    assert.deepEqual(atomicCursor, {
+      pending_next_page: 1,
+      pending_complete: 0,
+    }, "failed persistence does not advance the continuation pointer");
+  } finally {
+    executeLocalD1("DROP TRIGGER d1_sepay_reject_observation");
+  }
+  const recoveredPage = await integrationSePayScan(atomicInput);
+  assert.equal(recoveredPage.response.status, 200);
+  assert.equal(recoveredPage.body.status, "completed");
+  assert.equal(Number(queryLocalD1(
+    `SELECT COUNT(*) AS count FROM sepay_api_observations
+      WHERE transaction_uuid IN (
+        'c1111111-1111-4111-8111-111111111111',
+        'd2222222-2222-4222-8222-222222222222'
+      )`,
+  )[0]?.count), 2);
+  await integrationSePayLeaseContract();
+}
+
 async function paymentContractRequest(path, session, options = {}) {
   const { json: jsonBody, token, ...requestOptions } = options;
   const headers = new Headers(requestOptions.headers || {});
@@ -150,7 +519,7 @@ async function paymentContractRequest(path, session, options = {}) {
   });
 }
 
-async function signIn(email) {
+async function signIn(email, verificationIp) {
   const start = emailSink.current();
   const requested = await json("/customers/session", null, {
     method: "POST",
@@ -165,7 +534,10 @@ async function signIn(email) {
   assert.doesNotMatch(magicLinkMessage.text, /\?magic_token=/);
   const verified = await json("/customers/session/verify", null, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(verificationIp ? { "CF-Connecting-IP": verificationIp } : {}),
+    },
     body: JSON.stringify({ token }),
   });
   assert.equal(verified.response.status, 200, JSON.stringify(verified.body));
@@ -278,6 +650,14 @@ function seedPaidOrder(email, designId, revision) {
        ${sqlText(now)}, ${sqlText(now)}, 'PROCESSED', '{}', ${sqlText(transactionId)},
        ${sqlText(orderReference)}, 50000, 50000
      )`,
+    `INSERT INTO payment_settlement_evidence (
+       id, payment_id, provider, evidence_source, source_transaction_id,
+       amount_minor, currency, verified_at, payload_hash, status, created_at
+     ) VALUES (
+       ${sqlText(randomBytes(16).toString("hex"))}, ${sqlText(paymentId)}, 'SEPAY',
+       'SEPAY_WEBHOOK', ${sqlText(transactionId)}, 50000, 'VND', ${sqlText(now)},
+       ${sqlText("b".repeat(64))}, 'VERIFIED', ${sqlText(now)}
+     )`,
   ];
   for (const statement of statements) executeLocalD1(statement);
   return orderId;
@@ -335,21 +715,22 @@ async function uploadImage(session, designId, bytes, declaredType = "image/png")
 }
 
 try {
+  assertDisposablePersistenceDirectory();
   execFileSync(process.execPath, [
     "node_modules/wrangler/bin/wrangler.js",
     "d1",
     "migrations",
     "apply",
     "crushify-local",
-    "--local",
-    "--persist-to",
-    persistDirectory,
+    ...localD1Flags(),
   ], { cwd: root, stdio: "ignore" });
+  startWorker();
   await waitReady();
   const live = await json("/health/live", null);
   assert.equal(live.response.status, 200);
+  await runSePayD1ReconciliationContract();
 
-  const ownerEmail = `phase2-${crypto.randomUUID()}@example.test`;
+  const ownerEmail = "phase2-admin@example.test";
   const first = await signIn(ownerEmail);
   const csrfRequest = (csrfToken) => fetch(origin + "/api/v1/designs", {
     method: "POST",
@@ -599,6 +980,169 @@ try {
       assert.equal(rows.length, 1);
       return rows[0];
     },
+    inspectSettlementEvidence(transactionId) {
+      return Number(queryLocalD1(
+        `SELECT COUNT(*) AS count FROM payment_settlement_evidence
+         WHERE provider = 'SEPAY' AND evidence_source = 'SEPAY_WEBHOOK'
+           AND source_transaction_id = '${transactionId}'`,
+      )[0]?.count ?? 0);
+    },
+    inspectSettlementEvidenceOwner(transactionId) {
+      return queryLocalD1(
+        `SELECT DISTINCT evidence.payment_id, payments.order_id
+           FROM payment_settlement_evidence AS evidence
+           JOIN payments ON payments.id = evidence.payment_id
+          WHERE evidence.provider = 'SEPAY'
+            AND evidence.source_transaction_id = ${sqlText(transactionId)}
+          ORDER BY evidence.payment_id`,
+      );
+    },
+    inspectEvidenceSources(orderId) {
+      const evidence = { SEPAY_WEBHOOK: 0, SEPAY_API_V2: 0 };
+      for (const row of queryLocalD1(
+        `SELECT evidence_source, COUNT(*) AS count
+         FROM payment_settlement_evidence
+         WHERE payment_id = (SELECT id FROM payments WHERE order_id = ${sqlText(orderId)})
+         GROUP BY evidence_source`,
+      )) {
+        evidence[row.evidence_source] = Number(row.count);
+      }
+      evidence.API_OBSERVATIONS = Number(queryLocalD1(
+        `SELECT COUNT(*) AS count FROM sepay_api_observations
+         WHERE payment_id = (SELECT id FROM payments WHERE order_id = ${sqlText(orderId)})`,
+      )[0]?.count ?? 0);
+      return evidence;
+    },
+    inspectSettlementState(orderId, transactionId) {
+      return queryLocalD1(
+        `SELECT o.status AS order_status, p.status AS payment_status,
+                p.provider_payment_id, p.review_required, o.payment_review_required,
+                (SELECT outcome FROM payment_webhook_events
+                 WHERE provider = 'SEPAY' AND event_id = ${sqlText(transactionId)}) AS webhook_outcome,
+                (SELECT COUNT(*) FROM payment_settlement_evidence
+                 WHERE payment_id = p.id) AS evidence_count,
+                (SELECT status FROM fulfillment_jobs
+                 WHERE order_id = o.id) AS fulfillment_job_status,
+                (SELECT COUNT(*) FROM fulfillment_jobs
+                 WHERE order_id = o.id) AS fulfillment_job_count,
+                (SELECT COUNT(*) FROM publications
+                 WHERE order_id = o.id) AS publication_count
+         FROM orders o JOIN payments p ON p.order_id = o.id
+         WHERE o.id = ${sqlText(orderId)}`,
+      )[0];
+    },
+    insertApiObservation(orderId, transactionId) {
+      const now = new Date().toISOString();
+      executeLocalD1(
+        `INSERT INTO sepay_api_observations (
+           transaction_uuid, bank_account_id, transaction_date, transfer_type,
+           amount_in, amount_out, payload_hash, scan_type, status, reason_code,
+           payment_id, first_observed_at, last_observed_at
+         )
+         SELECT '${crypto.randomUUID()}',
+                'f9e8d7c6-b5a4-3210-fedc-ba0987654321', ${sqlText(now)}, 'in',
+                amount_minor, 0, ${sqlText("c".repeat(64))}, 'DATE_WINDOW',
+                'MANUAL_REVIEW', 'TEST_ONLY', id, ${sqlText(now)}, ${sqlText(now)}
+         FROM payments WHERE order_id = ${sqlText(orderId)}`,
+      );
+    },
+    seedRecoveryOrder(orderId, evidenceCase) {
+      if (!["missing", "revoked", "mismatched", "api-only"].includes(evidenceCase)) {
+        throw new Error("Unexpected synthetic recovery evidence case");
+      }
+      const now = new Date().toISOString();
+      const transactionId = `d1-recovery-${evidenceCase}-${crypto.randomUUID()}`;
+      const payloadHash = randomBytes(32).toString("hex");
+      const providerPaymentId = evidenceCase === "api-only" ? "NULL" : sqlText(transactionId);
+      executeLocalD1(
+        `UPDATE payments SET status = 'SUCCEEDED', provider_payment_id = ${providerPaymentId},
+           succeeded_at = ${sqlText(now)}, updated_at = ${sqlText(now)},
+           review_required = 0
+         WHERE order_id = ${sqlText(orderId)}`,
+      );
+      executeLocalD1(
+        `UPDATE orders SET status = 'PAID', paid_at = ${sqlText(now)},
+           updated_at = ${sqlText(now)}, payment_review_required = 0
+         WHERE id = ${sqlText(orderId)}`,
+      );
+      if (evidenceCase === "revoked" || evidenceCase === "mismatched") {
+        executeLocalD1(
+          `INSERT INTO payment_webhook_events (
+             id, provider, event_id, payload_hash, received_at, processed_at, outcome,
+             raw_payload, provider_transaction_id, order_reference,
+             expected_amount_minor, actual_amount_minor
+           )
+           SELECT '${crypto.randomUUID()}', 'SEPAY', ${sqlText(transactionId)},
+                  ${sqlText(payloadHash)}, ${sqlText(now)}, ${sqlText(now)}, 'PROCESSED',
+                  '{}', ${sqlText(transactionId)}, o.order_reference,
+                  p.amount_minor, p.amount_minor
+           FROM orders o JOIN payments p ON p.order_id = o.id
+           WHERE o.id = ${sqlText(orderId)}`,
+        );
+        executeLocalD1(
+          `INSERT INTO payment_settlement_evidence (
+             id, payment_id, provider, evidence_source, source_transaction_id,
+             amount_minor, currency, verified_at, payload_hash, status, created_at
+           )
+           SELECT '${crypto.randomUUID()}', id, 'SEPAY', 'SEPAY_WEBHOOK',
+                  ${sqlText(transactionId)}, amount_minor, currency,
+                  ${sqlText(now)}, ${sqlText(payloadHash)}, 'VERIFIED', ${sqlText(now)}
+           FROM payments WHERE order_id = ${sqlText(orderId)}`,
+        );
+        if (evidenceCase === "revoked") {
+          executeLocalD1(
+            `UPDATE payment_settlement_evidence SET status = 'REVOKED'
+             WHERE payment_id = (SELECT id FROM payments WHERE order_id = ${sqlText(orderId)})`,
+          );
+        } else {
+          executeLocalD1(
+            `UPDATE payment_settlement_evidence SET amount_minor = amount_minor + 1
+             WHERE payment_id = (SELECT id FROM payments WHERE order_id = ${sqlText(orderId)})`,
+          );
+        }
+      } else if (evidenceCase === "api-only") {
+        executeLocalD1(
+          `INSERT INTO sepay_api_observations (
+             transaction_uuid, bank_account_id, transaction_date, transfer_type,
+             amount_in, amount_out, payload_hash, scan_type, status, reason_code,
+             payment_id, first_observed_at, last_observed_at
+           )
+           SELECT '${crypto.randomUUID()}',
+                  'f9e8d7c6-b5a4-3210-fedc-ba0987654321', ${sqlText(now)}, 'in',
+                  amount_minor, 0, ${sqlText(payloadHash)}, 'DATE_WINDOW',
+                  'MANUAL_REVIEW', 'TEST_ONLY', id, ${sqlText(now)}, ${sqlText(now)}
+           FROM payments WHERE order_id = ${sqlText(orderId)}`,
+        );
+      }
+      executeLocalD1(
+        `INSERT INTO fulfillment_jobs (id, order_id, status, created_at, updated_at)
+         VALUES ('${crypto.randomUUID()}', ${sqlText(orderId)}, 'PENDING',
+                 ${sqlText(now)}, ${sqlText(now)})`,
+      );
+      return transactionId;
+    },
+    setManualReviewFlags(orderId) {
+      executeLocalD1(
+        `UPDATE payments SET review_required = 1 WHERE order_id = ${sqlText(orderId)}`,
+      );
+      executeLocalD1(
+        `UPDATE orders SET payment_review_required = 1 WHERE id = ${sqlText(orderId)}`,
+      );
+    },
+    insertPendingFulfillmentJob(orderId) {
+      const now = new Date().toISOString();
+      executeLocalD1(
+        `INSERT INTO fulfillment_jobs (id, order_id, status, created_at, updated_at)
+         VALUES ('${crypto.randomUUID()}', ${sqlText(orderId)}, 'PENDING',
+                 ${sqlText(now)}, ${sqlText(now)})`,
+      );
+    },
+    callFulfillmentForOrder(orderId) {
+      return integrationFulfillmentAction("fulfill", orderId);
+    },
+    recoverFulfillments() {
+      return integrationFulfillmentAction("recover", null);
+    },
     setPublicationExpiry(publicationId, expiresAt) {
       executeLocalD1(
         `UPDATE publications SET expires_at = '${expiresAt}' WHERE id = '${publicationId}'`,
@@ -645,15 +1189,56 @@ try {
       assert.equal(rows.length, 1);
       return rows[0];
     },
-    failOrderPayment(orderId) {
+    failSettlementStep(step, orderId) {
+      const definitions = {
+        evidence: {
+          name: "d1_reject_test_settlement_evidence",
+          create: `BEFORE INSERT ON payment_settlement_evidence
+                   WHEN NEW.payment_id = (
+                     SELECT id FROM payments WHERE order_id = ${sqlText(orderId)}
+                   )`,
+        },
+        payment: {
+          name: "d1_reject_test_payment_status",
+          create: `BEFORE UPDATE OF status ON payments
+                   WHEN NEW.order_id = ${sqlText(orderId)} AND NEW.status = 'SUCCEEDED'`,
+        },
+        order: {
+          name: "d1_reject_test_order_paid",
+          create: `BEFORE UPDATE OF status ON orders
+                   WHEN NEW.id = ${sqlText(orderId)} AND NEW.status = 'PAID'`,
+        },
+        "webhook-outcome": {
+          name: "d1_reject_test_webhook_outcome",
+          create: `BEFORE UPDATE OF outcome ON payment_webhook_events
+                   WHEN NEW.outcome = 'PROCESSED' AND NEW.order_reference = (
+                     SELECT order_reference FROM orders WHERE id = ${sqlText(orderId)}
+                   )`,
+        },
+        "fulfillment-job": {
+          name: "d1_reject_test_fulfillment_job",
+          create: `BEFORE INSERT ON fulfillment_jobs
+                   WHEN NEW.order_id = ${sqlText(orderId)}`,
+        },
+      };
+      const definition = definitions[step];
+      if (!definition) throw new Error("Unexpected settlement failure injection step");
       executeLocalD1(
-        `CREATE TRIGGER d1_reject_test_order_paid BEFORE UPDATE OF status ON orders ` +
-        `WHEN NEW.id = '${orderId}' AND NEW.status = 'PAID' ` +
-        "BEGIN SELECT RAISE(ABORT, 'forced payment transaction failure'); END",
+        `CREATE TRIGGER ${definition.name} ${definition.create}
+         BEGIN SELECT RAISE(ABORT, 'forced settlement transaction failure'); END`,
       );
     },
-    restoreOrderPayment() {
-      executeLocalD1("DROP TRIGGER d1_reject_test_order_paid");
+    restoreSettlementStep(step) {
+      const names = {
+        evidence: "d1_reject_test_settlement_evidence",
+        payment: "d1_reject_test_payment_status",
+        order: "d1_reject_test_order_paid",
+        "webhook-outcome": "d1_reject_test_webhook_outcome",
+        "fulfillment-job": "d1_reject_test_fulfillment_job",
+      };
+      const name = names[step];
+      if (!name) throw new Error("Unexpected settlement failure injection step");
+      executeLocalD1(`DROP TRIGGER ${name}`);
     },
     expectedMode: "sepay-test",
     testStandardPricing: true,
@@ -714,7 +1299,423 @@ try {
   assert.equal(reloaded.body.data.startDate, "2025-03-08");
   assert.equal(reloaded.body.data.theme, "blue-aurora");
 
-  const second = await signIn(`phase2-${crypto.randomUUID()}@example.test`);
+  const secondEmail = `phase2-${crypto.randomUUID()}@example.test`;
+  const second = await signIn(secondEmail);
+  const customPage = await fetch(origin + "/custom-design/");
+  assert.equal(customPage.status, 200);
+  assert.match(await customPage.text(), /Yêu cầu của bạn/);
+  assert.equal((await fetch(origin + "/custom-design/custom-design.js")).status, 200);
+  assert.equal((await fetch(origin + "/custom-design/custom-design.css")).status, 200);
+
+  const unauthenticatedCustomList = await json("/custom-design/requests", null);
+  assert.equal(unauthenticatedCustomList.response.status, 401);
+  const customRequestKey = `custom-${crypto.randomUUID()}`;
+  const customRequestInput = {
+    preferred_template: "custom",
+    brief: "Một trang kể chuyện tương tác cho ngày kỷ niệm.",
+    requirements: "Tối ưu cho điện thoại; không cần thanh toán trong yêu cầu.",
+    requested_delivery_date: "2027-02-14",
+    reference_urls: ["https://example.test/idea"],
+    assets_rights_confirmed: true,
+  };
+  const customRequest = await json("/custom-design/requests", first, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": customRequestKey,
+    },
+    body: JSON.stringify(customRequestInput),
+  });
+  assert.equal(customRequest.response.status, 201, JSON.stringify(customRequest.body));
+  assert.equal(customRequest.body.status, "QUOTE_PENDING");
+  assert.equal(customRequest.body.communication_status, "AWAITING_REVIEW");
+  assert.equal(customRequest.body.customer_message, null);
+  assert.deepEqual(customRequest.body.reference_urls, customRequestInput.reference_urls);
+
+  const adminPage = await fetch(origin + "/admin/");
+  assert.equal(adminPage.status, 200);
+  assert.match(await adminPage.text(), /Quản trị vận hành/);
+  assert.equal((await fetch(origin + "/admin/admin.js")).status, 200);
+  assert.equal((await fetch(origin + "/admin/admin.css")).status, 200);
+  assert.equal((await json("/admin/operations", null)).response.status, 401);
+  assert.equal((await json("/admin/operations", second)).response.status, 403);
+  const adminOperations = await json("/admin/operations", first);
+  assert.equal(adminOperations.response.status, 200, JSON.stringify(adminOperations.body));
+  assert.ok(Array.isArray(adminOperations.body.orders));
+  assert.ok(Array.isArray(adminOperations.body.settlement_evidence));
+  assert.ok(adminOperations.body.settlement_evidence.length > 0);
+  assert.ok(Array.isArray(adminOperations.body.admin_activity_events));
+  assert.ok(adminOperations.body.admin_activity_events.some((event) =>
+    event.action === "OPERATIONS_VIEWED" && event.outcome === "COMPLETED"
+  ));
+  assert.ok(adminOperations.body.admin_activity_events.every((event) =>
+    event.actor_email === ownerEmail
+  ));
+  assert.ok(adminOperations.body.settlement_evidence.every((item) =>
+    item.evidence_source === "SEPAY_WEBHOOK"
+  ));
+  assert.equal("raw_payload" in (adminOperations.body.webhook_reviews[0] ?? {}), false);
+
+  const noCsrfAdminAction = await json(
+    `/admin/custom-design/requests/${customRequest.body.request_id}`,
+    { ...first, csrf: "" },
+    {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "start_review" }),
+    },
+  );
+  assert.equal(noCsrfAdminAction.response.status, 403);
+  const unauthorizedAdminAction = await json(
+    `/admin/custom-design/requests/${customRequest.body.request_id}`,
+    second,
+    {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "start_review" }),
+    },
+  );
+  assert.equal(unauthorizedAdminAction.response.status, 403);
+
+  const startReview = await json(
+    `/admin/custom-design/requests/${customRequest.body.request_id}`,
+    first,
+    {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "start_review" }),
+    },
+  );
+  assert.equal(startReview.response.status, 200);
+  assert.equal(startReview.body.status, "IN_REVIEW");
+  const invalidReviewTransition = await json(
+    `/admin/custom-design/requests/${customRequest.body.request_id}`,
+    first,
+    {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "start_review" }),
+    },
+  );
+  assert.equal(invalidReviewTransition.response.status, 409);
+
+  const requestInformation = await json(
+    `/admin/custom-design/requests/${customRequest.body.request_id}`,
+    first,
+    {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "request_information",
+        customer_message: "Vui lòng xác nhận quyền sử dụng hình ảnh tham khảo.",
+      }),
+    },
+  );
+  assert.equal(requestInformation.response.status, 200);
+  assert.equal(requestInformation.body.status, "CUSTOMER_ACTION_REQUIRED");
+  const customerSeesInformationRequest = await json(
+    `/custom-design/requests/${customRequest.body.request_id}`,
+    first,
+  );
+  assert.equal(customerSeesInformationRequest.body.communication_status, "CUSTOMER_ACTION_REQUIRED");
+  assert.equal(customerSeesInformationRequest.body.customer_message,
+    "Vui lòng xác nhận quyền sử dụng hình ảnh tham khảo.");
+
+  const customerReplyPath = `/custom-design/requests/${customRequest.body.request_id}/replies`;
+  const missingReplyCsrf = await json(customerReplyPath, { ...first, csrf: "" }, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": crypto.randomUUID(),
+    },
+    body: JSON.stringify({ message: "Tôi có quyền sử dụng hình ảnh." }),
+  });
+  assert.equal(missingReplyCsrf.response.status, 403);
+  const invalidCustomerReply = await json(customerReplyPath, first, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": crypto.randomUUID(),
+    },
+    body: JSON.stringify({ message: "   " }),
+  });
+  assert.equal(invalidCustomerReply.response.status, 422);
+  assert.equal((await json(
+    `/custom-design/requests/${customRequest.body.request_id}`,
+    second,
+  )).response.status, 404);
+  const unauthorizedCustomerReply = await json(customerReplyPath, second, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": crypto.randomUUID(),
+    },
+    body: JSON.stringify({ message: "Tôi có quyền sử dụng hình ảnh." }),
+  });
+  assert.equal(unauthorizedCustomerReply.response.status, 404);
+
+  const replyAttempts = [
+    { key: crypto.randomUUID(), message: "Tôi xác nhận có quyền sử dụng hình ảnh tham khảo." },
+    { key: crypto.randomUUID(), message: "Tôi xác nhận và sẽ gửi thêm nội dung." },
+  ];
+  const replyResults = await Promise.all(replyAttempts.map(({ key, message }) =>
+    json(customerReplyPath, first, {
+      method: "POST",
+      mutating: true,
+      headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+      body: JSON.stringify({ message }),
+    })
+  ));
+  assert.deepEqual(replyResults.map((result) => result.response.status).sort(), [201, 409]);
+  const successfulReplyIndex = replyResults.findIndex((result) => result.response.status === 201);
+  const successfulReply = replyResults[successfulReplyIndex].body;
+  const successfulReplyInput = replyAttempts[successfulReplyIndex];
+  assert.equal(successfulReply.status, "IN_REVIEW");
+  assert.equal(successfulReply.communication_status, "RESPONDED");
+  assert.equal(successfulReply.customer_reply, successfulReplyInput.message);
+  assert.equal(successfulReply.customer_reply_at !== null, true);
+  const replayedCustomerReply = await json(customerReplyPath, first, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": successfulReplyInput.key,
+    },
+    body: JSON.stringify({ message: successfulReplyInput.message }),
+  });
+  assert.equal(replayedCustomerReply.response.status, 200);
+  assert.equal(replayedCustomerReply.body.customer_reply, successfulReplyInput.message);
+  const conflictingCustomerReply = await json(customerReplyPath, first, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": successfulReplyInput.key,
+    },
+    body: JSON.stringify({ message: "Nội dung khác với khóa đã sử dụng." }),
+  });
+  assert.equal(conflictingCustomerReply.response.status, 409);
+
+  const replyRow = queryLocalD1(
+    `SELECT id, customer_id FROM custom_design_customer_replies
+      WHERE request_id = '${customRequest.body.request_id}'`,
+  )[0];
+  assert.ok(replyRow?.id);
+  assert.equal(queryLocalD1(
+    `SELECT customer_reply_submission_token FROM custom_design_requests
+      WHERE id = '${customRequest.body.request_id}'`,
+  )[0].customer_reply_submission_token, null);
+  const secondCustomerId = queryLocalD1(
+    `SELECT id FROM customers WHERE email_normalized = ${sqlText(secondEmail)}`,
+  )[0]?.id;
+  assert.ok(secondCustomerId);
+  assertD1Failure(
+    `INSERT INTO custom_design_customer_replies (
+       id, request_id, customer_id, idempotency_key, reply_hash, message,
+       from_status, to_status, from_communication_status, to_communication_status, created_at
+     ) VALUES (
+       '00000000-0000-4000-8000-000000000022',
+       '${customRequest.body.request_id}', '${secondCustomerId}',
+       'customer-reply-owner-test', '${"a".repeat(64)}', 'Unauthorized reply',
+       'CUSTOMER_ACTION_REQUIRED', 'IN_REVIEW',
+       'CUSTOMER_ACTION_REQUIRED', 'RESPONDED', '2026-01-01T00:00:00.000Z'
+     )`,
+    /owner mismatch/,
+  );
+  assertD1Failure(
+    `UPDATE custom_design_customer_replies SET message = 'changed' WHERE id = '${replyRow.id}'`,
+    /immutable/,
+  );
+  assertD1Failure(
+    `DELETE FROM custom_design_customer_replies WHERE id = '${replyRow.id}'`,
+    /immutable/,
+  );
+  const customerReplyVisibleToAdmin = (await json("/admin/operations", first)).body
+    .custom_design_requests.find((request) => request.id === customRequest.body.request_id);
+  assert.equal(customerReplyVisibleToAdmin.customer_reply, successfulReplyInput.message);
+
+  const requestInformationAgain = await json(
+    `/admin/custom-design/requests/${customRequest.body.request_id}`,
+    first,
+    {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "request_information",
+        customer_message: "Cảm ơn bạn. Vui lòng xác nhận nội dung cần ưu tiên.",
+      }),
+    },
+  );
+  assert.equal(requestInformationAgain.response.status, 200);
+  assert.equal(requestInformationAgain.body.status, "CUSTOMER_ACTION_REQUIRED");
+
+  const adminReply = await json(
+    `/admin/custom-design/requests/${customRequest.body.request_id}`,
+    first,
+    {
+      method: "PATCH",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "reply",
+        customer_message: "Cảm ơn bạn, yêu cầu đang được xem xét.",
+      }),
+    },
+  );
+  assert.equal(adminReply.response.status, 200);
+  assert.equal(adminReply.body.status, "IN_REVIEW");
+  assert.equal(adminReply.body.communication_status, "RESPONDED");
+  assert.equal((await json("/custom-design/requests", first)).body.requests[0].customer_message,
+    "Cảm ơn bạn, yêu cầu đang được xem xét.");
+  assert.equal((await json("/admin/operations", first)).body.custom_design_requests
+    .find((request) => request.id === customRequest.body.request_id).status, "IN_REVIEW");
+  assert.equal(queryLocalD1(
+    `SELECT COUNT(*) AS count FROM custom_design_request_events
+      WHERE request_id = '${customRequest.body.request_id}'`,
+  )[0].count, 4);
+
+  const nonAdminRecovery = await json("/admin/fulfillments/recover", second, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(nonAdminRecovery.response.status, 403);
+  const csrflessAdminRecovery = await json(
+    "/admin/fulfillments/recover",
+    { cookies: first.cookies, csrf: "" },
+    {
+      method: "POST",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
+  assert.equal(csrflessAdminRecovery.response.status, 403);
+  const adminRecovery = await json("/admin/fulfillments/recover", first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(adminRecovery.response.status, 200, JSON.stringify(adminRecovery.body));
+  assert.equal(typeof adminRecovery.body.result, "object");
+  const adminDerivativeReconciliation = await json(
+    "/admin/publication-derivatives/reconcile",
+    first,
+    {
+      method: "POST",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
+  assert.equal(adminDerivativeReconciliation.response.status, 200,
+    JSON.stringify(adminDerivativeReconciliation.body));
+  const auditedOperations = await json("/admin/operations", first);
+  assert.ok(auditedOperations.body.admin_activity_events.some((event) =>
+    event.action === "FULFILLMENT_RECOVERY" && event.outcome === "STARTED"
+  ));
+  assert.ok(auditedOperations.body.admin_activity_events.some((event) =>
+    event.action === "FULFILLMENT_RECOVERY" && event.outcome === "COMPLETED"
+  ));
+  assert.ok(auditedOperations.body.admin_activity_events.some((event) =>
+    event.action === "PUBLICATION_DERIVATIVE_RECONCILIATION" &&
+    event.outcome === "COMPLETED"
+  ));
+  assert.ok(auditedOperations.body.admin_activity_events.some((event) =>
+    event.action === "CUSTOM_DESIGN_REPLY" &&
+    event.target_id === customRequest.body.request_id &&
+    event.outcome === "COMPLETED"
+  ));
+
+  const repeatedCustomRequest = await json("/custom-design/requests", first, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": customRequestKey,
+    },
+    body: JSON.stringify(customRequestInput),
+  });
+  assert.equal(repeatedCustomRequest.response.status, 200);
+  assert.equal(repeatedCustomRequest.body.request_id, customRequest.body.request_id);
+
+  const conflictingCustomRequest = await json("/custom-design/requests", first, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": customRequestKey,
+    },
+    body: JSON.stringify({ ...customRequestInput, brief: "Nội dung khác" }),
+  });
+  assert.equal(conflictingCustomRequest.response.status, 409);
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const additionalRequest = await json("/custom-design/requests", first, {
+      method: "POST",
+      mutating: true,
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `custom-limit-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify({
+        ...customRequestInput,
+        brief: `Rate limit request ${attempt + 2}`,
+      }),
+    });
+    assert.equal(additionalRequest.response.status, 201);
+  }
+  const limitedCustomRequest = await json("/custom-design/requests", first, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `custom-limit-${crypto.randomUUID()}`,
+    },
+    body: JSON.stringify({ ...customRequestInput, brief: "Request beyond daily limit" }),
+  });
+  assert.equal(limitedCustomRequest.response.status, 429);
+
+  const unsafeReference = await json("/custom-design/requests", first, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `custom-${crypto.randomUUID()}`,
+    },
+    body: JSON.stringify({
+      ...customRequestInput,
+      reference_urls: ["javascript:alert(1)"],
+    }),
+  });
+  assert.equal(unsafeReference.response.status, 422);
+
+  const ownedCustomRequest = await json(
+    `/custom-design/requests/${customRequest.body.request_id}`,
+    first,
+  );
+  assert.equal(ownedCustomRequest.response.status, 200);
+  const foreignCustomRequest = await json(
+    `/custom-design/requests/${customRequest.body.request_id}`,
+    second,
+  );
+  assert.equal(foreignCustomRequest.response.status, 404);
+  const customerCustomRequests = await json("/custom-design/requests", second);
+  assert.equal(customerCustomRequests.response.status, 200);
+  assert.equal(customerCustomRequests.body.requests.length, 0);
+
   const crossOwner = await json(`/designs/${designId}`, second);
   assert.equal(crossOwner.response.status, 404);
   const crossOwnerUpdate = await json(`/designs/${designId}`, second, {
@@ -988,15 +1989,9 @@ try {
   assert.equal(removedRead.status, 200);
 
   const tokenHash = createHash("sha256").update(previewCreated.body.token).digest("hex");
-  execFileSync(process.execPath, [
-    "node_modules/wrangler/bin/wrangler.js",
-    "d1",
-    "execute",
-    "crushify-local",
-    "--local",
-    "--command",
+  executeLocalD1(
     `UPDATE preview_tokens SET expires_at = '2000-01-01T00:00:00.000Z' WHERE token_hash = '${tokenHash}'`,
-  ], { cwd: root, stdio: "ignore" });
+  );
   const expiredPreview = await fetch(origin + "/api/v1/previews", {
     headers: { Authorization: `Bearer ${previewCreated.body.token}` },
   });
@@ -1293,6 +2288,263 @@ try {
   assert.ok(verificationRateLimited, "verification endpoint enforces its local rate limit");
 
   await stopWorker();
+  assertD1Failure(
+    `UPDATE custom_design_request_events SET action = 'reply' WHERE request_id = '${customRequest.body.request_id}'`,
+    /custom design review events are immutable/i,
+  );
+  assertD1Failure(
+    `DELETE FROM custom_design_request_events WHERE request_id = '${customRequest.body.request_id}'`,
+    /custom design review events are immutable/i,
+  );
+  assertD1Failure(
+    "UPDATE admin_activity_events SET outcome = 'FAILED' WHERE action = 'OPERATIONS_VIEWED'",
+    /admin activity events are immutable/i,
+  );
+  assertD1Failure(
+    "DELETE FROM admin_activity_events WHERE action = 'OPERATIONS_VIEWED'",
+    /admin activity events are immutable/i,
+  );
+  startWorker(null);
+  await waitReady();
+  for (const [adminEmails, label] of [
+    [null, "missing"],
+    ["", "empty"],
+    ["invalid-email", "invalid"],
+  ]) {
+    if (label !== "missing") {
+      await stopWorker();
+      startWorker(adminEmails);
+      await waitReady();
+    }
+    const disabledAdmin = await json("/admin/operations", contract.owner);
+    assert.equal(disabledAdmin.response.status, 503, `${label} admin allowlist fails closed`);
+    assert.equal(disabledAdmin.body.error.code, "ADMIN_DISABLED");
+  }
+  await stopWorker();
+  const manualAdminEmail = `manual-admin-${randomBytes(8).toString("hex")}@example.test`;
+  const manualCustomerEmail = `manual-customer-${randomBytes(8).toString("hex")}@example.test`;
+  startWorker(manualAdminEmail, "manual-bank-transfer");
+  await waitReady();
+  const manualAdmin = await signIn(manualAdminEmail, "198.51.100.11");
+  const manualCustomer = await signIn(manualCustomerEmail, "198.51.100.12");
+  const manualDesign = await json("/designs", manualAdmin, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ template_id: "our-universe", schema_version: 1 }),
+  });
+  assert.equal(manualDesign.response.status, 201);
+
+  const manualOrder = await json("/orders", manualAdmin, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `manual-${randomBytes(16).toString("hex")}`,
+    },
+    body: JSON.stringify({
+      design_id: manualDesign.body.design_id,
+      duration_type: "monthly",
+      hosting_months: 1,
+      asset_consents: [],
+    }),
+  });
+  assert.equal(manualOrder.response.status, 201, "manual transfer order is created");
+  assert.equal(manualOrder.body.payment.provider, "MANUAL_BANK_TRANSFER");
+  assert.equal(manualOrder.body.payment.instructions.bank_code, "MB");
+  assert.equal(manualOrder.body.payment.instructions.bank_account, receivingAccount);
+  assert.equal(manualOrder.body.payment.instructions.reference, manualOrder.body.order_reference,
+    "manual transfer instructions use the unique order reference");
+  assert.notEqual(manualOrder.body.payment.instructions.reference, manualOrder.body.payment.reference,
+    "manual transfer instructions do not confuse payment and order references");
+  assert.equal(manualOrder.body.payment.qr_url, null, "manual transfer does not create a payment QR");
+  assert.ok(Date.parse(manualOrder.body.expires_at) - Date.now() > 23 * 60 * 60 * 1000,
+    "manual transfer orders have a 24-hour payment window");
+  assert.equal((await json(
+    `/orders/${manualOrder.body.order_id}/status`,
+    manualCustomer,
+  )).response.status, 404, "another customer cannot read the manual order");
+
+  const manualAmount = manualOrder.body.total_minor;
+  const manualConfirmationPath =
+    `/admin/orders/${manualOrder.body.order_id}/manual-payment-confirmation`;
+  const manualConfirmationBody = {
+    amount_minor: manualAmount,
+    transaction_reference: `MANUAL-${randomBytes(8).toString("hex")}`,
+  };
+  const customerConfirmation = await json(manualConfirmationPath, manualCustomer, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(manualConfirmationBody),
+  });
+  assert.equal(customerConfirmation.response.status, 403,
+    "a customer without admin authorization cannot confirm payment");
+  const missingCsrfConfirmation = await json(manualConfirmationPath, manualAdmin, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(manualConfirmationBody),
+  });
+  assert.equal(missingCsrfConfirmation.response.status, 403,
+    "manual payment confirmation requires CSRF protection");
+  const wrongAmountConfirmation = await json(manualConfirmationPath, manualAdmin, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...manualConfirmationBody, amount_minor: manualAmount + 1 }),
+  });
+  assert.equal(wrongAmountConfirmation.response.status, 409,
+    "manual payment confirmation must match the server-side order amount");
+  assert.equal((await json(
+    `/orders/${manualOrder.body.order_id}/status`,
+    manualAdmin,
+  )).body.status, "AWAITING_PAYMENT", "invalid confirmations do not change order state");
+
+  const duplicateReferenceOrder = await json("/orders", manualAdmin, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `manual-${randomBytes(16).toString("hex")}`,
+    },
+    body: JSON.stringify({
+      design_id: manualDesign.body.design_id,
+      duration_type: "monthly",
+      hosting_months: 1,
+      asset_consents: [],
+    }),
+  });
+  assert.equal(duplicateReferenceOrder.response.status, 201);
+  const confirmedManual = await json(manualConfirmationPath, manualAdmin, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(manualConfirmationBody),
+  });
+  assert.equal(confirmedManual.response.status, 200);
+  assert.equal(confirmedManual.body.confirmed, true);
+  assert.equal(confirmedManual.body.fulfillment.completed, true,
+    "a valid admin confirmation automatically fulfills the order");
+  const duplicateReference = await json(
+    `/admin/orders/${duplicateReferenceOrder.body.order_id}/manual-payment-confirmation`,
+    manualAdmin,
+    {
+      method: "POST",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...manualConfirmationBody,
+        transaction_reference: manualConfirmationBody.transaction_reference.toLowerCase(),
+      }),
+    },
+  );
+  assert.equal(duplicateReference.response.status, 409,
+    "a bank transaction reference cannot confirm a second order");
+  const replayedManualConfirmation = await json(manualConfirmationPath, manualAdmin, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(manualConfirmationBody),
+  });
+  assert.equal(replayedManualConfirmation.response.status, 200);
+  assert.equal(replayedManualConfirmation.body.replayed, true);
+  assert.equal(replayedManualConfirmation.body.fulfillment.completed, true);
+  const manualOrderStatus = await json(
+    `/orders/${manualOrder.body.order_id}/status`,
+    manualAdmin,
+  );
+  assert.equal(manualOrderStatus.response.status, 200);
+  assert.equal(manualOrderStatus.body.status, "FULFILLED");
+  assert.equal(manualOrderStatus.body.payment.status, "SUCCEEDED");
+  assert.deepEqual(queryLocalD1(
+    `SELECT
+       (SELECT COUNT(*) FROM manual_payment_confirmations WHERE order_id = '${manualOrder.body.order_id}') AS confirmations,
+       (SELECT COUNT(*) FROM fulfillment_jobs WHERE order_id = '${manualOrder.body.order_id}') AS jobs,
+       (SELECT COUNT(*) FROM publications WHERE order_id = '${manualOrder.body.order_id}') AS publications`,
+  ), [{ confirmations: 1, jobs: 1, publications: 1 }],
+  "confirmation replay must not duplicate evidence, fulfillment, or publication");
+
+  const manualWebsites = await json("/publications", manualAdmin);
+  const manualWebsite = manualWebsites.body.websites.find(
+    (website) => website.design_id === manualDesign.body.design_id,
+  );
+  assert.ok(manualWebsite, "the owner receives the fulfilled website in their account");
+  assert.equal(manualWebsite.publication_status, "PUBLISHED");
+  const manualPublicUrl = new URL(manualWebsite.public_url);
+  assert.equal(manualPublicUrl.origin, origin);
+  assert.match(manualPublicUrl.pathname, /^\/p\/g[A-Za-z0-9_-]{20,40}$/);
+  const manualSlug = manualPublicUrl.pathname.split("/").at(-1);
+  const manualPublicPage = await json(`/publications/${manualSlug}`, null);
+  assert.equal(manualPublicPage.response.status, 200,
+    "the server-confirmed canonical website URL resolves publicly");
+  const manualQr = await fetch(
+    `${origin}/api/v1/publications/${manualWebsite.publication_id}/qr.svg`,
+    { headers: { Cookie: manualAdmin.cookies.join("; "), Connection: "close" } },
+  );
+  assert.equal(manualQr.status, 200, "published website QR is available to its owner");
+  assert.match(manualQr.headers.get("content-type") ?? "", /^image\/svg\+xml/);
+
+  const renewalExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  executeLocalD1(
+    `UPDATE publications SET expires_at = '${renewalExpiry}' WHERE id = '${manualWebsite.publication_id}'`,
+  );
+  executeLocalD1(
+    `UPDATE storage_entitlements SET expires_at = '${renewalExpiry}', status = 'ACTIVE'
+     WHERE publication_id = '${manualWebsite.publication_id}' AND status IN ('ACTIVE', 'EXPIRED')`,
+  );
+  const manualRenewalOrder = await json("/orders", manualAdmin, {
+    method: "POST",
+    mutating: true,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `manual-renewal-${randomBytes(16).toString("hex")}`,
+    },
+    body: JSON.stringify({
+      design_id: manualDesign.body.design_id,
+      renewal_publication_id: manualWebsite.publication_id,
+      duration_type: "monthly",
+      hosting_months: 1,
+      asset_consents: [],
+    }),
+  });
+  assert.equal(manualRenewalOrder.response.status, 201,
+    "manual bank transfer supports server-priced storage renewal");
+  const manualRenewalConfirmation = await json(
+    `/admin/orders/${manualRenewalOrder.body.order_id}/manual-payment-confirmation`,
+    manualAdmin,
+    {
+      method: "POST",
+      mutating: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amount_minor: manualRenewalOrder.body.total_minor,
+        transaction_reference: `RENEWAL-${randomBytes(8).toString("hex")}`,
+      }),
+    },
+  );
+  assert.equal(manualRenewalConfirmation.response.status, 200);
+  assert.equal(manualRenewalConfirmation.body.fulfillment.completed, true,
+    "a confirmed renewal extends its existing publication");
+  assert.equal((await json(
+    `/orders/${manualRenewalOrder.body.order_id}/status`,
+    manualAdmin,
+  )).body.status, "FULFILLED");
+  const renewedWebsite = (await json("/publications", manualAdmin)).body.websites.find(
+    (website) => website.publication_id === manualWebsite.publication_id,
+  );
+  assert.ok(Date.parse(renewedWebsite.expires_at) > Date.parse(renewalExpiry),
+    "manual renewal extends the existing website entitlement");
+
+  assertD1Failure(
+    `UPDATE manual_payment_confirmations SET amount_minor = ${manualAmount + 1} WHERE order_id = '${manualOrder.body.order_id}'`,
+    /manual payment confirmations are immutable/i,
+  );
+  assertD1Failure(
+    `DELETE FROM manual_payment_confirmations WHERE order_id = '${manualOrder.body.order_id}'`,
+    /manual payment confirmations are immutable/i,
+  );
+
+  await stopWorker();
   executeLocalD1(
     "CREATE TABLE d1_contract_unique (id TEXT PRIMARY KEY, value TEXT NOT NULL UNIQUE)",
   );
@@ -1315,20 +2567,18 @@ try {
   console.error(sanitizedLogs());
   process.exitCode = 1;
 } finally {
-  await stopWorker();
-  await emailSink.close();
-  if (process.platform === "win32") {
-    const cleanup = spawn(
-      process.execPath,
-      [
-        "-e",
-        "const fs=require('node:fs');setTimeout(()=>fs.rmSync(process.argv[1],{recursive:true,force:true}),3000)",
-        persistDirectory,
-      ],
-      { detached: true, stdio: "ignore", windowsHide: true },
-    );
-    cleanup.unref();
-  } else {
-    await rm(persistDirectory, { recursive: true, force: true });
+  try {
+    await stopWorker();
+  } finally {
+    try {
+      await emailSink.close();
+    } finally {
+      await rm(persistDirectory, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 200,
+      });
+    }
   }
 }

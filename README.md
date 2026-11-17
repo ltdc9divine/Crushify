@@ -34,7 +34,7 @@ Sau đó truy cập `http://localhost:5500`.
 
 ## Vercel Development và API
 
-Vercel Functions adapter dùng chung API router và business logic hiện có. API runtime yêu cầu Turso và Cloudinary (hoặc storage mock chỉ trong local test); Worker D1/R2 vẫn được giữ nguyên để rollback. Chưa deploy lên Vercel và không dùng Vercel Hobby cho hoạt động thương mại, bán hàng, checkout hoặc nhận thanh toán.
+Vercel Functions adapter dùng chung API router và business logic hiện có. Vercel là nền tảng hosting/deployment dự kiến; Cloudflare Worker/D1/R2 chỉ còn là đường local/legacy, không phải đích deployment đã được phê duyệt. Mã nguồn không xác nhận trạng thái project, deployment hoặc cấu hình Vercel hiện tại (**NOT VERIFIED**). Khả năng sử dụng gói Vercel hiện tại cho hoạt động thương mại cũng **NOT VERIFIED**; chủ sở hữu phải kiểm tra điều khoản và eligibility trước khi mở bán.
 
 Với Node.js 22.6+ và Vercel CLI đã cài:
 
@@ -47,7 +47,7 @@ npm run db:migrate:turso
 vercel dev
 ```
 
-`.env.local` dùng `STORAGE_PROVIDER=mock` và `LOCAL_TEST_MODE=true` cho dữ liệu thử cục bộ. Không dùng file SQLite trên Vercel Preview/Production; Preview phải dùng Turso staging database riêng. Cloudinary hiện chỉ được phép ở Production; Preview và local vẫn dùng mock storage cho đến khi tài khoản staging được chủ sở hữu xác minh độc lập và có thay đổi mã nguồn được review riêng. Không cấu hình Cloudinary credentials trong Preview hoặc local. `APP_ORIGIN` phải là origin chính xác của ứng dụng. API routes mặc định không cache; function giới hạn ảnh ở 4 MiB để nằm dưới giới hạn payload của serverless platform. Checkout/thanh toán chỉ có prototype local-only; không bật trên Vercel Preview/Production.
+`.env.local` dùng `STORAGE_PROVIDER=mock` và `LOCAL_TEST_MODE=true` cho dữ liệu thử cục bộ. Không dùng file SQLite trên Vercel Preview/Production; Preview cần Turso staging database riêng. Source hỗ trợ customer flow và SePay Test-mode checkout trên Preview **chỉ khi** `PREVIEW_CUSTOMER_FLOW_ENABLED=true` và toàn bộ cấu hình Preview cô lập hợp lệ được cung cấp, bao gồm `PREVIEW_PAYMENT_MODE=sepay-test`, Test-mode webhook secret/account, database, storage, email và lifecycle secret. Đây là khả năng trong source, không phải bằng chứng rằng credentials, tài khoản, deployment hay giao dịch Sandbox đã được cấu hình/kiểm chứng (**NOT VERIFIED**). Production checkout và webhook settlement **NOT ENABLED**; Production fulfillment/publication chưa được chứng minh sẵn sàng. `APP_ORIGIN` phải là origin chính xác của ứng dụng. API routes mặc định không cache; function giới hạn ảnh ở 4 MiB.
 
 Khi import repository lên Vercel, chọn **Other**, giữ project root ở repository root, không cần build command hay `vercel.json` cho static paths và catch-all function. Các trang template tiếp tục được phục vụ từ thư mục tĩnh `templates/`; không rewrite API thành HTML và không thay đổi tài nguyên riêng của template.
 
@@ -74,12 +74,12 @@ Requirements: Node.js 22.6 or newer and npm.
 
 ```powershell
 npm install
-Copy-Item .dev.vars.example .dev.vars
+if (-not (Test-Path .dev.vars)) { Copy-Item .dev.vars.example .dev.vars }
 npm run db:apply:local
 npm run dev
 ```
 
-The local Cloudflare Worker serves the existing static site and exposes:
+The local/legacy Cloudflare Worker serves the existing static site and exposes:
 
 - `GET /api/v1/health/live` — process liveness.
 - `GET /api/v1/health/ready` — D1 connectivity readiness.
@@ -88,7 +88,7 @@ The local Cloudflare Worker serves the existing static site and exposes:
 - Private image upload, verification, read, and deletion through the selected adapter.
 - Short-lived bearer preview tokens for Our Universe, including private preview photos.
 
-`LOCAL_TEST_MODE=true` makes the local adapter print a one-time sign-in link in the Wrangler console; it does not send email. The Worker proxies image bytes to its private R2 binding; it does not issue presigned R2 URLs. `.dev.vars` is local-only and must not be committed.
+For interactive local sign-in, start `npm run dev:email-sink` in a second terminal and set `LOCAL_TEST_MAIL_SINK_URL` in the ignored `.dev.vars` to the loopback URL printed by the command. Open the inbox URL in a browser and refresh it after requesting a sign-in link. The inbox sends no email, binds only to `127.0.0.1`, keeps links in memory, and never prints tokens. Without the sink, local sign-in mail is discarded. The Worker proxies image bytes to its private R2 binding; it does not issue presigned R2 URLs. `.dev.vars` is local-only and must not be committed.
 
 Run the local checks:
 
@@ -98,7 +98,7 @@ npm test
 npm run test:integration
 ```
 
-The integration test exercises local D1 and Wrangler's local R2 emulation. The Cloudflare Worker continues to use D1/R2. The Vercel Node adapter is locally integration-tested against an isolated Turso file database and in-memory storage, but has not been tested on Vercel itself. No remote Turso migration, production storage, email provider, Cloudflare account bindings/secrets, or staging deployment is configured. Do not use production customer data.
+The integration test source uses local D1 and Wrangler's local R2 emulation. Its disposable database migrations run before the Worker starts, avoiding concurrent SQLite initialization. The Vercel Node adapter has local test coverage against an isolated Turso file database and in-memory storage; this does not verify a hosted Vercel deployment. Remote migrations, provider settings, account bindings/secrets, and staging deployment status are **NOT VERIFIED** here. Do not use production customer data.
 
 To apply the existing numbered SQLite migrations to a **new or verified empty** Turso database, set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the server environment and run:
 
@@ -108,8 +108,8 @@ npm run db:migrate:turso
 
 The migration command checks applied migration checksums and foreign keys, runs each migration transactionally, and refuses databases containing application tables without a migration ledger. It does not connect automatically or migrate existing D1 data. See [docs/HOSTING_MIGRATION.md](docs/HOSTING_MIGRATION.md) for the staged migration status and safeguards.
 
-The other four templates still use their existing browser-side draft/media flows. A local-only order and SePay HMAC webhook prototype is present for synthetic tests, but the price catalog is empty and payment modes are disabled outside local development. It does not collect real money, grant entitlements, publish designs, or enable checkout in Vercel Preview/Production. Displayed prices remain informational and must not be treated as an active offer. See [docs/SEPAY_SETUP.md](docs/SEPAY_SETUP.md).
+All five templates are connected in source to server-backed drafts, private previews, and checkout navigation; templates with photo editors also use private media APIs. The approved standard catalog is defined in `src/product-catalog.ts`: 59,000 VND including the first hosting month, 10,000 VND per additional month, or 199,000 VND Lifetime. Local tests use synthetic data. Preview checkout is an explicit opt-in requiring isolated resources and SePay Test-mode configuration; no such configuration, provider transaction, or deployed Preview journey is verified here. Production checkout and webhook settlement are **NOT ENABLED**. The custom-project portal/admin workflow and customer-facing refund/support terms are not implemented or approved. See [docs/SEPAY_SETUP.md](docs/SEPAY_SETUP.md) and [docs/INTEGRATION-STATUS.md](docs/INTEGRATION-STATUS.md).
 
-## Cloudflare staging
+## Legacy Cloudflare staging — not approved
 
-Staging uses the separate `wrangler.staging.jsonc` configuration and `crushify-staging-db`; use only `npm run db:apply:staging` and `npm run deploy:staging`. The D1 migrations are applied remotely. Deployment is currently blocked because R2 has not been enabled on the Cloudflare account; see [docs/STAGING_DEPLOYMENT.md](docs/STAGING_DEPLOYMENT.md). Do not use the local config for a remote deployment.
+Vercel is the intended hosting/deployment platform. Cloudflare staging is a legacy path and is not an approved deployment or migration target. The existing `npm run db:apply:staging` and `npm run deploy:staging` scripts still invoke remote Wrangler operations and have **no explicit confirmation gate**. Do not run them unless the owner separately approves Cloudflare staging and its target. No Cloudflare deployment/resource status was verified for this update; do not infer it from historical documentation.

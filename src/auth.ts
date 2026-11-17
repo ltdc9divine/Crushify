@@ -105,11 +105,76 @@ class ResendEmailService implements EmailService {
   }
 }
 
+class PreviewResendEmailService implements EmailService {
+  private readonly resend: ResendEmailService;
+  private readonly allowedRecipients: Set<string>;
+
+  constructor(apiKey: string, fromEmail: string, allowedRecipients: Set<string>) {
+    this.resend = new ResendEmailService(apiKey, fromEmail);
+    this.allowedRecipients = allowedRecipients;
+  }
+
+  async send(message: EmailMessage): Promise<void> {
+    const recipient = message.to.trim().toLocaleLowerCase("en-US");
+    if (!isEmailAddress(recipient) || !this.allowedRecipients.has(recipient)) {
+      throw new Error("Preview email recipient is not authorized");
+    }
+    await this.resend.send(message);
+  }
+}
+
+function isEmailAddress(value: string): boolean {
+  return value.length <= 254 && /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(value);
+}
+
+function previewAllowedRecipients(env: Env): Set<string> | null {
+  const values = (env.PREVIEW_AUTH_ALLOWED_EMAILS ?? "")
+    .split(",")
+    .map((email) => email.trim().toLocaleLowerCase("en-US"));
+  if (!values.length || values.some((email) => !isEmailAddress(email))) return null;
+  return new Set(values);
+}
+
+function isValidMailSender(value: string | undefined): value is string {
+  if (!value || value.length > 320 || /[\r\n]/.test(value)) return false;
+  const trimmed = value.trim();
+  const match = /^(?:[^<>]*<([^<>]+)>|([^<>]+))$/.exec(trimmed);
+  const address = match?.[1] ?? match?.[2];
+  return Boolean(address && isEmailAddress(address.trim()));
+}
+
 export function createEmailService(env: Env, _origin: string): EmailService | null {
   if (env.ENVIRONMENT === "staging") {
-    return env.PREVIEW_EMAIL_SINK === "discard"
-      ? new PreviewDiscardEmailService()
-      : null;
+    const hasPreviewMailConfiguration = [
+      env.PREVIEW_MAIL_PROVIDER,
+      env.PREVIEW_MAIL_API_KEY,
+      env.PREVIEW_MAIL_FROM_EMAIL,
+    ].some((value) => value !== undefined);
+    const validPreviewMailConfiguration =
+      env.PREVIEW_MAIL_PROVIDER === "resend" &&
+      Boolean(env.PREVIEW_MAIL_API_KEY?.trim()) &&
+      isValidMailSender(env.PREVIEW_MAIL_FROM_EMAIL);
+    if ((hasPreviewMailConfiguration && !validPreviewMailConfiguration) ||
+        (env.PREVIEW_EMAIL_SINK === "discard" && hasPreviewMailConfiguration)) {
+      return null;
+    }
+    if (env.PREVIEW_EMAIL_SINK === "discard") return new PreviewDiscardEmailService();
+    if (env.PREVIEW_CUSTOMER_FLOW_ENABLED !== "true") return null;
+    if (env.PREVIEW_TEST_EMAIL_SINK) {
+      return new LocalTestingEmailService(env.PREVIEW_TEST_EMAIL_SINK);
+    }
+    const allowedRecipients = previewAllowedRecipients(env);
+    if (env.PREVIEW_MAIL_PROVIDER !== "resend" ||
+        !env.PREVIEW_MAIL_API_KEY?.trim() ||
+        !isValidMailSender(env.PREVIEW_MAIL_FROM_EMAIL) ||
+        !allowedRecipients) {
+      return null;
+    }
+    return new PreviewResendEmailService(
+      env.PREVIEW_MAIL_API_KEY,
+      env.PREVIEW_MAIL_FROM_EMAIL,
+      allowedRecipients,
+    );
   }
   const isLocalTest = env.LOCAL_TEST_MODE === "true" &&
     env.ENVIRONMENT === "local";
@@ -171,7 +236,13 @@ function csrfCookieOptions(env: Env, maxAge: number): string {
 }
 
 function authenticationEnabled(env: Env): boolean {
-  return env.ENVIRONMENT === "local" || env.ENVIRONMENT === "production";
+  return env.ENVIRONMENT === "local" || env.ENVIRONMENT === "production" ||
+    (env.ENVIRONMENT === "staging" && env.PREVIEW_CUSTOMER_FLOW_ENABLED === "true");
+}
+
+function isPreviewEmailAllowed(env: Env, emailNormalized: string): boolean {
+  if (env.ENVIRONMENT !== "staging") return true;
+  return previewAllowedRecipients(env)?.has(emailNormalized) ?? false;
 }
 
 function guardAuthentication(env: Env, requestId: string): Response | null {
@@ -226,7 +297,7 @@ export async function getSession(request: Request, env: Env): Promise<Session | 
   const tokenHash = await sha256(token);
   const now = nowIso();
   const row = await env.DB.prepare(
-    `SELECT s.id, s.customer_id, s.csrf_token_hash
+    `SELECT s.id, s.customer_id, s.csrf_token_hash, c.email_normalized
      FROM customer_sessions s
      JOIN customers c ON c.id = s.customer_id
      WHERE s.token_hash = ? AND s.revoked_at IS NULL
@@ -235,8 +306,9 @@ export async function getSession(request: Request, env: Env): Promise<Session | 
     id: string;
     customer_id: string;
     csrf_token_hash: string;
+    email_normalized: string;
   }>();
-  if (!row) return null;
+  if (!row || !isPreviewEmailAllowed(env, row.email_normalized)) return null;
   await env.DB.prepare("UPDATE customer_sessions SET last_used_at = ? WHERE id = ?")
     .bind(now, row.id).run();
   return { id: row.id, customerId: row.customer_id, csrfTokenHash: row.csrf_token_hash };
@@ -311,6 +383,9 @@ export async function handleSessionRoutes(
     const emailNormalized = email.toLocaleLowerCase("en-US");
     if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return apiError(requestId, 400, "VALIDATION_ERROR", "A valid email is required");
+    }
+    if (!isPreviewEmailAllowed(env, emailNormalized)) {
+      return jsonResponse({ message: "If the address can be used, a sign-in link has been sent." }, 202, requestId);
     }
     const now = Math.floor(Date.now() / 1000);
     const ip = request.headers.get("cf-connecting-ip") ??
@@ -392,9 +467,12 @@ export async function handleSessionRoutes(
     if (!consumed) return apiError(requestId, 401, "INVALID_TOKEN", "Sign-in token is invalid or expired");
 
     const customer = await env.DB.prepare(
-      "SELECT status FROM customers WHERE id = ?",
-    ).bind(consumed.customer_id).first<{ status: string }>();
-    if (!customer || customer.status !== "ACTIVE") {
+      env.ENVIRONMENT === "staging"
+        ? "SELECT status, email_normalized FROM customers WHERE id = ?"
+        : "SELECT status FROM customers WHERE id = ?",
+    ).bind(consumed.customer_id).first<{ status: string; email_normalized?: string }>();
+    if (!customer || customer.status !== "ACTIVE" ||
+        !isPreviewEmailAllowed(env, customer.email_normalized ?? "")) {
       return apiError(requestId, 403, "FORBIDDEN", "Account is unavailable");
     }
     const rawSession = randomToken();

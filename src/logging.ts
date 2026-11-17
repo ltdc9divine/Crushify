@@ -9,6 +9,8 @@ export type LogCategory =
 
 export interface SafeLogContext {
   request_id?: string;
+  operation_id?: string;
+  recovery_outcome?: "provider_object_confirmed" | "provider_object_absent_inconclusive" | "recheck_failed";
   environment?: "local" | "staging" | "production";
   counts?: {
     expired?: number;
@@ -20,10 +22,24 @@ export interface SafeLogContext {
     upload_cleanup_cleaned?: number;
     upload_cleanup_retryable?: number;
     upload_cleanup_manual_review?: number;
+    derivative_cleanup_processed?: number;
+    derivative_cleanup_cleaned?: number;
+    derivative_cleanup_pending?: number;
+    derivative_cleanup_deferred?: number;
+    derivative_cleanup_failed?: number;
+    derivative_cleanup_retryable?: number;
+    derivative_cleanup_manual_review?: number;
+    derivative_cleanup_has_more?: number;
+    sepay_scan_pages?: number;
+    sepay_scan_observations?: number;
+    sepay_scan_failures?: number;
+    sepay_scan_lease_held?: number;
+    sepay_scan_partial?: number;
   };
 }
 
 const requestIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const operationIdPattern = /^[A-Za-z0-9_-]{1,128}$/;
 const safeErrorNames = new Set([
   "Error",
   "TypeError",
@@ -45,8 +61,19 @@ const safeCountKeys = [
   "expired", "erased", "retryable", "completed", "manual_review",
   "upload_cleanup_processed", "upload_cleanup_cleaned", "upload_cleanup_retryable",
   "upload_cleanup_manual_review",
+  "derivative_cleanup_processed", "derivative_cleanup_cleaned",
+  "derivative_cleanup_pending", "derivative_cleanup_deferred",
+  "derivative_cleanup_failed", "derivative_cleanup_retryable",
+  "derivative_cleanup_manual_review", "derivative_cleanup_has_more",
+  "sepay_scan_pages", "sepay_scan_observations", "sepay_scan_failures",
+  "sepay_scan_lease_held", "sepay_scan_partial",
 ] as const;
 const eventPattern = /^[a-z][a-z0-9._-]{0,80}$/;
+const safeRecoveryOutcomes = new Set<NonNullable<SafeLogContext["recovery_outcome"]>>([
+  "provider_object_confirmed",
+  "provider_object_absent_inconclusive",
+  "recheck_failed",
+]);
 
 function errorType(error: unknown): string {
   if (!(error instanceof Error) || !safeErrorNames.has(error.name)) return "UnknownError";
@@ -65,6 +92,16 @@ function safeEnvironment(environment: SafeLogContext["environment"]): SafeLogCon
   return environment === "local" || environment === "staging" || environment === "production"
     ? environment
     : undefined;
+}
+
+function safeOperationId(operationId: string | undefined): string | undefined {
+  return operationId && operationIdPattern.test(operationId) ? operationId : undefined;
+}
+
+function safeRecoveryOutcome(
+  outcome: SafeLogContext["recovery_outcome"],
+): SafeLogContext["recovery_outcome"] {
+  return outcome && safeRecoveryOutcomes.has(outcome) ? outcome : undefined;
 }
 
 function safeCounts(counts: SafeLogContext["counts"]): SafeLogContext["counts"] | undefined {
@@ -91,6 +128,12 @@ export function logSafeError(
     ...(context.request_id && requestIdPattern.test(context.request_id)
       ? { request_id: context.request_id }
       : {}),
+    ...(safeOperationId(context.operation_id)
+      ? { operation_id: safeOperationId(context.operation_id) }
+      : {}),
+    ...(safeRecoveryOutcome(context.recovery_outcome)
+      ? { recovery_outcome: safeRecoveryOutcome(context.recovery_outcome) }
+      : {}),
     ...(safeEnvironment(context.environment)
       ? { environment: safeEnvironment(context.environment) }
       : {}),
@@ -110,6 +153,12 @@ export function logSafeInfo(
     category: safeCategory(category),
     ...(context.request_id && requestIdPattern.test(context.request_id)
       ? { request_id: context.request_id }
+      : {}),
+    ...(safeOperationId(context.operation_id)
+      ? { operation_id: safeOperationId(context.operation_id) }
+      : {}),
+    ...(safeRecoveryOutcome(context.recovery_outcome)
+      ? { recovery_outcome: safeRecoveryOutcome(context.recovery_outcome) }
       : {}),
     ...(safeEnvironment(context.environment)
       ? { environment: safeEnvironment(context.environment) }

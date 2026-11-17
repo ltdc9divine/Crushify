@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#140d1b">
+  <title>Thiết kế riêng | Crushify</title>
+  <link rel="stylesheet" href="/custom-design/custom-design.css">
+  <script src="/custom-design/custom-design.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Crushify</a>
+    <nav aria-label="Điều hướng">
+      <a href="/">Trang chủ</a>
+      <a href="/account/websites/">Tài khoản</a>
+    </nav>
+  </header>
+  <main class="shell">
+    <section class="intro-card" aria-labelledby="page-title">
+      <p class="eyebrow">DỊCH VỤ THIẾT KẾ RIÊNG</p>
+      <h1 id="page-title">Một câu chuyện<br><em>không có trong mẫu.</em></h1>
+      <p>Hãy chia sẻ ý tưởng, tính năng mong muốn và tài liệu tham khảo. Crushify sẽ xem xét yêu cầu trước khi gửi phạm vi và báo giá cụ thể.</p>
+      <ul>
+        <li>Gửi yêu cầu không tạo đơn hàng và không phát sinh thanh toán.</li>
+        <li>Giá, phạm vi công việc và thời gian dự kiến chỉ được xác nhận sau khi xem xét.</li>
+        <li>Không gửi mật khẩu, thông tin thẻ hoặc dữ liệu nhạy cảm không cần thiết.</li>
+      </ul>
+    </section>
+
+    <section class="form-card" aria-labelledby="request-title">
+      <h2 id="request-title">Yêu cầu của bạn</h2>
+      <p id="notice" role="status" aria-live="polite">Đăng nhập để gửi yêu cầu và theo dõi trạng thái.</p>
+
+      <form id="login-form">
+        <label for="email">Email nhận liên kết đăng nhập</label>
+        <input id="email" name="email" type="email" autocomplete="email" maxlength="254" required>
+        <button type="submit">Gửi liên kết an toàn</button>
+      </form>
+
+      <div id="customer-panel" hidden>
+        <p id="account-email" class="account-email"></p>
+        <form id="request-form">
+          <label for="preferred-template">Mẫu hoặc hướng thiết kế</label>
+          <select id="preferred-template" name="preferred_template" required>
+            <option value="not_sure">Chưa xác định</option>
+            <option value="our-universe">Our Universe</option>
+            <option value="love-letter">Love Letter</option>
+            <option value="our-memories">Our Memories</option>
+            <option value="say-yes">Say Yes</option>
+            <option value="distance-means-nothing">Distance Means Nothing</option>
+            <option value="custom">Thiết kế hoặc tính năng mới</option>
+          </select>
+
+          <label for="brief">Ý tưởng và câu chuyện <span>(bắt buộc, tối đa 5.000 ký tự)</span></label>
+          <textarea id="brief" name="brief" maxlength="5000" rows="6" required></textarea>
+
+          <label for="requirements">Tính năng, nội dung hoặc yêu cầu khác <span>(không bắt buộc)</span></label>
+          <textarea id="requirements" name="requirements" maxlength="5000" rows="4"></textarea>
+
+          <label for="requested-date">Ngày bạn mong muốn nhận sản phẩm <span>(chỉ để tham khảo)</span></label>
+          <input id="requested-date" name="requested_delivery_date" type="date">
+
+          <label for="references">Đường dẫn tham khảo <span>(tối đa 5 URL HTTPS, mỗi dòng một URL)</span></label>
+          <textarea id="references" name="reference_urls" maxlength="11000" rows="4" placeholder="https://example.com"></textarea>
+
+          <label class="consent">
+            <input id="rights-confirmed" name="assets_rights_confirmed" type="checkbox" required>
+            <span>Tôi có quyền chia sẻ và sử dụng các tài liệu tham khảo đã cung cấp.</span>
+          </label>
+
+          <button id="submit-request" type="submit">Gửi yêu cầu để xem xét</button>
+        </form>
+        <section class="requests" aria-labelledby="requests-title">
+          <h3 id="requests-title">Yêu cầu đã gửi</h3>
+          <div id="request-list"></div>
+        </section>
+        <button id="signout" class="secondary" type="button">Đăng xuất</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

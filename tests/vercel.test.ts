@@ -3,7 +3,7 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { createServer, type AddressInfo, type IncomingMessage } from "node:http";
 import { PassThrough } from "node:stream";
 import { createClient } from "@libsql/client";
@@ -23,6 +23,7 @@ import { handleFulfillmentForOrder, recoverPendingFulfillments } from "../src/pu
 import {
   createVercelApiHandler,
   resolveVercelDatabaseConfiguration,
+  validateVercelEnvironment,
   VERCEL_UPLOAD_MAX_BYTES,
 } from "../src/platform/vercel.ts";
 import nodeHandler, { readVercelRequestBody } from "../api/[...path].ts";
@@ -123,6 +124,255 @@ describe("Vercel database environment selection", () => {
     });
   });
 
+  it("accepts the explicitly allowlisted regional Preview Turso hostname", () => {
+    const url = "libsql://crushify-preview-crushify.aws-ap-southeast-1.turso.io";
+    assert.deepEqual(resolveVercelDatabaseConfiguration({
+      ...previewEnvironment,
+      TURSO_STAGING_DATABASE_URL: url,
+    }), {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: url,
+      TURSO_AUTH_TOKEN: previewEnvironment.TURSO_STAGING_AUTH_TOKEN,
+    });
+  });
+
+  it("continues accepting the existing staging Turso hostname pattern", () => {
+    assert.notEqual(
+      resolveVercelDatabaseConfiguration({
+        ...previewEnvironment,
+        TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-synthetic.turso.io",
+      }),
+      null,
+    );
+  });
+
+  it("rejects the explicitly allowlisted Preview hostname in Production", () => {
+    const production = {
+      DATABASE_PROVIDER: "turso",
+      TURSO_DATABASE_URL: "libsql://crushify-production-test-org.turso.io",
+      TURSO_AUTH_TOKEN: "synthetic-production-token",
+      STORAGE_PROVIDER: "mock",
+      ENVIRONMENT: "production",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    };
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...production,
+      TURSO_DATABASE_URL: "libsql://crushify-preview-crushify.aws-ap-southeast-1.turso.io",
+    }), null);
+  });
+
+  it("rejects a Production hostname in Preview", () => {
+    assert.equal(resolveVercelDatabaseConfiguration({
+      ...previewEnvironment,
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-production-test-org.turso.io",
+    }), null);
+  });
+
+  it("rejects spoofed, malformed, and unlisted regional Preview hostnames", () => {
+    for (const hostname of [
+      "crushify-preview-crushify.aws-ap-southeast-1.turso.io.evil",
+      "crushify-preview-other.aws-ap-southeast-1.turso.io",
+      "crushify-preview-crushify.aws-us-east-1.turso.io",
+      "crushify-preview-crushify.aws-ap-southeast-1-extra.turso.io",
+      "crushify-preview-crushify.aws-ap-southeast-1.example",
+    ]) {
+      assert.equal(resolveVercelDatabaseConfiguration({
+        ...previewEnvironment,
+        TURSO_STAGING_DATABASE_URL: `libsql://${hostname}`,
+      }), null, `unexpected hostname accepted: ${hostname}`);
+    }
+  });
+
+  describe("Vercel Preview customer-flow configuration", () => {
+    const enabledPreview = {
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-staging-token",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-preview-test",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-preview-key",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-preview-secret",
+      CLOUDINARY_PRODUCTION_CLOUD_NAME: "crushify-production-test",
+      PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PREVIEW_AUTH_ALLOWED_EMAILS: "qa@example.test",
+      PREVIEW_EMAIL_SINK: "discard",
+      PREVIEW_PAYMENT_MODE: "sepay-test",
+      PREVIEW_SEPAY_WEBHOOK_SECRET: "a".repeat(64),
+      PREVIEW_SEPAY_BANK_CODE: "MB",
+      PREVIEW_SEPAY_BANK_ACCOUNT: "1234567890",
+      STAGING_LIFECYCLE_SECRET: "b".repeat(64),
+      ENVIRONMENT: "staging",
+      VERCEL_ENV: "preview",
+      VERCEL_URL: "preview-crushify.test",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    };
+
+    it("accepts only a complete Preview-scoped customer flow with a separate Cloudinary cloud", () => {
+      assert.equal(validateVercelEnvironment(enabledPreview), null);
+      assert.deepEqual(resolveVercelDatabaseConfiguration(enabledPreview), {
+        DATABASE_PROVIDER: "turso",
+        TURSO_DATABASE_URL: enabledPreview.TURSO_STAGING_DATABASE_URL,
+        TURSO_AUTH_TOKEN: enabledPreview.TURSO_STAGING_AUTH_TOKEN,
+      });
+
+      for (const override of [
+        { TURSO_DATABASE_URL: "libsql://production.turso.io" },
+        { MAIL_API_KEY: "synthetic-production-mail-key" },
+        { PAYMENT_MODE: "sepay-test" },
+        { PREVIEW_AUTH_ALLOWED_EMAILS: "" },
+        { PREVIEW_SEPAY_BANK_ACCOUNT: "invalid" },
+        { CLOUDINARY_STAGING_CLOUD_NAME: enabledPreview.CLOUDINARY_PRODUCTION_CLOUD_NAME },
+        { PREVIEW_CUSTOMER_FLOW_ENABLED: "false" },
+        { STAGING_LIFECYCLE_SECRET: undefined },
+      ]) {
+        assert.notEqual(validateVercelEnvironment({ ...enabledPreview, ...override }), null);
+      }
+    });
+
+    it("accepts a separately configured manual transfer mode only in opted-in Preview", () => {
+      const manualPreview = {
+        ...enabledPreview,
+        PREVIEW_PAYMENT_MODE: "manual-bank-transfer",
+        PREVIEW_SEPAY_WEBHOOK_SECRET: undefined,
+        PREVIEW_SEPAY_BANK_CODE: undefined,
+        PREVIEW_SEPAY_BANK_ACCOUNT: undefined,
+        PREVIEW_SEPAY_ACCOUNT_NAME: undefined,
+        PREVIEW_MANUAL_BANK_CODE: "MB",
+        PREVIEW_MANUAL_BANK_ACCOUNT: "1234567890",
+        PREVIEW_MANUAL_ACCOUNT_NAME: "Crushify Preview",
+      };
+      assert.equal(validateVercelEnvironment(manualPreview), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...manualPreview,
+        PREVIEW_MANUAL_BANK_ACCOUNT: "invalid",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...manualPreview,
+        PREVIEW_SEPAY_WEBHOOK_SECRET: "a".repeat(64),
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...manualPreview,
+        VERCEL_ENV: "production",
+        ENVIRONMENT: "production",
+        VERCEL_URL: undefined,
+        VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+      }), null);
+    });
+
+    it("maps Preview manual transfer settings into the runtime checkout capability", async () => {
+      const manualPreview = {
+        ...enabledPreview,
+        PREVIEW_PAYMENT_MODE: "manual-bank-transfer",
+        PREVIEW_SEPAY_WEBHOOK_SECRET: undefined,
+        PREVIEW_SEPAY_BANK_CODE: undefined,
+        PREVIEW_SEPAY_BANK_ACCOUNT: undefined,
+        PREVIEW_SEPAY_ACCOUNT_NAME: undefined,
+        PREVIEW_MANUAL_BANK_CODE: "MB",
+        PREVIEW_MANUAL_BANK_ACCOUNT: "1234567890",
+        PREVIEW_MANUAL_ACCOUNT_NAME: "Crushify Preview",
+      };
+      const database: Database = {
+        prepare() {
+          throw new Error("public catalog must not query the database");
+        },
+        async batch() {
+          throw new Error("public catalog must not query the database");
+        },
+      };
+      const handler = createVercelApiHandler(manualPreview, {
+        async connectDatabase() {
+          return { database, close: () => undefined };
+        },
+        createCloudinaryStorage: () => new MemoryStorageAdapter(),
+      });
+      const response = await handler(new Request(
+        "https://preview-crushify.test/api/v1/catalog",
+      ));
+      assert.equal(response.status, 200);
+      assert.equal((await response.json() as { checkout_enabled: boolean }).checkout_enabled, true);
+    });
+
+    it("accepts a complete dedicated Preview Resend mode and rejects incomplete or cross-scoped mail", () => {
+      const dedicatedMail = {
+        ...enabledPreview,
+        PREVIEW_EMAIL_SINK: undefined,
+        PREVIEW_MAIL_PROVIDER: "resend",
+        PREVIEW_MAIL_API_KEY: "synthetic-preview-resend-key",
+        PREVIEW_MAIL_FROM_EMAIL: "Crushify Preview <noreply@preview.example.test>",
+      };
+      assert.equal(validateVercelEnvironment(dedicatedMail), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...dedicatedMail,
+        PREVIEW_MAIL_PROVIDER: "unsupported",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...dedicatedMail,
+        PREVIEW_MAIL_API_KEY: undefined,
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...dedicatedMail,
+        PREVIEW_MAIL_FROM_EMAIL: "not-an-email",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...dedicatedMail,
+        PREVIEW_EMAIL_SINK: "discard",
+      }), null, "discard and delivery modes cannot be configured together");
+      assert.notEqual(validateVercelEnvironment({
+        ...enabledPreview,
+        PREVIEW_EMAIL_SINK: undefined,
+      }), null, "Preview authentication must not silently discard without an explicit mode");
+      assert.notEqual(validateVercelEnvironment({
+        ...dedicatedMail,
+        VERCEL_ENV: "production",
+        ENVIRONMENT: "production",
+        VERCEL_URL: "crushify.test",
+        PREVIEW_EMAIL_SINK: undefined,
+      }), null, "Production must reject Preview-specific credentials");
+    });
+
+    it("scopes API reconciliation configuration to Preview Sandbox only", () => {
+      const reconciliation = {
+        ...enabledPreview,
+        PREVIEW_SEPAY_RECONCILIATION_ENABLED: "true",
+        PREVIEW_SEPAY_API_TOKEN: "a".repeat(64),
+        PREVIEW_SEPAY_API_BANK_ACCOUNT_ID: "f9e8d7c6-b5a4-3210-fedc-ba0987654321",
+        PREVIEW_SEPAY_RECONCILIATION_SECRET: "c".repeat(64),
+        PREVIEW_SEPAY_RECONCILIATION_START_AT: new Date().toISOString(),
+      };
+      assert.equal(validateVercelEnvironment(reconciliation), null);
+      for (const key of [
+        "PREVIEW_SEPAY_RECONCILIATION_ENABLED",
+        "PREVIEW_SEPAY_API_TOKEN",
+        "PREVIEW_SEPAY_API_BANK_ACCOUNT_ID",
+        "PREVIEW_SEPAY_RECONCILIATION_SECRET",
+        "PREVIEW_SEPAY_RECONCILIATION_START_AT",
+      ]) {
+        const incomplete = { ...reconciliation, [key]: undefined };
+        assert.notEqual(validateVercelEnvironment(incomplete), null, key);
+      }
+      assert.notEqual(validateVercelEnvironment({
+        ...reconciliation,
+        PREVIEW_SEPAY_API_TOKEN: "invalid",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...reconciliation,
+        ENVIRONMENT: "production",
+        VERCEL_ENV: "production",
+        VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...reconciliation,
+        VERCEL_ENV: "development",
+        ENVIRONMENT: "local",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...enabledPreview,
+        SEPAY_API_BASE_URL: "https://attacker.example",
+      }), null);
+    });
+  });
+
   it("fails closed for missing, conflicting, malformed, or Production Preview credentials", () => {
     for (const override of [
       { TURSO_STAGING_DATABASE_URL: undefined },
@@ -212,6 +462,216 @@ describe("Vercel database environment selection", () => {
 });
 
 describe("Vercel API runtime adapter", () => {
+  it("protects the Preview-only reconciliation trigger and keeps execution observation-only", async () => {
+    const secret = "c".repeat(64);
+    const token = "a".repeat(64);
+    const environment = {
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-staging-token",
+      STORAGE_PROVIDER: "mock",
+      ENVIRONMENT: "staging",
+      VERCEL_ENV: "preview",
+      VERCEL_URL: "preview-crushify.test",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+      PREVIEW_SEPAY_RECONCILIATION_ENABLED: "true",
+      PREVIEW_SEPAY_API_TOKEN: token,
+      PREVIEW_SEPAY_API_BANK_ACCOUNT_ID: "f9e8d7c6-b5a4-3210-fedc-ba0987654321",
+      PREVIEW_SEPAY_RECONCILIATION_SECRET: secret,
+      PREVIEW_SEPAY_RECONCILIATION_START_AT:
+        new Date(Date.now() - 60_000).toISOString(),
+    };
+    const databaseClient = createClient({ url: "file::memory:", intMode: "number" });
+    const migrations = await loadMigrations();
+    await applyMigrations(databaseClient, migrations);
+    const database = new TursoDatabaseAdapter(databaseClient);
+    let databaseConnections = 0;
+    let providerRequests = 0;
+    let denseMode = false;
+    let inconsistentMode = false;
+    const denseTransactions = Array.from({ length: 401 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+      bank_account_id: environment.PREVIEW_SEPAY_API_BANK_ACCOUNT_ID,
+      transaction_date: new Date(Date.parse("2026-01-01T10:00:00.000Z") + index * 1000)
+        .toISOString(),
+      transfer_type: "in",
+      amount_in: 50_000,
+      amount_out: 0,
+      reference_number: `synthetic-${index}`,
+      code: null,
+      webhook_success: null,
+    }));
+    const handler = createVercelApiHandler(environment, {
+      async connectDatabase() {
+        databaseConnections++;
+        return { database, close: () => undefined };
+      },
+      async sepayFetch(input, init) {
+        providerRequests++;
+        const url = new URL(String(input));
+        assert.equal(url.origin, "https://userapi-sandbox.sepay.vn");
+        assert.equal(new Headers(init?.headers).get("Authorization"), `Bearer ${token}`);
+        assert.equal(init?.redirect, "error");
+        if (inconsistentMode) {
+          const page = Number(url.searchParams.get("page"));
+          return Response.json({
+            status: "success",
+            data: denseTransactions.slice(0, 100),
+            meta: { pagination: {
+              total: 401,
+              per_page: 100,
+              current_page: page,
+              last_page: 5,
+              has_more: page < 5,
+            } },
+          });
+        }
+        if (denseMode) {
+          const page = Number(url.searchParams.get("page"));
+          const records = denseTransactions.slice((page - 1) * 100, page * 100);
+          return Response.json({
+            status: "success",
+            data: records,
+            meta: { pagination: {
+              total: denseTransactions.length,
+              per_page: 100,
+              current_page: page,
+              last_page: 5,
+              has_more: page < 5,
+            } },
+          });
+        }
+        return Response.json({
+          status: "success",
+          data: [],
+          meta: { pagination: {
+            total: 0,
+            per_page: 100,
+            current_page: 1,
+            last_page: 0,
+            has_more: false,
+          } },
+        });
+      },
+    });
+    const trigger = (authorization?: string, path = "/api/ops/staging/sepay-reconciliation") =>
+      new Request(`https://preview-crushify.test${path}`, {
+        method: "POST",
+        headers: authorization ? { Authorization: authorization } : {},
+      });
+
+    try {
+      const missingAuth = await handler(trigger());
+      assert.equal(missingAuth.status, 401);
+      const wrongAuth = await handler(trigger(`Bearer ${"d".repeat(64)}`));
+      assert.equal(wrongAuth.status, 401);
+      const parameterized = await handler(trigger(
+        `Bearer ${secret}`,
+        "/api/ops/staging/sepay-reconciliation?scan_key=unsafe",
+      ));
+      assert.equal(parameterized.status, 400);
+      assert.equal(databaseConnections, 0);
+      assert.equal(providerRequests, 0);
+
+      const completed = await handler(trigger(`Bearer ${secret}`));
+      assert.equal(completed.status, 200);
+      const completion = await completed.json() as {
+        status: string;
+        pages: number;
+        observations: number;
+        scanned_from: string;
+        scanned_through: string;
+      };
+      assert.equal(completion.status, "completed");
+      assert.equal(completion.pages, 1);
+      assert.equal(completion.observations, 0);
+      assert.equal(
+        Date.parse(completion.scanned_from),
+        Math.floor(Date.parse(environment.PREVIEW_SEPAY_RECONCILIATION_START_AT) / 1000) * 1000,
+      );
+      assert.equal((await database.prepare(
+        `SELECT window_end FROM sepay_api_reconciliation_cursors
+         WHERE scan_key = ? AND scan_mode = 'DATE_WINDOW'`,
+      ).bind(`preview-sepay-api-v2:${environment.PREVIEW_SEPAY_API_BANK_ACCOUNT_ID}`)
+        .first<{ window_end: string }>())?.window_end, completion.scanned_through);
+      assert.equal(providerRequests, 1);
+      assert.equal((await database.prepare(
+        "SELECT COUNT(*) AS count FROM payment_settlement_evidence",
+      ).first<{ count: number }>())?.count, 0);
+      assert.equal((await database.prepare(
+        "SELECT COUNT(*) AS count FROM sepay_api_observations",
+      ).first<{ count: number }>())?.count, 0);
+
+      denseMode = true;
+      const partial = await handler(trigger(`Bearer ${secret}`));
+      assert.equal(partial.status, 206);
+      const partialBody = await partial.json() as {
+        status: string;
+        pages: number;
+        observations: number;
+        continuation_page: number;
+        last_page: number;
+        total_records: number;
+        remaining_pages: number;
+        scanned_from: string;
+        scanned_through: string;
+      };
+      assert.deepEqual({
+        status: partialBody.status,
+        pages: partialBody.pages,
+        observations: partialBody.observations,
+        continuation_page: partialBody.continuation_page,
+        last_page: partialBody.last_page,
+        total_records: partialBody.total_records,
+        remaining_pages: partialBody.remaining_pages,
+      }, {
+        status: "partial",
+        pages: 4,
+        observations: 400,
+        continuation_page: 5,
+        last_page: 5,
+        total_records: 401,
+        remaining_pages: 1,
+      });
+      assert.ok(Number.isFinite(Date.parse(partialBody.scanned_from)));
+      assert.ok(Number.isFinite(Date.parse(partialBody.scanned_through)));
+      const continued = await handler(trigger(`Bearer ${secret}`));
+      assert.equal(continued.status, 200);
+      assert.equal((await continued.json() as { status: string }).status, "completed");
+      assert.equal((await database.prepare(
+        "SELECT COUNT(*) AS count FROM sepay_api_observations",
+      ).first<{ count: number }>())?.count, 401);
+      assert.equal((await database.prepare(
+        "SELECT COUNT(*) AS count FROM payment_settlement_evidence",
+      ).first<{ count: number }>())?.count, 0);
+
+      environment.PREVIEW_SEPAY_RECONCILIATION_START_AT =
+        new Date(Date.now() - 60 * 24 * 60 * 60_000).toISOString();
+      inconsistentMode = true;
+      const stalled = await handler(trigger(`Bearer ${secret}`));
+      assert.equal(stalled.status, 503);
+      assert.deepEqual(await stalled.json(), {
+        status: "failed",
+        error_code: "PAGINATION_INCONSISTENT",
+        failure_class: "cursor_stalled",
+      });
+      assert.equal((await database.prepare(
+        `SELECT pending_next_page FROM sepay_api_reconciliation_cursors
+         WHERE scan_key = ? AND scan_mode = 'DATE_WINDOW'`,
+      ).bind(`preview-sepay-api-v2:${environment.PREVIEW_SEPAY_API_BANK_ACCOUNT_ID}`)
+        .first<{ pending_next_page: number }>())?.pending_next_page, 2);
+
+      const productionHandler = createVercelApiHandler({
+        ...environment,
+        ENVIRONMENT: "production",
+        VERCEL_ENV: "production",
+      });
+      assert.equal((await productionHandler(trigger(`Bearer ${secret}`))).status, 404);
+    } finally {
+      databaseClient.close();
+    }
+  });
+
   it("enables mock settlement only for explicit local SQLite and mock storage", async () => {
     const unusedDatabase: Database = {
       prepare() {
@@ -697,7 +1157,7 @@ describe("Vercel API runtime adapter", () => {
     try {
       const migrations = await loadMigrations();
       assert.deepEqual(await applyMigrations(migrationClient, migrations),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
       await verifyMigrationSchema(migrationClient, migrations);
       await migrationClient.execute("CREATE TABLE staging_schema_unexpected (id TEXT PRIMARY KEY)");
       await assert.rejects(
@@ -905,6 +1365,15 @@ describe("Vercel API runtime adapter", () => {
             });
             assert.equal(result.rows.length, 1);
             return result.rows[0];
+          },
+          async inspectSettlementEvidence(transactionId: string) {
+            const result = await migrationClient.execute({
+              sql: `SELECT COUNT(*) AS count FROM payment_settlement_evidence
+                    WHERE provider = 'SEPAY' AND evidence_source = 'SEPAY_WEBHOOK'
+                      AND source_transaction_id = ?`,
+              args: [transactionId],
+            });
+            return Number(result.rows[0]?.count ?? 0);
           },
           async setPublicationExpiry(publicationId: string, expiresAt: string) {
             await migrationClient.batch([
@@ -1195,6 +1664,245 @@ describe("Vercel API runtime adapter", () => {
     }
   });
 
+  it("runs the customer order and publication contract in isolated Preview mode with local test doubles", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "crushify-vercel-preview-contract-"));
+    const databasePath = join(directory, "preview-contract.db");
+    const databaseUrl = pathToFileURL(databasePath).href;
+    const migrationClient = createClient({ url: databaseUrl, intMode: "number" });
+    const database = new TursoDatabaseAdapter(migrationClient);
+    const storage = new MemoryStorageAdapter();
+    const tokens: string[] = [];
+    const webhookSecret = randomBytes(32).toString("hex");
+    const receivingAccount = "0000000000";
+    const emailAddresses = ["preview-owner@example.test", "preview-other@example.test"];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      assert.equal(String(input), "https://api.resend.com/emails");
+      assert.equal(new Headers(init?.headers).get("authorization"),
+        "Bearer synthetic-preview-resend-key");
+      const payload = JSON.parse(String(init?.body)) as { to: string[]; text: string };
+      assert.equal(payload.to.length, 1);
+      assert.ok(emailAddresses.includes(payload.to[0]));
+      const token = payload.text.match(/#magic_token=([A-Za-z0-9_-]+)/)?.[1];
+      if (token) tokens.push(token);
+      return new Response(null, { status: 200 });
+    };
+    const handler = createVercelApiHandler({
+      DATABASE_PROVIDER: "turso",
+      TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
+      TURSO_STAGING_AUTH_TOKEN: "synthetic-staging-token",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-preview-test",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-preview-key",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-preview-secret",
+      CLOUDINARY_PRODUCTION_CLOUD_NAME: "crushify-production-test",
+      PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PREVIEW_AUTH_ALLOWED_EMAILS: emailAddresses.join(","),
+      ADMIN_EMAILS: emailAddresses[0],
+      PREVIEW_MAIL_PROVIDER: "resend",
+      PREVIEW_MAIL_API_KEY: "synthetic-preview-resend-key",
+      PREVIEW_MAIL_FROM_EMAIL: "Crushify Preview <noreply@preview.example.test>",
+      PREVIEW_PAYMENT_MODE: "sepay-test",
+      PREVIEW_SEPAY_WEBHOOK_SECRET: webhookSecret,
+      PREVIEW_SEPAY_BANK_CODE: "MB",
+      PREVIEW_SEPAY_BANK_ACCOUNT: receivingAccount,
+      PREVIEW_SEPAY_ACCOUNT_NAME: "Crushify Preview",
+      STAGING_LIFECYCLE_SECRET: randomBytes(32).toString("hex"),
+      ENVIRONMENT: "staging",
+      VERCEL_ENV: "preview",
+      VERCEL_URL: "preview-crushify.test",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+    }, {
+      async connectDatabase(environment) {
+        assert.equal(environment.TURSO_DATABASE_URL, undefined,
+          "Preview must not fall back to generic Turso credentials");
+        assert.equal(environment.TURSO_STAGING_DATABASE_URL,
+          "libsql://crushify-staging-test-org.turso.io");
+        return { database, close: () => undefined };
+      },
+      createCloudinaryStorage() {
+        return storage;
+      },
+    });
+
+    const request = async (
+      path: string,
+      session?: { cookies: string[]; csrf: string } | null,
+      options: Record<string, unknown> = {},
+    ) => {
+      const settings = options as {
+        method?: string;
+        mutating?: boolean;
+        json?: unknown;
+        token?: string;
+        headers?: HeadersInit;
+        body?: BodyInit;
+      };
+      const headers = new Headers(settings.headers);
+      if (session?.cookies.length) headers.set("Cookie", session.cookies.join("; "));
+      if (settings.token) headers.set("Authorization", `Bearer ${settings.token}`);
+      if (settings.mutating || ["POST", "PUT", "PATCH", "DELETE"].includes(settings.method ?? "")) {
+        headers.set("Origin", "https://preview-crushify.test");
+        if (session?.csrf) headers.set("X-CSRF-Token", session.csrf);
+      }
+      if (settings.json !== undefined) headers.set("Content-Type", "application/json");
+      if (path === "/customers/session" || path === "/customers/session/verify") {
+        headers.set("x-vercel-forwarded-for", "198.51.100.41");
+      }
+      const response = await handler(new Request(`https://preview-crushify.test/api/v1${path}`, {
+        method: settings.method ?? "GET",
+        headers,
+        body: settings.json === undefined ? settings.body : JSON.stringify(settings.json),
+      }));
+      const body = response.status === 204 ||
+        !response.headers.get("content-type")?.includes("application/json")
+        ? null
+        : await response.json();
+      return { response, body };
+    };
+
+    try {
+      const migrations = await loadMigrations();
+      assert.deepEqual(await applyMigrations(migrationClient, migrations),
+        migrations.map((migration) => migration.version));
+      await verifyMigrationSchema(migrationClient, migrations);
+
+      const signIn = async (email: string) => {
+        const login = await request("/customers/session", null, {
+          method: "POST",
+          json: { email },
+        });
+        assert.equal(login.response.status, 202);
+        assert.deepEqual(login.body, {
+          message: "If the address can be used, a sign-in link has been sent.",
+        });
+        assert.doesNotMatch(JSON.stringify(login.body), /magic_token|synthetic-preview-resend-key/);
+        const token = tokens.shift();
+        assert.ok(token, "mocked Preview Resend captures the one-time token");
+        const verified = await request("/customers/session/verify", null, {
+          method: "POST",
+          json: { token },
+        });
+        assert.equal(verified.response.status, 200);
+        const cookies = verified.response.headers.getSetCookie().map((value) => value.split(";", 1)[0]);
+        const csrf = cookies.find((value) => value.startsWith("crushify_csrf="))?.split("=", 2)[1];
+        assert.ok(csrf);
+        return { cookies, csrf };
+      };
+      const owner = await signIn(emailAddresses[0]);
+      const otherOwner = await signIn(emailAddresses[1]);
+      assert.equal((await request("/admin/operations", owner)).response.status, 200);
+      assert.equal((await request("/admin/operations", otherOwner)).response.status, 403);
+      const design = await request("/designs", owner, {
+        method: "POST",
+        mutating: true,
+        json: { template_id: "our-universe", schema_version: 1 },
+      });
+      assert.equal(design.response.status, 201);
+
+      const catalog = await request("/catalog");
+      assert.equal(catalog.response.status, 200);
+      assert.equal(catalog.body.checkout_enabled, true);
+      assert.deepEqual(catalog.body.storage_durations.map((plan: { amount_minor: number }) =>
+        plan.amount_minor), [59_000, 79_000, 109_000, 169_000, 199_000]);
+
+      const customizedData = {
+        ...design.body.data,
+        sender: "Preview Test",
+        headline: "A private Preview draft",
+        mainMessage: "Synthetic SePay Test-mode journey",
+      };
+      const saved = await request(`/designs/${design.body.design_id}`, owner, {
+        method: "PUT",
+        mutating: true,
+        json: {
+          schema_version: design.body.schema_version,
+          expected_revision: design.body.revision,
+          data: customizedData,
+        },
+      });
+      assert.equal(saved.response.status, 200);
+
+      const privatePreview = await request(`/designs/${design.body.design_id}/preview`, owner, {
+        method: "POST",
+        mutating: true,
+      });
+      assert.equal(privatePreview.response.status, 201);
+      const previewData = await request("/previews", null, { token: privatePreview.body.token });
+      assert.equal(previewData.response.status, 200);
+      assert.equal(previewData.body.data.mainMessage, customizedData.mainMessage);
+
+      const crossOwner = await request(`/designs/${design.body.design_id}`, otherOwner);
+      assert.equal(crossOwner.response.status, 404);
+      const createdOrder = await request("/orders", owner, {
+        method: "POST",
+        mutating: true,
+        headers: { "Idempotency-Key": `preview-order-${crypto.randomUUID()}` },
+        json: {
+          design_id: design.body.design_id,
+          storage_plan_id: "1-month",
+          asset_consents: [],
+        },
+      });
+      assert.equal(createdOrder.response.status, 201);
+      assert.equal(createdOrder.body.total_minor, 59_000);
+      assert.equal(createdOrder.body.payment.provider, "SEPAY");
+      assert.equal(createdOrder.body.status, "AWAITING_PAYMENT");
+
+      const timestamp = Math.floor(Date.now() / 1000);
+      const webhookBody = JSON.stringify({
+        id: String(Date.now() * 100 + 99),
+        accountNumber: receivingAccount,
+        code: createdOrder.body.payment.reference,
+        transferType: "in",
+        transferAmount: createdOrder.body.total_minor,
+      });
+      const signature = createHmac("sha256", webhookSecret)
+        .update(`${timestamp}.${webhookBody}`)
+        .digest("hex");
+      const settled = await request("/payments/sepay/webhook", null, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-SePay-Timestamp": String(timestamp),
+          "X-SePay-Signature": `sha256=${signature}`,
+        },
+        body: webhookBody,
+      });
+      assert.equal(settled.response.status, 200);
+
+      const status = await request(`/orders/${createdOrder.body.order_id}/status`, owner);
+      assert.equal(status.response.status, 200);
+      assert.equal(status.body.status, "FULFILLED");
+      const websites = await request("/publications", owner);
+      const website = websites.body.websites.find((row: { design_id: string }) =>
+        row.design_id === design.body.design_id);
+      assert.equal(website.publication_status, "PUBLISHED");
+      assert.ok(website.storage_plan.expires_at);
+      const publicSlug = new URL(website.public_url).pathname.split("/").at(-1);
+      const publication = await request(`/publications/${publicSlug}`);
+      assert.equal(publication.response.status, 200);
+      assert.equal(publication.body.data.mainMessage, customizedData.mainMessage);
+    } finally {
+      globalThis.fetch = originalFetch;
+      migrationClient.close();
+      if (process.platform === "win32") {
+        const cleanup = spawn(
+          process.execPath,
+          [
+            "-e",
+            "const fs=require('node:fs');setTimeout(()=>fs.rmSync(process.argv[1],{recursive:true,force:true}),3000)",
+            directory,
+          ],
+          { detached: true, stdio: "ignore", windowsHide: true },
+        );
+        cleanup.unref();
+      } else {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("fails closed for missing providers and does not expose connection details", async () => {
     let connectCalls = 0;
     const missingDatabase = createVercelApiHandler({
@@ -1264,6 +1972,7 @@ describe("Vercel API runtime adapter", () => {
       "APP_ORIGIN",
       "VERCEL_ENV",
       "VERCEL_URL",
+      "ADMIN_EMAILS",
       "LOCAL_TEST_MAIL_SINK_URL",
     ];
     const originalEnvironment = new Map(envNames.map((name) => [name, process.env[name]]));
@@ -1299,13 +2008,14 @@ describe("Vercel API runtime adapter", () => {
 
     try {
       assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
       process.env.DATABASE_PROVIDER = "turso";
       process.env.TURSO_DATABASE_URL = databaseUrl;
       process.env.TURSO_AUTH_TOKEN = "";
       process.env.STORAGE_PROVIDER = "mock";
       process.env.LOCAL_TEST_MODE = "true";
       process.env.VERCEL_ENV = "development";
+      process.env.ADMIN_EMAILS = " VERCEL-ADMIN@EXAMPLE.TEST ";
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(0, "127.0.0.1", resolve);
@@ -1363,6 +2073,26 @@ describe("Vercel API runtime adapter", () => {
         assert.equal(live.status, 200);
         const unsupported = await fetch(`${baseUrl}/api/v1/health/live`, { method: "HEAD" });
         assert.equal(unsupported.status, 405);
+
+        const adminLogin = await request("/customers/session", undefined, {
+          method: "POST",
+          json: { email: "vercel-admin@example.test" },
+        });
+        assert.equal(adminLogin.response.status, 202);
+        const adminToken = tokenQueue.shift();
+        assert.ok(adminToken, "Vercel local-test email should capture the admin magic link");
+        const adminVerified = await request("/customers/session/verify", undefined, {
+          method: "POST",
+          json: { token: adminToken },
+        });
+        assert.equal(adminVerified.response.status, 200);
+        const adminCookies = adminVerified.response.headers.getSetCookie()
+          .map((value) => value.split(";", 1)[0]);
+        const adminCsrf = adminCookies.find((value) => value.startsWith("crushify_csrf="))
+          ?.split("=", 2)[1];
+        assert.ok(adminCsrf);
+        const adminSession = { cookies: adminCookies, csrf: adminCsrf };
+        assert.equal((await request("/admin/operations", adminSession)).response.status, 200);
 
         await runDatabaseContract({
           request,

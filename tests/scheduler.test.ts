@@ -158,10 +158,12 @@ describe("Vercel scheduled publication lifecycle", () => {
       assert.deepEqual(first, {
         acquired: true,
         failed: false,
+        pending: false,
         expired: 0,
         erased: 0,
         retryable: 0,
         operations: {
+          sepayWebhookRecovery: { status: "skipped", reason: "runtime_policy" },
           fulfillmentRecovery: { status: "skipped", reason: "runtime_policy" },
           publicationLifecycle: {
             status: "completed",
@@ -170,6 +172,19 @@ describe("Vercel scheduled publication lifecycle", () => {
           uploadCleanup: {
             status: "completed",
             result: { processed: 0, cleaned: 0, preserved: 0, retryable: 0, manualReview: 0 },
+          },
+          publicationDerivativeCleanup: {
+            status: "completed",
+            result: {
+              status: "completed",
+              processed: 0,
+              cleaned: 0,
+              pending: 0,
+              deferred: 0,
+              retryable: 0,
+              manualReview: 0,
+              hasMore: false,
+            },
           },
         },
       });
@@ -188,6 +203,46 @@ describe("Vercel scheduled publication lifecycle", () => {
       assert.equal(runs.results.length, 2);
       assert.ok(runs.results.every((run) => run.status === "COMPLETED"));
       assert.ok(runs.results.every((run) => JSON.parse(run.result_json).expired === 0));
+    } finally {
+      client.close();
+    }
+  });
+
+  it("recovers persisted Preview SePay webhook events during lifecycle maintenance", async () => {
+    const { client, database } = await createDatabase();
+    const env: Env = {
+      DB: database,
+      STORAGE: new MemoryStorageAdapter(),
+      ENVIRONMENT: "staging",
+      PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PAYMENT_MODE: "sepay-test",
+    };
+    try {
+      await database.prepare(
+        `INSERT INTO payment_webhook_events
+         (id, provider, event_id, payload_hash, received_at, outcome, raw_payload)
+         VALUES (?, 'SEPAY', ?, ?, ?, 'RECEIVED', '{}')`,
+      ).bind("event-1", "event-1", "hash", "2027-01-02T03:04:05.000Z").run();
+
+      const result = await runScheduledPublicationLifecycle(env, {
+        now: new Date("2027-01-02T03:04:05.000Z"),
+        limit: 10,
+      });
+
+      assert.equal(result.failed, false);
+      assert.deepEqual(result.operations?.sepayWebhookRecovery, {
+        status: "completed",
+        result: { attempted: 1, pending: 0 },
+      });
+      const event = await database.prepare(
+        "SELECT outcome, review_reason FROM payment_webhook_events WHERE event_id = ?",
+      ).bind("event-1").first<{ outcome: string; review_reason: string }>();
+      assert.equal(event?.outcome, "MANUAL_REVIEW");
+      assert.equal(event?.review_reason, "Transaction ID is missing or invalid");
+      const paidOrders = await database.prepare(
+        "SELECT COUNT(*) AS count FROM orders WHERE status = 'PAID'",
+      ).first<{ count: number }>();
+      assert.equal(paidOrders?.count, 0);
     } finally {
       client.close();
     }

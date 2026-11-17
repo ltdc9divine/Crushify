@@ -7,8 +7,9 @@
   },
   "scripts": {
     "dev": "wrangler dev --local --var ENVIRONMENT:local",
+    "dev:email-sink": "node scripts/dev-email-sink.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.ts tests/*.test.mjs",
     "db:apply:local": "wrangler d1 migrations apply crushify-local --local",
     "db:migrate:turso": "node --experimental-strip-types scripts/migrate-turso.ts",
     "test:integration": "node tests/integration.mjs",
@@ -26,6 +27,7 @@
     "wrangler": "^4.157.0"
   },
   "dependencies": {
-    "@libsql/client": "^0.18.0"
+    "@libsql/client": "^0.18.0",
+    "qrcode-generator": "^2.0.4"
   }
 }

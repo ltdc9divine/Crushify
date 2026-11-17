@@ -135,6 +135,48 @@ describe("pre-staging environment and storage isolation", () => {
         return new MemoryStorageAdapter();
       },
     });
+
+    it("initializes only explicitly configured Preview storage and does not email unallowlisted users", async () => {
+      let databaseConnections = 0;
+      let storageFactories = 0;
+      let emailCalls = 0;
+      const handler = createVercelApiHandler({
+        ...previewEnvironment,
+        PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PREVIEW_AUTH_ALLOWED_EMAILS: "qa@example.test",
+        PREVIEW_EMAIL_SINK: "discard",
+        PREVIEW_PAYMENT_MODE: "sepay-test",
+        PREVIEW_SEPAY_WEBHOOK_SECRET: "a".repeat(64),
+        PREVIEW_SEPAY_BANK_CODE: "MB",
+        PREVIEW_SEPAY_BANK_ACCOUNT: "1234567890",
+        STAGING_LIFECYCLE_SECRET: "b".repeat(64),
+      }, {
+        async connectDatabase() {
+          databaseConnections++;
+          return { database, close: () => undefined };
+        },
+        createCloudinaryStorage() {
+          storageFactories++;
+          return new MemoryStorageAdapter();
+        },
+        async previewTestEmailSink() {
+          emailCalls++;
+        },
+      });
+
+      const response = await handler(new Request(
+        "https://preview.crushify.test/api/v1/customers/session",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "other@example.test" }),
+        },
+      ));
+      assert.equal(response.status, 202);
+      assert.equal(storageFactories, 1);
+      assert.equal(databaseConnections, 1);
+      assert.equal(emailCalls, 0);
+    });
     const response = await preview(new Request("https://preview.crushify.test/api/v1/nonexistent"));
     assert.equal(response.status, 500);
     assert.equal((await response.json() as { error: { code: string } }).error.code,
@@ -423,6 +465,37 @@ describe("environment-specific email policy", () => {
     assert.equal(JSON.stringify(output).includes("synthetic-recipient"), false);
   });
 
+  it("rejects conflicting Preview discard and Resend configuration", async () => {
+    const originalFetch = globalThis.fetch;
+    let sent = false;
+    const originalInfo = console.info;
+    const output: unknown[][] = [];
+    console.info = (...values: unknown[]) => output.push(values);
+    globalThis.fetch = async () => {
+      sent = true;
+      return new Response(null, { status: 200 });
+    };
+    try {
+      const conflicting = createEmailService({
+        DB: database,
+        ENVIRONMENT: "staging",
+        PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PREVIEW_AUTH_ALLOWED_EMAILS: "qa@example.test",
+        PREVIEW_EMAIL_SINK: "discard",
+        PREVIEW_MAIL_PROVIDER: "resend",
+        PREVIEW_MAIL_API_KEY: "synthetic-preview-key",
+        PREVIEW_MAIL_FROM_EMAIL: "preview@example.test",
+      }, "https://preview.crushify.test");
+      assert.equal(conflicting, null);
+      assert.equal(sent, false);
+      assert.equal(JSON.stringify(output).includes("synthetic-recipient"), false);
+      assert.equal(JSON.stringify(output).includes("preview@example.test"), false);
+    } finally {
+      console.info = originalInfo;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("keeps local mail mock-only and preserves the Production Resend adapter", async () => {
     const localMessages: EmailMessage[] = [];
     const local = createEmailService({
@@ -460,6 +533,109 @@ describe("environment-specific email policy", () => {
       assert.ok(production);
       await production.send(message);
       assert.equal(sent, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("uses only dedicated Preview Resend credentials and restricts recipients", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; authorization: string | null; body: Record<string, unknown> }> = [];
+    globalThis.fetch = async (input, init) => {
+      requests.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("authorization"),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      return new Response(null, { status: 200 });
+    };
+    try {
+      const preview = createEmailService({
+        DB: database,
+        ENVIRONMENT: "staging",
+        PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PREVIEW_AUTH_ALLOWED_EMAILS: "qa@example.test, admin@example.test",
+        PREVIEW_MAIL_PROVIDER: "resend",
+        PREVIEW_MAIL_API_KEY: "synthetic-preview-key",
+        PREVIEW_MAIL_FROM_EMAIL: "Crushify Preview <sender@preview.example.test>",
+        MAIL_PROVIDER: undefined,
+      }, "https://preview.crushify.test");
+      assert.ok(preview);
+      await preview.send({
+        ...message,
+        to: "QA@example.test",
+      });
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].url, "https://api.resend.com/emails");
+      assert.equal(requests[0].authorization, "Bearer synthetic-preview-key");
+      assert.deepEqual(requests[0].body.to, ["QA@example.test"]);
+      assert.equal(requests[0].body.from, "Crushify Preview <sender@preview.example.test>");
+
+      await assert.rejects(
+        preview.send({ ...message, to: "arbitrary@example.test" }),
+        /recipient is not authorized/,
+      );
+      assert.equal(requests.length, 1, "an unapproved recipient must not reach Resend");
+
+      assert.equal(createEmailService({
+        DB: database,
+        ENVIRONMENT: "staging",
+        PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PREVIEW_AUTH_ALLOWED_EMAILS: "qa@example.test",
+        MAIL_PROVIDER: "resend",
+        MAIL_API_KEY: "synthetic-production-key",
+        MAIL_FROM_EMAIL: "sender@example.test",
+      }, "https://preview.crushify.test"), null,
+      "Preview must not fall back to Production credentials");
+      assert.equal(createEmailService({
+        DB: database,
+        ENVIRONMENT: "production",
+        PREVIEW_MAIL_PROVIDER: "resend",
+        PREVIEW_MAIL_API_KEY: "synthetic-preview-key",
+        PREVIEW_MAIL_FROM_EMAIL: "sender@preview.example.test",
+      }, "https://crushify.test"), null,
+      "Production must not use Preview credentials");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("keeps explicit Preview discard deterministic and fails closed on partial mail settings", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestCount = 0;
+    globalThis.fetch = async () => {
+      requestCount++;
+      return new Response(null, { status: 200 });
+    };
+    try {
+      const discarded = createEmailService({
+        DB: database,
+        ENVIRONMENT: "staging",
+        PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PREVIEW_EMAIL_SINK: "discard",
+      }, "https://preview.crushify.test");
+      assert.ok(discarded);
+      await discarded.send(message);
+      assert.equal(requestCount, 0);
+
+      for (const settings of [
+        { PREVIEW_MAIL_PROVIDER: "resend" as const },
+        { PREVIEW_MAIL_PROVIDER: "resend" as const, PREVIEW_MAIL_API_KEY: "synthetic-key" },
+        {
+          PREVIEW_MAIL_PROVIDER: "resend" as const,
+          PREVIEW_MAIL_API_KEY: "synthetic-key",
+          PREVIEW_MAIL_FROM_EMAIL: "invalid-sender",
+        },
+      ]) {
+        assert.equal(createEmailService({
+          DB: database,
+          ENVIRONMENT: "staging",
+          PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+          PREVIEW_AUTH_ALLOWED_EMAILS: "qa@example.test",
+          ...settings,
+        }, "https://preview.crushify.test"), null);
+      }
+      assert.equal(requestCount, 0);
     } finally {
       globalThis.fetch = originalFetch;
     }

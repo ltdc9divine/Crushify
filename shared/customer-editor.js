@@ -46,8 +46,16 @@
 
   async function loadAsset(reference, previewToken) {
     if (!reference) return "";
-    if (reference.startsWith("/api/v1/previews/assets/") && previewToken) {
-      const response = await fetch(reference, {
+    if (ID.test(reference)) return `${API}/assets/${encodeURIComponent(reference)}`;
+    let url;
+    try {
+      url = new URL(reference, location.origin);
+    } catch {
+      throw new Error("Ảnh của bản thiết kế không hợp lệ.");
+    }
+    if (previewToken && url.origin === location.origin &&
+        /^\/api\/v1\/previews\/assets\/[0-9a-f-]{36}$/i.test(url.pathname)) {
+      const response = await fetch(url.href, {
         headers: { Authorization: `Bearer ${previewToken}` },
         credentials: "same-origin",
         cache: "no-store",
@@ -55,18 +63,19 @@
       if (!response.ok) throw new Error("Không tải được ảnh xem trước.");
       return URL.createObjectURL(await response.blob());
     }
-    return ID.test(reference) ? `${API}/assets/${encodeURIComponent(reference)}` : reference;
+    throw new Error("Ảnh phải thuộc bản thiết kế này hoặc bản xem trước đang mở.");
   }
 
   async function uploadAsset(designId, source, csrf) {
-    let blob = window.crushifyDataImageBlob(source);
-    if (!blob) {
-      const response = await fetch(source, { credentials: "same-origin" });
-      if (!response.ok) throw new Error("Không đọc được ảnh trong trình chỉnh sửa.");
-      blob = await response.blob();
+    if (typeof source !== "string" || !source.startsWith("data:") ||
+        typeof window.crushifyDataImageBlob !== "function") {
+      throw new Error("Ảnh phải được xử lý trong trình chỉnh sửa trước khi tải lên.");
     }
+    const blob = window.crushifyDataImageBlob(source);
+    if (!blob) throw new Error("Ảnh dữ liệu không hợp lệ.");
     const mediaType = blob.type.toLowerCase();
-    if (!["image/jpeg", "image/png"].includes(mediaType) || blob.size < 1) {
+    if (!["image/jpeg", "image/png"].includes(mediaType) ||
+        blob.size < 1 || blob.size > 5 * 1024 * 1024) {
       throw new Error("Ảnh phải là PNG hoặc JPEG hợp lệ.");
     }
     const grant = await api("/assets/upload-url", {
@@ -126,7 +135,7 @@
     let revision = 0;
     let hydrating = false;
     let timer = 0;
-    let saving = false;
+    let savePromise = null;
     let saveAgain = false;
     let savedAssetIds = new Set();
     const pendingAssetDeletes = new Set();
@@ -182,56 +191,77 @@
       }
     }
 
-    async function save() {
-      if (hydrating || !designId || !csrf) return false;
-      if (saving) {
+    function save() {
+      if (hydrating || !designId || !csrf) return Promise.resolve(false);
+      if (savePromise) {
         saveAgain = true;
-        return false;
+        return savePromise;
       }
-      saving = true;
-      let success = true;
-      try {
-        do {
-          saveAgain = false;
-          setStatus("Đang lưu…");
-          const data = await adapter.serialize((source) => uploadAsset(designId, source, csrf));
-          const result = await api(`/designs/${encodeURIComponent(designId)}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              schema_version: adapter.schemaVersion,
-              expected_revision: revision,
-              data,
-            }),
-          }, csrf);
-          revision = result.revision;
-          const currentAssetIds = assetReferences(data);
-          for (const assetId of savedAssetIds) {
-            if (!currentAssetIds.has(assetId)) pendingAssetDeletes.add(assetId);
-          }
-          for (const assetId of currentAssetIds) pendingAssetDeletes.delete(assetId);
-          savedAssetIds = currentAssetIds;
-          const cleanupErrors = [];
-          for (const assetId of pendingAssetDeletes) {
-            try {
-              await api(`/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" }, csrf);
-              pendingAssetDeletes.delete(assetId);
-            } catch (error) {
-              cleanupErrors.push(error instanceof Error ? error.message : "Không thể xóa ảnh cũ.");
+      const operation = (async () => {
+        let success = true;
+        try {
+          do {
+            saveAgain = false;
+            setStatus("Đang lưu…");
+            const data = await adapter.serialize((source) => uploadAsset(designId, source, csrf));
+            const result = await api(`/designs/${encodeURIComponent(designId)}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                schema_version: adapter.schemaVersion,
+                expected_revision: revision,
+                data,
+              }),
+            }, csrf);
+            revision = result.revision;
+            const currentAssetIds = assetReferences(data);
+            for (const assetId of savedAssetIds) {
+              if (!currentAssetIds.has(assetId)) pendingAssetDeletes.add(assetId);
             }
-          }
-          setStatus(cleanupErrors.length
-            ? `Đã lưu thiết kế, nhưng ảnh đã bỏ chưa thể xóa khỏi máy chủ: ${cleanupErrors.join(" ")}`
-            : "Đã lưu trên máy chủ.", cleanupErrors.length ? "error" : "saved");
-        } while (saveAgain);
-      } catch (error) {
-        success = false;
-        setStatus(`Lưu thất bại: ${error instanceof Error ? error.message : "Lỗi không xác định"}`, "error");
-      } finally {
-        saving = false;
-      }
-      return success;
+            for (const assetId of currentAssetIds) pendingAssetDeletes.delete(assetId);
+            savedAssetIds = currentAssetIds;
+            const cleanupErrors = [];
+            for (const assetId of pendingAssetDeletes) {
+              try {
+                await api(`/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" }, csrf);
+                pendingAssetDeletes.delete(assetId);
+              } catch (error) {
+                cleanupErrors.push(error instanceof Error ? error.message : "Không thể xóa ảnh cũ.");
+              }
+            }
+            setStatus(cleanupErrors.length
+              ? `Đã lưu thiết kế, nhưng ảnh đã bỏ chưa thể xóa khỏi máy chủ: ${cleanupErrors.join(" ")}`
+              : "Đã lưu trên máy chủ.", cleanupErrors.length ? "error" : "saved");
+          } while (saveAgain);
+        } catch (error) {
+          success = false;
+          setStatus(`Lưu thất bại: ${error instanceof Error ? error.message : "Lỗi không xác định"}`, "error");
+        }
+        return success;
+      })();
+      savePromise = operation;
+      void operation.finally(() => {
+        if (savePromise === operation) savePromise = null;
+      });
+      return operation;
     }
+
+    async function createPreviewLink() {
+      if (!designId || !csrf) throw new Error("Đăng nhập để lưu và xem trước thiết kế riêng.");
+      if (!await save()) throw new Error("Bản thiết kế chưa lưu được.");
+      const preview = await api(`/designs/${encodeURIComponent(designId)}/preview`, {
+        method: "POST",
+      }, csrf);
+      const url = new URL(preview.url, location.origin);
+      if (url.origin !== location.origin) throw new Error("Liên kết xem trước không hợp lệ.");
+      return url.href;
+    }
+
+    window.crushifySaveDraft = async () => {
+      if (!designId || !csrf) throw new Error("Đăng nhập để lưu bản nháp trên máy chủ.");
+      if (!await save()) throw new Error("Bản thiết kế chưa lưu được.");
+    };
+    window.crushifyCreatePreviewLink = createPreviewLink;
 
     function scheduleSave() {
       if (hydrating || !designId || !csrf) return;
@@ -269,11 +299,7 @@
       try {
         if (button.dataset.action === "save") await save();
         else if (button.dataset.action === "preview") {
-          if (!await save()) return;
-          const preview = await api(`/designs/${encodeURIComponent(designId)}/preview`, {
-            method: "POST",
-          }, csrf);
-          location.href = preview.url;
+          location.href = await createPreviewLink();
         } else if (button.dataset.action === "checkout") {
           if (!await save()) return;
           location.href = `/checkout/?design_id=${encodeURIComponent(designId)}`;

@@ -2,19 +2,17 @@
 
 ## Status and safety boundary
 
-This is a staged migration guide, not a production deployment record.
+This is an architecture/migration note, not a deployment record. Vercel is the intended primary hosting platform; the custom domain remains postponed until the website is complete. Current project linkage, deployment state, remote resources, and provider configuration are **NOT VERIFIED**. Cloudflare was abandoned as the primary hosting/database direction.
 
-- The Cloudflare Worker remains available with D1/R2 for rollback. A Vercel Node Functions catch-all uses the shared API router with Turso and Cloudinary adapters; Cloudinary is Production-only, while Preview and local development use mock storage.
-- The shared SQL contract and Turso/libSQL adapter are implemented. The same API contract tests run against local Wrangler D1 and an ephemeral local Turso/libSQL file database; the migration CLI is tested locally.
-- No remote Turso database has been connected, and no existing D1 data has been exported or imported.
-- The Vercel adapter additionally passes the shared API contract over a local Node HTTP server using a local Turso file and in-memory media. It has not been deployed or tested on Vercel. Cloudinary HTTP is mock-tested only; no Cloudinary account, credentials, upload, or real-account compatibility check is configured.
-- The local-only order/SePay webhook prototype is tested with generated HMAC secrets, synthetic prices and account fixtures against local D1 and Turso. Phase 6 publication is also tested only with local D1/R2 and synthetic paid-order rows; mutations fail closed outside local-test mode. No SePay connection, real payment, remote publication, or production entitlement is enabled. Vercel Preview/Production forcibly omit the payment settings.
-- Phase 4 browser checks on 2026-11-05 covered the homepage and all five template paths at 1366×768, 1440×900, 390×844, and 375×812 through the local Worker/static server. All routes returned 200, had no horizontal overflow, and showed their canvas; Distance Means Nothing also showed its designed two-planet fallback with WebGL disabled. The unauthenticated Our Universe editor's `GET /customers/me` returns the expected 401 and presents sign-in. Vercel CLI is authenticated but this repository is not linked to a Vercel project, so `vercel dev` and Preview deployment were not run. Remote Turso and Cloudinary credentials and the remote-test safety flag are absent.
-- The local rollback branch `backup/cloudflare-pre-turso-20261104` points to the pre-migration commit. It has not been pushed.
+- The Vercel Node Function adapter uses the shared API router and has Turso/Cloudinary integration paths in source. This does not establish that a Vercel project, Preview deployment, credentials, or remote resources are configured.
+- The Cloudflare Worker/D1/R2 material below is retained as legacy/local compatibility history, not an approved deployment or rollback target. Do not execute Wrangler staging scripts without separate owner approval.
+- Local test code covers the shared API contract and database adapters with synthetic/local resources. Tests were not run in this documentation batch; no external provider or remote deployment was exercised here.
+- Local order/webhook tests use synthetic data. Preview SePay Test mode exists only behind the explicit Preview customer-flow gate and full isolated configuration. Preview configuration and any SePay Sandbox transaction are **NOT VERIFIED**. Production checkout/webhook settlement is **NOT ENABLED**, and Production is **NOT PRODUCTION READY**.
+- Historical Phase 4 browser checks from 2026-11-05 are local-only records; they do not prove current routes, hosted behavior, or deployment state.
 
 ## Phase 6 local publication validation
 
-The local Worker integration suite covers five-template publication schemas/renderers, synthetic paid-order eligibility, consented media derivatives, customer website listing, revocation, and design-deletion cleanup. A local browser check served the homepage and all five template paths at desktop/mobile viewport sizes; each route returned 200 without horizontal overflow or JavaScript page errors. Unauthenticated editor requests to `/api/v1/customers/me` return the expected 401. These results do not represent a public staging URL, remote D1/R2, cross-device deployment, or real payment.
+The historical local Worker integration/browser checks cover template publication paths, synthetic paid-order eligibility, media derivatives, revocation, and cleanup. They do not represent a current Vercel deployment, remote database/storage, or real payment, and were not rerun in this documentation batch.
 
 Do not run a remote migration until the destination identity, current D1 data state, export/import plan, backup, restore test, and migration window are explicitly verified. The CLI intentionally refuses untracked existing database schemas.
 
@@ -52,28 +50,29 @@ The command runs the numbered SQL files in `migrations/`, verifies SHA-256 migra
 
 `.env.example` is a placeholder inventory only. The migration CLI reads process environment variables; it does not automatically load `.env`.
 
-## Vercel Development and Hobby Preview
+## Vercel Development and Preview
 
 The Node Function at `api/[...path].ts` forwards HTTP requests to the shared `handleApiRequest` router. It buffers only bounded bodies, preserves multi-value `Set-Cookie`, imposes a 30-second request-body read timeout, supports only explicit methods, and keeps API responses private. Static root and `/templates/<id>/` paths are served directly by Vercel; no SPA fallback or API rewrite is configured. CORS preflight is limited to the exact configured `APP_ORIGIN` (or Vercel's deployment URL for a Preview if no override is set); credentialed requests never receive wildcard CORS.
 
-Vercel Hobby is restricted to non-commercial, personal use under Vercel's current [Hobby plan terms](https://vercel.com/docs/plans/hobby). It must not be used for commercial sales, live checkout, or payment collection. Vercel's current [Cron Jobs limits](https://vercel.com/docs/schedules/cron-jobs/usage-and-pricing) allow a Hobby Cron no more often than daily, with up to 59 minutes of timing variance. The repository's daily schedule meets that frequency limit, but does not establish account eligibility or a deployed schedule. This repository has no `.vercel` project link and no deployment was performed.
+Current Vercel plan/commercial eligibility and project linkage are **NOT VERIFIED**; the owner must check current terms and settings through an authorized account before deployment or commercial use. `vercel.json` declares a daily lifecycle Cron in source, but no deployed schedule or invocation is verified.
 
 For Vercel local development:
 
 1. Install/use Vercel CLI and create the ignored `.local` directory.
-2. Copy `.env.example` to `.env.local` only if a user-owned `.env.local` does not already exist. The example uses `file:.local/crushify-vercel.db`, `STORAGE_PROVIDER=mock`, `LOCAL_TEST_MODE=true`, and `APP_ORIGIN=http://localhost:3000`.
-3. Run `npm run db:migrate:turso` against that local file database, then run `vercel dev`. Local `mock` storage is accepted only with local test mode; do not deploy those values.
-4. The Vercel function limit is set to 4 MiB for images, below Vercel's documented 4.5 MB function request/response payload limit; the Cloudflare Worker retains its existing 5 MiB limit. The create-upload response advertises the runtime's actual limit. See [Vercel Function limits](https://vercel.com/docs/functions/limitations#request-body-size).
+2. Copy `.env.example` to `.env.local` only if a user-owned `.env.local` does not already exist. The example uses `file:.local/crushify-vercel.db`, `STORAGE_PROVIDER=mock`, `LOCAL_TEST_MODE=true`, `PAYMENT_MODE=mock`, and `APP_ORIGIN=http://localhost:3000`.
+3. Start `npm run dev:email-sink` in a separate terminal and open its loopback inbox. Its URL must match `LOCAL_TEST_MAIL_SINK_URL` in `.env.local`; the sink stores synthetic sign-in links in memory and sends no email.
+4. Run `node --env-file=.env.local --experimental-strip-types scripts/migrate-turso.ts` against the local file database, then run `vercel dev`. The migration script rejects remote URLs and non-empty auth tokens. Local `mock` storage and payment are accepted only with local test mode; do not deploy those values. The mock checkout has no public “mark paid” action; synthetic payment settlement is covered by the local integration test.
+5. The Vercel function limit is set to 4 MiB for images, below Vercel's documented 4.5 MB function request/response payload limit; the Cloudflare Worker retains its existing 5 MiB limit. The create-upload response advertises the runtime's actual limit. See [Vercel Function limits](https://vercel.com/docs/functions/limitations#request-body-size).
 
 For Vercel Preview staging:
 
 1. Use a dedicated, verified non-production Turso database. Vercel serverless filesystems are ephemeral and must not be used for persistent databases.
-2. Set `ENVIRONMENT=staging`, `DATABASE_PROVIDER=turso`, `TURSO_STAGING_DATABASE_URL`, and `TURSO_STAGING_AUTH_TOKEN` for Preview database checks. Do not configure `STORAGE_PROVIDER=mock` in Preview: mock storage is local/test only, and Preview media operations remain unavailable until a separate durable staging provider is approved and configured. Do not configure Cloudinary credentials or `STORAGE_PROVIDER=cloudinary` in Preview; the runtime rejects them before storage initialization. A future dedicated staging account would still require independent owner/reviewer verification and a separate reviewed code change. Do not use generic Production credentials in Preview.
-3. Keep `LOCAL_TEST_MODE` and all payment/SePay variables disabled. The Vercel adapter does not pass payment mode or SePay secrets outside local development. Set a staging-only test mail sender only if separately approved.
-4. Vercel Cron invokes the Production deployment only. The handler requires the matching `ENVIRONMENT=production` and `VERCEL_ENV=production` pair for scheduled production cleanup; Preview has no scheduled lifecycle invocation. `CRON_SECRET` is required in the Vercel Production environment before an approved release. Vercel sends it as a bearer token. No production endpoint was invoked during this work.
-5. Do not add production customer data, test with real users, or enable checkout. See [Vercel staging setup](./VERCEL_STAGING.md) for guarded database migration and synthetic-only checks.
+2. Database-only checks use `ENVIRONMENT=staging`, `DATABASE_PROVIDER=turso`, `TURSO_STAGING_DATABASE_URL`, and `TURSO_STAGING_AUTH_TOKEN`. For the complete opt-in customer flow, configure every isolated Preview variable listed in [SETUP-API-CREDENTIALS.md](./SETUP-API-CREDENTIALS.md), including dedicated Cloudinary, Resend, SePay Test mode, exact-email allowlist, and `STAGING_LIFECYCLE_SECRET`. The gate rejects incomplete or Production-scoped settings. Never configure `STORAGE_PROVIDER=mock` or generic Production credentials in Preview.
+3. Keep `LOCAL_TEST_MODE` and all `LOCAL_TEST_*` values out of Preview. Do not configure SePay Live credentials or a mock mark-paid route. Customer checkout in Preview is limited to the configured SePay Test-mode integration.
+4. Vercel Cron invokes the Production deployment only. The handler requires matching `ENVIRONMENT=production` and `VERCEL_ENV=production` for scheduled production cleanup. Preview has a protected manual lifecycle operation but no automatic schedule. `CRON_SECRET` is required in the Vercel Production environment before an approved release. No production endpoint was invoked during this work.
+5. Do not use production customer data or real-money payment. See [Vercel staging setup](./VERCEL_STAGING.md) for migration controls and outstanding provider verification.
 
-Conventional `api/` routing creates the Node Function, `api/cron/publication-lifecycle.ts` maps the Cron URL to the shared handler, and root static hosting preserves direct template paths. `vercel.json` declares one daily lifecycle Cron at 03:00 UTC. The schedule's runtime behavior is not verified until an authorized Production release process confirms its environment, required providers, secret, and first scheduled execution. Cloudflare `scheduled()` code remains for rollback compatibility, but both Wrangler cron triggers are disabled to avoid a second automatic lifecycle runner.
+Conventional `api/` routing creates the Node Function, `api/cron/publication-lifecycle.ts` maps the Cron URL to the shared handler, and root static hosting preserves direct template paths. `vercel.json` declares one daily lifecycle Cron at 03:00 UTC. The schedule's runtime behavior is not verified until an authorized Production release process confirms its environment, required providers, secret, and first scheduled execution. Legacy Cloudflare `scheduled()` code remains in the repository; its presence does not establish an approved rollback target or deployment path.
 
 ## Turso/libSQL configuration
 
@@ -98,9 +97,11 @@ Before using a remote database:
 3. Back up the source and destination, verify the backup, and rehearse restoring into a separate test database.
 4. Export/import existing D1 records only through a separately reviewed data migration; this CLI migrates schema only.
 5. Apply migrations to a fresh or verified empty target, run `PRAGMA foreign_key_check`, and compare table/index/constraint inventories.
-6. Store credentials in the selected host's secret manager and limit token scope/rotation. No remote credential or database has been provided for this stage.
+6. Store credentials in the selected host's secret manager and limit token scope/rotation. Current remote credential/database configuration is **NOT VERIFIED**; this documentation update performed no remote connection.
 
-For backups, use the currently supported Turso export/backup workflow for the account and version in use, store encrypted copies outside the repository, record retention/restore ownership, and perform a restore drill before launch. The repository does not yet automate or validate remote backup/restore.
+The current Turso account's point-in-time recovery (PITR) availability, retention, eligible plan, and restore procedure are **NOT VERIFIED**. Do not treat PITR as an available recovery path until the owner confirms it for this account. If the provider-supported PITR workflow is available, restoring to a timestamp creates a **new database**; it does not overwrite the current database. PITR of an existing database is distinct from recovery of a database that was deleted, which may require a separate provider-specific undelete or a retained export and is not confirmed here.
+
+Before migration, pause application writes, record the target identity and pre-migration point, create an encrypted backup/export outside the repository, verify it, and rehearse restoring it into a separate database. After migration, verify the migration ledger, checksums, foreign keys, schema, and application behavior before any approved traffic switch; retain the original database and recovery point. If a migration fails, stop and inspect the ledger before retrying. If recovery is needed, restore the verified pre-migration point into a new database, validate that database, then switch configuration only with separate approval. The repository does not automate or validate Turso backup, PITR, restore, or database-deletion recovery.
 
 ## D1 data export/import procedure (not executed)
 
@@ -122,15 +123,15 @@ Before any real transfer, obtain explicit authorization and use a separately ver
 6. Compare per-table counts and representative checksums/relationships, verify unique constraints and `PRAGMA foreign_key_check`, test application reads/writes against the target, and rehearse restoring both source and destination backups. Investigate every mismatch before approving cutover.
 7. Keep D1 authoritative and untouched until an approved cutover. Rollback means pausing writes and restoring/routing to the verified source; never attempt an unreviewed reverse import or delete either database.
 
-**Current stage result:** only schema migrations and tests against disposable local databases have run. There is no importer, no remote export, no remote Turso connection, and no data movement.
+**Historical stage result:** the earlier migration stage recorded schema migrations and tests against disposable local databases, with no importer or data movement. Current remote connection/export state is **NOT VERIFIED**; no remote operation was performed in this documentation update.
 
 ## Database contract test results
 
 The same API contract runner is used for local D1 integration and the local Turso/libSQL file test. It checks magic-link/session lifecycle, replay rejection, customer ownership, design create/read/update/reload, stale revision `409`, preview bearer access, asset metadata/storage/read/delete, and asset ownership. D1 integration additionally verifies unique/foreign-key rejection and uses a forced revision-write failure to verify that an update batch rolls back. Local Turso adapter tests also verify migrations/checksums, foreign-key and unique constraints, atomic batch rollback, `RETURNING`, insert metadata, and normalized/null parameters. Run `npm test` for the unit/adapter and Turso local-file tests; run `npm run test:integration` for D1/R2, the shared API contract, and D1 constraint/rollback coverage. No remote service is contacted by either test.
 
-## Netlify production candidate
+## Historical alternative: Netlify (not selected)
 
-Netlify is only a candidate, not an approved production host. Before configuring it:
+Netlify was considered as an alternative and is not the selected hosting direction. Do not configure it as part of this batch:
 
 1. Verify current Netlify plan terms and account eligibility for the intended commercial template sales model.
 2. Implement and test a Netlify Functions adapter that calls the shared API/business layer; do not duplicate business logic.
@@ -142,7 +143,7 @@ No `netlify.toml` or Netlify Function is added in this phase because routing and
 
 ## Cloudinary
 
-The server-side adapter is implemented for the Cloudflare Worker Production scope and Vercel Production. It uses signed authenticated image uploads, server-generated private IDs, bounded short-lived private downloads, and authenticated deletion. The API secret is never returned to the browser. Both runtimes proxy image bytes and retain the current API response shape.
+The server-side adapter has Cloudflare Worker legacy-compatibility and Vercel integration paths in source. The opt-in Vercel Preview path can use separate Cloudinary staging settings. These source paths do not verify account setup or remote behavior. The API secret is not returned to the browser.
 
 The generic server-side values below are reserved for the existing Production configuration (never `VITE_*` or other browser-exposed variables):
 
@@ -150,9 +151,9 @@ The generic server-side values below are reserved for the existing Production co
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
 
-Vercel Production uses `STORAGE_PROVIDER=cloudinary` with those Production credentials in its Production-only secret store; Production behavior is unchanged by the Preview isolation policy. The Vercel Preview runtime rejects Cloudinary and any staging Cloudinary values before initializing the database or storage. Local development rejects Cloudinary and uses mock storage. The legacy Worker rejects staging scope, rejects Cloudinary configuration in local scope, and in Production rejects staging Cloudinary variables before storage use. No implicit fallback to another account or provider occurs.
+Vercel Production uses `STORAGE_PROVIDER=cloudinary` with generic Production credentials in its Production-only secret store. Preview requires `STORAGE_PROVIDER=cloudinary`, `CLOUDINARY_STAGING_CLOUD_NAME`, `CLOUDINARY_STAGING_API_KEY`, `CLOUDINARY_STAGING_API_SECRET`, and `CLOUDINARY_PRODUCTION_CLOUD_NAME`; it rejects generic Production credentials and matching cloud names. Local development rejects Cloudinary and uses mock storage. The legacy Worker rejects staging scope, rejects Cloudinary configuration in local scope, and in Production rejects staging Cloudinary variables before storage use. No implicit fallback to another account or provider occurs.
 
-The following is a planning-only placeholder for a possible future staging account, not a configuration to apply now:
+The Preview values must come from a dedicated staging account. The distinct configured Production cloud name is only a comparison value; it does not prove account ownership. The owner and reviewer must verify account separation and credential provenance before configuring Preview:
 
 ```dotenv
 ENVIRONMENT=staging
@@ -162,24 +163,22 @@ CLOUDINARY_STAGING_API_KEY=<credential-issued-by-staging-account>
 CLOUDINARY_STAGING_API_SECRET=<credential-issued-by-staging-account>
 ```
 
-Preview currently fails closed even when these values are present. Cloud Names, variable names, and a self-declared confirmation cannot prove separate account ownership. An authorized owner and independent security reviewer must verify the separate account directly in the Cloudinary console and verify credential provenance before a separate code review may consider enablement. No environment-only toggle is supported. `.dev.vars.example` and Wrangler configs explicitly select R2; `.env.example` selects in-memory mock only for local Vercel development. Local Cloudinary adapter tests use mocked HTTP only. No account credentials were supplied, and no Cloudinary request, real upload, asset migration, or deployment has been run.
+`PREVIEW_CUSTOMER_FLOW_ENABLED=true` is required in addition to the complete provider configuration. Cloud names, variable names, and a self-declared flag cannot prove separate account ownership. The owner must verify the staging account directly with the provider before configuration. Cloudinary account/configuration and remote operations are **NOT VERIFIED**.
 
-Do not switch an environment containing R2-backed asset rows by changing only the variable: storage providers do not share binaries. Plan and test a separate inventory/copy/verification/cutover procedure first. R2 remains available to the legacy Worker and rollback path; Vercel Preview's mock storage is ephemeral and not persistent. Reverting after Cloudinary writes also requires transferring or otherwise reconciling those binaries. No implicit fallback is used.
+Do not switch an environment containing R2-backed asset rows by changing only the variable: storage providers do not share binaries. Plan and test a separate inventory/copy/verification/cutover procedure first. R2 references below describe legacy Worker compatibility only and do not establish an approved rollback path. Vercel Preview mock storage is not persistent. Reverting after Cloudinary writes also requires transferring or otherwise reconciling those binaries. No implicit fallback is used.
 
-Cloudinary currently advertises 25 monthly credits on its Free plan; credits are shared across managed storage, image bandwidth and transformations (the exact conversion and feature availability depend on current plan terms). This is not a guaranteed quota or commercial eligibility statement. Check the [current Cloudinary pricing and plan terms](https://cloudinary.com/pricing), authenticated-asset delivery features, account limits, regional/privacy terms, retention, and intended commercial use directly with Cloudinary before selecting it for production. Track credit usage and set upload quotas/alerts.
+Provider plan limits, pricing, commercial eligibility, data-region/privacy terms, retention, and feature availability are **NOT VERIFIED**. The owner must check current Cloudinary terms directly before selecting or configuring a production service.
 
 ## SePay local prototype and production gate
 
-The code currently supports only `PAYMENT_MODE=mock|sepay-test` in a local runtime with `LOCAL_TEST_MODE=true`. Server-only variables are `SEPAY_WEBHOOK_SECRET`, `SEPAY_BANK_CODE`, `SEPAY_BANK_ACCOUNT`, and `SEPAY_ACCOUNT_NAME`; no values belong in source control or browser variables. `sepay-test` constructs a VietQR image URL only when local Test mode bank settings exist. `mock` produces no QR. The migration adds an empty price catalog, not real prices.
+Local test mode supports `PAYMENT_MODE=mock|sepay-test`. The opt-in Preview flow uses `PREVIEW_PAYMENT_MODE=sepay-test` with `PREVIEW_SEPAY_WEBHOOK_SECRET`, `PREVIEW_SEPAY_BANK_CODE`, `PREVIEW_SEPAY_BANK_ACCOUNT`, and optional `PREVIEW_SEPAY_ACCOUNT_NAME`. Values are server-side only. Webhooks are signature-verified, and the protected lifecycle runner can retry persisted events and fulfillment. Local and Preview synthetic tests do not represent provider sandbox verification.
 
-Not implemented: SePay Live mode, production webhooks, admin reconciliation, refunds, scheduled retry/reconciliation jobs, entitlement, fulfillment, publication, custom deposit/balance payments, or price management UI. Do not enable live checkout or send/receive actual money. See [SEPAY_SETUP.md](SEPAY_SETUP.md) for Test mode steps and [SEPAY_PRICING_AND_PROMOTIONS.md](SEPAY_PRICING_AND_PROMOTIONS.md) for the sourced pricing snapshot and eligibility caveats.
+SePay Live mode, Production webhooks/checkout, and real-money settlement are not implemented. Do not enable live checkout or send/receive actual money. See [SEPAY_SETUP.md](SEPAY_SETUP.md) for Test mode steps and [SEPAY_PRICING_AND_PROMOTIONS.md](SEPAY_PRICING_AND_PROMOTIONS.md) for the sourced pricing snapshot and eligibility caveats.
 
-## Rollback checklist
+## Migration/rollback boundary
 
-1. Keep Cloudflare Worker/D1/R2 configuration and migrations intact until a deliberate cutover is approved.
-2. The current Worker continues to use the D1 adapter; no runtime switch to Turso has been made.
-3. Keep `STORAGE_PROVIDER=r2` until a reviewed Cloudinary account test and an explicit asset migration/cutover plan are complete. Changing this variable alone is not rollback or migration.
-4. If a later API-adapter release fails, route traffic back to the last verified Cloudflare Worker release. Do not delete or overwrite either database or storage.
-5. If data has been written to both systems, pause writes and reconcile from a verified backup before choosing an authoritative copy. Do not perform an automatic reverse migration.
-6. Preserve migration logs/checksums and record the reason, operator, and restore point.
-7. Keep checkout/payment disabled outside local tests. Enable any future production purchase or publication only after a separate release review; no commercial flow is approved.
+1. Vercel is the intended host; the custom domain is postponed. No deployment or rollback target is verified by this document.
+2. Do not assume the legacy Cloudflare Worker/D1/R2 path is an available rollback target. The owner must separately approve any use of its Wrangler staging scripts.
+3. Do not switch database or storage providers by changing a variable. Any future data transfer requires an owner-approved inventory, backup/restore test, reconciliation, and cutover plan.
+4. Preserve migration history/checksums and record the reason, operator, and restore point for any later approved migration.
+5. Production checkout and webhook settlement remain disabled. Preview Test mode is limited to the explicit, fully configured Preview gate; neither local tests nor Preview configuration establish Production readiness.

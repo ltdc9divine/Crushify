@@ -1,11 +1,11 @@
 # Crushify Implementation Roadmap
 
-**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 foundation and Vercel/local adapters are tested locally. Local-only order/SePay and paid-order-gated publication prototypes are covered by synthetic tests; no SePay account, live transaction, production price, publication deployment, Vercel deployment, remote database migration, Cloudinary account test, or data transfer has occurred. Production capability is not configured.
+**Status:** migration sequence in progress. The Cloudflare Worker/D1/R2 foundation and Vercel/local adapters are tested locally. Local synthetic order/SePay and paid-order-gated publication prototypes are covered by tests; source also contains an explicitly gated Vercel Preview customer flow. The approved standard prices exist in source, but no Production billing configuration, SePay account, live transaction, publication deployment, Vercel deployment, remote database migration, Cloudinary account test, or data transfer has been verified. Production capability is not configured.
 
 ## 1. Priority before launch
 
-1. Resolve policy/business decisions: market/legal entity, approved VND pricing, refunds/cancellation, privacy/retention, terms, publication duration, custom-service scope and support.
-2. Fix product claims and paths: homepage prices/CTA currently are provisional and not connected to checkout; make this explicit until live.
+1. Resolve remaining policy/business decisions: market/legal entity, refunds/cancellation, privacy/retention, terms, publication duration, custom-service scope and support. Standard-template pricing is approved and defined in `src/product-catalog.ts`; custom-service pricing still needs owner approval.
+2. Keep the homepage's approved standard prices and template paths aligned with the catalog; continue to disclose that checkout is unavailable unless an isolated Preview flow is explicitly configured.
 3. Keep the existing Cloudflare backend available for rollback; verify migration/backup plans before moving any remote data.
 4. Complete the tested Turso database adapter/migrations, then implement host adapters and rehearse storage-provider cutover as separate stages before storing real customer data there.
 5. Implement durable drafts/assets/recipient delivery before enabling checkout; the current local payment prototype is not a launch-ready payment flow.
@@ -33,29 +33,29 @@
 
 ### Sprint 2 — Identity and durable drafts (1–2 weeks)
 
-- Local Our Universe pilot: customer magic-link/session lifecycle, owner-scoped draft CRUD, schema validation and optimistic revision conflict handling are implemented.
-- Still needed: production email service, account lifecycle/privacy, catalog/template registry and server schema mapping for the other four apps.
+- All five template pages now have customer-editor adapters for owner-scoped draft CRUD, schema validation, and optimistic revision handling; the other four use the shared editor module and Our Universe retains its own adapter.
+- Still needed: production email service, account lifecycle/privacy, and deployment-level verification of the full five-template journeys.
 - Implement restore/save status and account deletion request foundations.
-- Our Universe is the first adapter pilot; four other templates remain unconnected. Production checkout remains disabled; see Sprint 5 for the local-only payment prototype.
+- All five template editor adapters are present in source. Production checkout remains disabled; see Sprint 5 for the local-only payment prototype and deployment/provider gates.
 
 ### Sprint 3 — Assets and private preview (1–2 weeks)
 
-- Local Our Universe upload authorization/finalization, PNG/JPEG checks, private R2-compatible access/deletion, and expiring preview tokens are implemented and integration-tested.
+- Private upload authorization/finalization, PNG/JPEG checks, private storage access/deletion, and expiring preview tokens are implemented. The five editor adapters use the shared APIs where their templates support media.
 - A provider-neutral storage contract and R2/Cloudinary adapters are implemented. The current Worker defaults explicitly to R2; Cloudinary is signed/authenticated with server-side credentials and mocked in tests only.
 - Vercel API adapter reuses the same router and database/storage interfaces, caps uploads at 4 MiB, and uses local Turso/mock storage for tests; Vercel Hobby is not intended for commercial processing.
 - Phase 4 responsive fixes are browser-checked locally: the homepage ambient orb no longer expands document width, and Distance Means Nothing selects its visible canvas preview on mobile. Homepage and all five template routes were checked at 1366×768, 1440×900, 390×844, and 375×812; WebGL fallback visibility was separately forced and checked. Vercel CLI is authenticated but the repository is not linked to a project, so a Vercel local CLI session/Preview was not run.
-- Still needed: real Vercel deployment validation, real Turso/Cloudinary account compatibility checks, a deliberate asset migration procedure before provider cutover, production buckets/accounts, image normalization and scanning policy, quotas/cleanup operations, adaptation of other photo templates, security review, renderer version pinning, and production device/browser QA.
+- Still needed: real Vercel deployment validation, real Turso/Cloudinary account compatibility checks, a deliberate asset migration procedure before provider cutover, production buckets/accounts, image normalization and scanning policy, quotas/cleanup operations, security review, renderer version pinning, and production device/browser QA.
 
 ### Sprint 4 — Publication and template rollout (1–2 weeks)
 
 - **Implemented locally:** migration 0005, five schema-v1 validators/renderers, immutable publication snapshots, random hashed slugs, consent-based media derivatives, publish/unpublish/republish/revoke, public recipient hydration, design-deletion cleanup, and a customer websites dashboard.
 - **Verified locally:** paid-order eligibility is rechecked against order/payment/webhook evidence; integration tests cover cross-owner rejection, lifecycle revisions, consent withdrawal, public-media access and revoke. No remote database or publication deployment was used.
-- **Still required:** connect the other four editors to durable server drafts/uploads, run real staging delivery with isolated infrastructure, add expiry/cleanup operations and support procedures, and complete device/browser/reduced-motion QA.
+- **Still required:** run real staging delivery with isolated infrastructure, add expiry/cleanup operations and support procedures, and complete device/browser/reduced-motion QA across all five templates.
 - **Delivery:** local/test publication flow only; no real checkout, production fulfillment, or staging acceptance.
 
 ### Sprint 5 — Checkout/payment (1–2 weeks plus provider onboarding)
 
-- **Local prototype complete:** server-priced order snapshots, idempotency, 15-minute expiry, responsive checkout status page, HMAC-SHA256 SePay webhook verification, duplicate handling, mismatch/manual-review states, and a bounded internal recovery service for persisted webhook events. Active prices are not seeded; checkout is disabled outside local test mode.
+- **Local prototype complete:** server-priced order snapshots, idempotency, 15-minute expiry, responsive checkout status page, HMAC-SHA256 SePay webhook verification, duplicate handling, mismatch/manual-review states, and a bounded internal recovery service for persisted webhook events. The approved standard catalog is source-defined; Preview checkout is opt-in and requires isolated Test-mode configuration, while Production checkout remains disabled.
 - **Still required:** provider-account Test mode run, production candidate adapter/hosting approval, approved real catalog/pricing and terms, rate limits, a scheduled/operator recovery runner, provider reconciliation and admin review UI, monitoring, refunds, production entitlement/fulfillment integration, and independent security review.
 - Do not enable a purchase CTA or live payment. A SePay Test mode integration needs a provider account and isolated bank/webhook settings; no real banking/payment credentials have been supplied.
 
@@ -93,7 +93,7 @@ Foundational code through a staging self-service flow is roughly 6–10 engineer
 
 ## 6. Current commercial readiness verdict
 
-Current project is a **static catalog plus local-only backend prototypes**. Our Universe has locally tested authentication, durable D1 drafts, private media and preview. Five-template schema/recipient publication support and a paid-order-gated publication lifecycle are tested only in local D1/R2 with synthetic payment rows. The price catalog is empty, payment and publication mutations fail closed outside local development, four editors are not server-backed, and there is no production entitlement/fulfillment, refund, admin review, or deployment. Do not accept real orders until the relevant roadmap gates pass.
+Current project has a **static catalog, five server-backed editor adapters, and local/test backend flows**. All five templates have source-level draft/editor integration; publication and payment use isolated runtime gates. The approved standard pricing policy is defined in source, not seeded into the `template_prices` fixture table. Local synthetic tests do not establish deployment or provider readiness. Production checkout/webhook settlement remain disabled; custom-project intake/quotes, admin review tooling, refunds, customer-facing legal/support policies, and production entitlement/fulfillment are not ready. Do not accept real orders until the relevant owner, deployment, and provider gates pass.
 
 ## 7. Cost and quota monitoring
 

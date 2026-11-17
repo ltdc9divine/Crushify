@@ -5,8 +5,16 @@ DATABASE_PROVIDER=d1
 STORAGE_PROVIDER=r2
 
 # Local payment prototype only; no real checkout or money movement.
-PAYMENT_MODE=
+LOCAL_TEST_MAIL_SINK_URL=http://127.0.0.1:8025/__crushify_test_email_sink
+# Local test capture only. PREVIEW_TEST_EMAIL_SINK is an injected test callback,
+# not a deployable environment variable; Vercel Preview uses its own mail mode.
+PAYMENT_MODE=mock
+ADMIN_EMAILS=
 SEPAY_WEBHOOK_SECRET=
 SEPAY_BANK_CODE=
 SEPAY_BANK_ACCOUNT=
 SEPAY_ACCOUNT_NAME=
+# Optional local manual-transfer mode; use only synthetic details in local tests.
+MANUAL_BANK_CODE=
+MANUAL_BANK_ACCOUNT=
+MANUAL_ACCOUNT_NAME=

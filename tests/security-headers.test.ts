@@ -12,6 +12,7 @@ const policyRoutes = [
   { route: "/templates/our-memories/", file: "templates/our-memories/index.html" },
   { route: "/templates/say-yes/", file: "templates/say-yes/index.html" },
   { route: "/templates/distance-means-nothing/", file: "templates/distance-means-nothing/index.html" },
+  { route: "/admin/", file: "admin/index.html" },
   { route: "/p/index.html", file: "p/index.html" },
 ];
 
@@ -211,6 +212,7 @@ describe("static security headers and CSP", () => {
         route,
         `${route.slice(0, -1)}/:path*`,
       ] as const),
+      ["/admin/", "/admin/:path*"],
       ["/p/index.html", "/p/:path*"],
     ]);
     for (const { route, file } of policyRoutes) {
@@ -253,6 +255,7 @@ describe("static security headers and CSP", () => {
       "/templates/our-memories/:path*",
       "/templates/say-yes/:path*",
       "/templates/distance-means-nothing/:path*",
+      "/admin/:path*",
       "/p/:path*",
       "/shared/:path*",
       "/css/:path*",

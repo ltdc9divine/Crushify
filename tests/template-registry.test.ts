@@ -150,6 +150,18 @@ describe("publication template registry", () => {
     assert.match(proposal, /aria-label="Chú thích ảnh \$\{i\+1\}"/);
   });
 
+  it("loads Our Universe preview photos through capability-scoped URLs", () => {
+    const universe = readFileSync(new URL("../templates/our-universe/index.html", import.meta.url), "utf8");
+    const start = universe.indexOf("async function loadPhotos(");
+    const end = universe.indexOf("async function loadPublishedPhotos(", start);
+    assert.ok(start >= 0 && end > start, "expected the Our Universe photo loader");
+    const loader = universe.slice(start, end);
+    assert.match(loader, /photo\.url\.match\(/);
+    assert.match(loader, /previewAsset\?\.\[1\]/);
+    assert.match(loader, /if\(!assetId\)throw new Error/);
+    assert.match(loader, /\/previews\/assets\//);
+  });
+
   it("keeps the customer toolbar label out of the page heading hierarchy", () => {
     const editor = readFileSync(new URL("../shared/customer-editor.js", import.meta.url), "utf8");
     const styles = readFileSync(new URL("../shared/customer-editor.css", import.meta.url), "utf8");
@@ -232,7 +244,7 @@ describe("publication template registry", () => {
 
   it("deletes removed assets only after the updated design is saved", () => {
     const editor = readFileSync(new URL("../shared/customer-editor.js", import.meta.url), "utf8");
-    const save = editor.slice(editor.indexOf("async function save()"), editor.indexOf("function scheduleSave()"));
+    const save = editor.slice(editor.indexOf("function save()"), editor.indexOf("function scheduleSave()"));
     const designUpdate = save.indexOf("const result = await api(`/designs/");
     const assetDelete = save.indexOf('await api(`/assets/${encodeURIComponent(assetId)}`, { method: "DELETE" }, csrf);');
     assert.ok(designUpdate >= 0);
@@ -278,6 +290,18 @@ describe("publication template registry", () => {
     assert.ok(policy[1]?.includes(`'sha256-${styleHash}'`), "CSP must authorize the exact inline style");
   });
 
+  it("keeps the Love Letter inline script hash synchronized with its CSP", () => {
+    const source = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    const script = [...source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)]
+      .find(([, attributes]) => !/\bsrc\s*=/.test(attributes ?? ""));
+    const policy = source.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/i);
+    assert.ok(script, "expected an inline application script");
+    assert.ok(policy, "expected a page Content Security Policy");
+    const body = (script[2] ?? "").replace(/\r\n?/g, "\n");
+    const hash = createHash("sha256").update(body).digest("base64");
+    assert.ok(policy[1]?.includes(`'sha256-${hash}'`), "CSP must authorize the exact inline script");
+  });
+
   it("rejects unknown schemas and data fields instead of passing them to a renderer", () => {
     assert.equal(validateTemplateData("say-yes", 2, templates["say-yes"]).value, undefined);
     assert.equal(validateTemplateData("unknown", 1, {}).value, undefined);
@@ -285,5 +309,49 @@ describe("publication template registry", () => {
       ...templates["love-letter"],
       event_handler: "unexpected",
     }).value, undefined);
+  });
+
+  it("uses private server previews and avoids browser-wide customer drafts", () => {
+    const loveLetter = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    const sayYes = readFileSync(new URL("../templates/say-yes/say-yes.js", import.meta.url), "utf8");
+    const distance = readFileSync(new URL("../templates/distance-means-nothing/app.js", import.meta.url), "utf8");
+    const editor = readFileSync(new URL("../shared/customer-editor.js", import.meta.url), "utf8");
+
+    assert.match(loveLetter, /window\.crushifyCreatePreviewLink\(\)/);
+    assert.match(distance, /window\.crushifyCreatePreviewLink\(\)/);
+    assert.doesNotMatch(loveLetter, /btoa\(/);
+    assert.doesNotMatch(distance, /btoa\(|localStorage/);
+    assert.doesNotMatch(sayYes, /localStorage/);
+    assert.match(sayYes, /window\.crushifySaveDraft\(\)/);
+    assert.match(editor, /let savePromise = null/);
+    assert.match(editor, /saveAgain = true/);
+    assert.match(editor, /typeof source !== "string" \|\| !source\.startsWith\("data:"\)/);
+  });
+
+  it("validates image upload type, size, and per-template photo limits", () => {
+    const loveLetter = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    const memories = readFileSync(new URL("../templates/our-memories/our-memories.js", import.meta.url), "utf8");
+    const sayYes = readFileSync(new URL("../templates/say-yes/say-yes.js", import.meta.url), "utf8");
+
+    for (const source of [loveLetter, memories, sayYes]) {
+      assert.match(source, /f\.size>5\*1024\*1024/);
+      assert.match(source, /image\/png','image\/jpeg/);
+      assert.match(source, /available<=0/);
+    }
+    assert.match(loveLetter, /image\.onerror=\(\)=>\{failed\+\+;[\s\S]*?resolve\(canvas\)\}/);
+    assert.doesNotMatch(loveLetter, /loaded\.filter\(Boolean\)/);
+  });
+
+  it("keeps personalized editors usable when saved image assets cannot be loaded", () => {
+    const loveLetter = readFileSync(new URL("../templates/love-letter/index.html", import.meta.url), "utf8");
+    const memories = readFileSync(new URL("../templates/our-memories/our-memories.js", import.meta.url), "utf8");
+    const sayYes = readFileSync(new URL("../templates/say-yes/say-yes.js", import.meta.url), "utf8");
+
+    assert.match(loveLetter, /catch\{return ''\}\}\)\);D\.photos=photos\.map/);
+    assert.match(loveLetter, /image\.onerror=\(\)=>\{failed\+\+;[\s\S]*?resolve\(canvas\)\}/);
+    assert.match(memories, /catch\{photo\.url=sky\('#f8edf3','#d68ab0','#5b2946'\);failed\+\+\}/);
+    assert.match(sayYes, /catch\{photo\.url=sky\('#f8edf3','#d68ab0','#5b2946'\);failed\+\+\}/);
+    assert.match(memories, /Bạn có thể xóa ảnh lỗi và thêm ảnh khác/);
+    assert.match(sayYes, /Bạn có thể xóa ảnh lỗi và thêm ảnh khác/);
   });
 });

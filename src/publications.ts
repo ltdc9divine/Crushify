@@ -1,6 +1,8 @@
 import { requireCsrf, requireSession } from "./auth.ts";
-import { logSafeError } from "./logging.ts";
+import qrcode from "qrcode-generator";
+import { logSafeError, logSafeInfo } from "./logging.ts";
 import { resolvePaymentEnvironmentPolicy } from "./payments/policy.ts";
+import { verifiedSettlementEvidence } from "./payments/evidence.ts";
 import { normalizeEnvironmentOrigin } from "./platform/environment.ts";
 import { DatabaseError } from "./database.ts";
 import {
@@ -35,16 +37,14 @@ const FULFILLMENT_MAX_BACKOFF_MS = 60 * 60_000;
 function verifiedFulfillmentOrder(orderId: string): string {
   return `EXISTS (
     SELECT 1 FROM orders o
-    JOIN payments payment ON payment.order_id = o.id AND payment.provider = 'SEPAY'
-    JOIN payment_webhook_events webhook ON webhook.provider = payment.provider
-      AND webhook.event_id = payment.provider_payment_id AND webhook.outcome = 'PROCESSED'
+    JOIN payments payment ON payment.order_id = o.id
+      AND payment.provider IN ('SEPAY', 'MANUAL_BANK_TRANSFER')
     WHERE o.id = ${orderId} AND o.order_type = 'SELF_SERVICE'
       AND o.status IN ('PAID','FULFILLING') AND o.paid_at IS NOT NULL
       AND o.payment_review_required = 0
       AND payment.status = 'SUCCEEDED' AND payment.review_required = 0
-      AND payment.provider_payment_id IS NOT NULL AND payment.provider_payment_id <> ''
-      AND payment.succeeded_at IS NOT NULL
       AND payment.amount_minor = o.total_minor AND payment.currency = o.currency
+      AND ${verifiedSettlementEvidence("payment", "o")}
   )`;
 }
 
@@ -64,6 +64,24 @@ export interface FulfillmentResult {
   completed: boolean;
   retryable: boolean;
   manualReview?: boolean;
+}
+
+export type PublicationDerivativeCleanupStatus =
+  | "completed"
+  | "pending"
+  | "deferred"
+  | "failed"
+  | "manual_review";
+
+export interface PublicationDerivativeCleanupResult {
+  status: PublicationDerivativeCleanupStatus;
+  processed: number;
+  cleaned: number;
+  pending: number;
+  deferred: number;
+  retryable: number;
+  manualReview: number;
+  hasMore: boolean;
 }
 
 interface EligibleOrder {
@@ -112,13 +130,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function localPublishingEnabled(env: Env): boolean {
-  return env.LOCAL_TEST_MODE === "true" && env.ENVIRONMENT === "local";
+function publicationMutationsEnabled(env: Env): boolean {
+  return (env.LOCAL_TEST_MODE === "true" && env.ENVIRONMENT === "local") ||
+    (env.ENVIRONMENT === "staging" && env.PREVIEW_CUSTOMER_FLOW_ENABLED === "true");
 }
 
-async function requireLocalPublishing(requestId: string, env: Env): Promise<Response | null> {
-  if (!localPublishingEnabled(env)) {
-    return apiError(requestId, 503, "PUBLICATION_DISABLED", "Publication mutations are enabled only in local test mode");
+async function requirePublicationMutations(requestId: string, env: Env): Promise<Response | null> {
+  if (!publicationMutationsEnabled(env)) {
+    return apiError(requestId, 503, "PUBLICATION_DISABLED", "Publication mutations are disabled for this runtime");
   }
   if (!env.STORAGE) {
     return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Media storage is unavailable");
@@ -176,9 +195,8 @@ async function paidOrderForOwner(
      JOIN order_items storage_item ON storage_item.order_id = o.id
        AND storage_item.item_type = 'ADD_ON'
        AND json_extract(storage_item.metadata_json, '$.kind') = 'STORAGE_PLAN'
-     JOIN payments p ON p.order_id = o.id AND p.provider = 'SEPAY'
-     JOIN payment_webhook_events e ON e.provider = p.provider
-       AND e.event_id = p.provider_payment_id AND e.outcome = 'PROCESSED'
+     JOIN payments p ON p.order_id = o.id
+       AND p.provider IN ('SEPAY', 'MANUAL_BANK_TRANSFER')
      JOIN templates t ON t.id = snapshot.template_id AND t.status = 'ACTIVE'
      JOIN template_versions v ON v.template_id = snapshot.template_id
        AND v.schema_version = snapshot.schema_version AND v.status = 'ACTIVE'
@@ -191,9 +209,9 @@ async function paidOrderForOwner(
        AND i.reference_id = snapshot.template_id
        AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = snapshot.schema_version
        AND p.status = 'SUCCEEDED' AND p.review_required = 0
-       AND p.provider_payment_id IS NOT NULL AND p.provider_payment_id <> ''
        AND p.succeeded_at IS NOT NULL AND p.amount_minor = o.total_minor
        AND p.currency = o.currency
+       AND ${verifiedSettlementEvidence("p", "o")}
        AND NOT EXISTS (
          SELECT 1 FROM order_items pricing_item
          WHERE pricing_item.order_id = o.id AND pricing_item.item_type = 'ADD_ON'
@@ -321,9 +339,8 @@ async function insertPublication(
            JOIN order_design_snapshots snapshot ON snapshot.order_id = o.id
              AND snapshot.design_id = d.id AND snapshot.design_revision = o.design_revision
            JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
-           JOIN payments p ON p.order_id = o.id AND p.provider = 'SEPAY'
-           JOIN payment_webhook_events e ON e.provider = p.provider
-             AND e.event_id = p.provider_payment_id AND e.outcome = 'PROCESSED'
+           JOIN payments p ON p.order_id = o.id
+             AND p.provider IN ('SEPAY', 'MANUAL_BANK_TRANSFER')
            JOIN templates t ON t.id = snapshot.template_id AND t.status = 'ACTIVE'
            JOIN template_versions v ON v.template_id = snapshot.template_id
              AND v.schema_version = snapshot.schema_version AND v.status = 'ACTIVE'
@@ -334,10 +351,10 @@ async function insertPublication(
              AND snapshot.template_id = ? AND snapshot.schema_version = ?
              AND i.reference_id = snapshot.template_id
              AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = snapshot.schema_version
-             AND p.status = 'SUCCEEDED' AND p.provider_payment_id IS NOT NULL
-             AND p.provider_payment_id <> '' AND p.succeeded_at IS NOT NULL
+             AND p.status = 'SUCCEEDED' AND p.succeeded_at IS NOT NULL
              AND p.review_required = 0 AND p.amount_minor = o.total_minor
              AND p.currency = o.currency
+             AND ${verifiedSettlementEvidence("p", "o")}
          )`,
       ).bind(
         publicationId, order.design_id, order.order_id, expectedRevision as number,
@@ -412,31 +429,460 @@ async function loadOwnedPublication(
 export async function cleanupAssets(
   env: Env,
   publicationId: string,
-): Promise<boolean> {
-  if (!env.STORAGE) return false;
-  const rows = await env.DB.prepare(
-    `SELECT id, derivative_key FROM publication_assets
-     WHERE publication_id = ? AND derivative_key IS NOT NULL
-       AND derivative_status IN ('READY','CLEANUP_PENDING')`,
-  ).bind(publicationId).all<{ id: string; derivative_key: string }>();
-  let success = true;
-  for (const row of rows.results) {
+  now?: Date,
+): Promise<PublicationDerivativeCleanupResult> {
+  if (!env.STORAGE) {
+    return derivativeCleanupResult({
+      processed: 0,
+      cleaned: 0,
+      pending: 0,
+      deferred: 0,
+      retryable: 1,
+      manualReview: 0,
+    });
+  }
+  return reconcilePublicationDerivativeCleanup(env, {
+    publicationId,
+    now,
+  });
+}
+
+const DERIVATIVE_OPERATION_LEASE_MS = 15 * 60_000;
+const DERIVATIVE_CLEANUP_LEASE_MS = 5 * 60_000;
+const DERIVATIVE_ORPHAN_RECHECK_MS = 60 * 60_000;
+const DERIVATIVE_CLEANUP_MAX_FAILURES = 8;
+const DERIVATIVE_CLEANUP_MAX_DURATION_MS = 20_000;
+const DERIVATIVE_PROVIDER_CALL_TIMEOUT_MS = 8_000;
+
+function derivativeProviderCall<T>(
+  operation: Promise<T>,
+  onLateValue?: (value: T) => void | Promise<void>,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("Publication derivative provider call timed out"));
+    }, DERIVATIVE_PROVIDER_CALL_TIMEOUT_MS);
+    operation.then((value) => {
+      if (settled) {
+        if (onLateValue) {
+          void Promise.resolve(onLateValue(value)).catch((error) =>
+            logSafeError("publication.media_cleanup_late_result_release_failed", "storage", error));
+        }
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    }, (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+export async function reconcilePublicationDerivativeCleanup(
+  env: Env,
+  options: {
+    limit?: number;
+    now?: Date;
+    publicationId?: string;
+    timeBudgetMs?: number;
+  } = {},
+): Promise<PublicationDerivativeCleanupResult> {
+  if (!env.STORAGE) throw new Error("Publication derivative cleanup requires configured storage");
+  const limit = options.limit ?? 25;
+  const timeBudgetMs = options.timeBudgetMs ?? DERIVATIVE_CLEANUP_MAX_DURATION_MS;
+  const now = options.now ?? new Date();
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100 ||
+      !Number.isInteger(timeBudgetMs) || timeBudgetMs < 1 ||
+      timeBudgetMs > DERIVATIVE_CLEANUP_MAX_DURATION_MS ||
+      !Number.isFinite(now.getTime())) {
+    throw new RangeError("Invalid publication derivative cleanup configuration");
+  }
+  const timestamp = now.toISOString();
+  const cleanupLeaseExpiresAt = new Date(now.getTime() + DERIVATIVE_CLEANUP_LEASE_MS).toISOString();
+  const publicationFilter = options.publicationId === undefined
+    ? ""
+    : "AND operation.publication_id = ?";
+  const publicationArgs = options.publicationId === undefined ? [] : [options.publicationId];
+  const activeReadyReference = `NOT EXISTS (
+    SELECT 1 FROM publications p
+    JOIN publication_assets pa ON pa.publication_id = p.id
+    WHERE p.id = operation.publication_id AND p.status = 'PUBLISHED'
+      AND pa.id = operation.publication_asset_id
+      AND pa.revoked_at IS NULL AND pa.derivative_key = operation.derivative_key
+      AND pa.derivative_status = 'READY'
+  )`;
+
+  await env.DB.prepare(
+    `UPDATE publication_derivative_operations AS operation
+     SET status = 'CLEANUP_PENDING', next_cleanup_at = ?,
+       operation_lease_expires_at = CASE WHEN status = 'CREATING' THEN ? ELSE ? END,
+       updated_at = ?
+     WHERE operation.status IN ('CREATING','READY')
+      AND NOT EXISTS (
+        SELECT 1 FROM publication_assets pa
+        JOIN publications p ON p.id = pa.publication_id
+        WHERE pa.id = operation.publication_asset_id
+          AND pa.derivative_key = operation.derivative_key
+          AND pa.revoked_at IS NULL AND p.status = 'PUBLISHED'
+       )
+       ${publicationFilter}`,
+  ).bind(
+    timestamp,
+    new Date(now.getTime() + DERIVATIVE_ORPHAN_RECHECK_MS).toISOString(),
+    timestamp,
+    timestamp,
+    ...publicationArgs,
+  ).run();
+  await env.DB.prepare(
+    `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING', updated_at = ?
+     WHERE derivative_status IN ('PENDING','READY')
+       AND EXISTS (
+         SELECT 1 FROM publication_derivative_operations operation
+         JOIN publications p ON p.id = publication_assets.publication_id
+         WHERE operation.publication_asset_id = publication_assets.id
+           AND operation.derivative_key = publication_assets.derivative_key
+           AND operation.status = 'CLEANUP_PENDING'
+           AND (publication_assets.revoked_at IS NOT NULL OR p.status <> 'PUBLISHED')
+       )
+       ${options.publicationId === undefined ? "" : "AND publication_id = ?"}`,
+  ).bind(timestamp, ...publicationArgs).run();
+
+  const due = await env.DB.prepare(
+    `SELECT operation.id, operation.publication_asset_id, operation.publication_id,
+            operation.derivative_key,
+            operation.status, operation.cleanup_attempts, operation.provider_create_succeeded_at
+     FROM publication_derivative_operations operation
+     WHERE (
+       (operation.status = 'CLEANUP_PENDING' AND operation.next_cleanup_at <= ?) OR
+       (operation.status = 'CLEANED' AND operation.provider_create_succeeded_at IS NULL
+         AND operation.next_cleanup_at <= ?) OR
+       (operation.status = 'CREATING' AND operation.operation_lease_expires_at <= ?) OR
+       (operation.status = 'MANUAL_REVIEW' AND operation.next_cleanup_at <= ?)
+     )
+       AND (operation.cleanup_lease_expires_at IS NULL
+         OR operation.cleanup_lease_expires_at <= ?)
+       AND ${activeReadyReference}
+       ${publicationFilter}
+     ORDER BY operation.next_cleanup_at, operation.id LIMIT ?`,
+  ).bind(timestamp, timestamp, timestamp, timestamp, timestamp, ...publicationArgs, limit).all<{
+    id: string;
+    publication_asset_id: string;
+    publication_id: string;
+    derivative_key: string;
+    status: string;
+    cleanup_attempts: number;
+    provider_create_succeeded_at: string | null;
+  }>();
+
+  let processed = 0;
+  let cleaned = 0;
+  let retryable = 0;
+  let manualReview = 0;
+  const reconciliationStartedAt = Date.now();
+  for (const operation of due.results) {
+    if (Date.now() - reconciliationStartedAt >= timeBudgetMs) break;
+    const cleanupToken = randomToken(32);
+    const claimed = await env.DB.prepare(
+      `UPDATE publication_derivative_operations
+       SET status = CASE WHEN status = 'MANUAL_REVIEW' THEN status ELSE 'CLEANUP_PENDING' END,
+         cleanup_lease_token = ?,
+         cleanup_lease_expires_at = ?, updated_at = ?
+       WHERE id = ? AND status = ?
+         AND (
+           (status = 'CLEANUP_PENDING' AND next_cleanup_at <= ?) OR
+           (status = 'CLEANED' AND provider_create_succeeded_at IS NULL
+             AND next_cleanup_at <= ?) OR
+           (status = 'CREATING' AND operation_lease_expires_at <= ?) OR
+           (status = 'MANUAL_REVIEW' AND next_cleanup_at <= ?)
+         )
+         AND provider_create_succeeded_at IS ?
+         AND (cleanup_lease_expires_at IS NULL OR cleanup_lease_expires_at <= ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM publication_assets pa
+           JOIN publications p ON p.id = pa.publication_id
+           WHERE pa.id = publication_derivative_operations.publication_asset_id
+             AND p.id = publication_derivative_operations.publication_id
+             AND pa.derivative_key = publication_derivative_operations.derivative_key
+             AND p.status = 'PUBLISHED' AND pa.revoked_at IS NULL
+             AND pa.derivative_status = 'READY'
+         )`,
+    ).bind(cleanupToken, cleanupLeaseExpiresAt, timestamp, operation.id,
+      operation.status, timestamp, timestamp, timestamp, timestamp,
+      operation.provider_create_succeeded_at, timestamp).run();
+    if (claimed.meta.changes !== 1) continue;
+    processed++;
+    if (operation.status === "MANUAL_REVIEW") {
+      try {
+        const existing = await derivativeProviderCall(
+          env.STORAGE.getPublishedDerivative(operation.derivative_key),
+          (lateResult) => lateResult?.body?.cancel(),
+        );
+        if (existing) {
+          await existing.body?.cancel();
+          const recoveredAt = timestamp;
+          const recovered = await env.DB.batch([
+            env.DB.prepare(
+              `UPDATE publication_derivative_operations AS operation
+               SET status = 'CLEANUP_PENDING',
+                 provider_create_succeeded_at = COALESCE(provider_create_succeeded_at, ?),
+                 operation_lease_expires_at = ?, cleanup_attempts = 0, cleanup_lease_token = NULL,
+                 cleanup_lease_expires_at = NULL, next_cleanup_at = ?,
+                 last_cleanup_error_code = NULL, updated_at = ?
+               WHERE operation.id = ? AND operation.status = 'MANUAL_REVIEW'
+                 AND operation.cleanup_lease_token = ?
+                 AND operation.provider_create_succeeded_at IS ?
+                 AND ${activeReadyReference}`,
+            ).bind(recoveredAt, recoveredAt, timestamp, recoveredAt, operation.id, cleanupToken,
+              operation.provider_create_succeeded_at),
+            env.DB.prepare(
+              `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING', updated_at = ?
+               WHERE id = ? AND publication_id = ? AND derivative_key = ?
+                 AND derivative_status IN ('PENDING','READY')
+                 AND EXISTS (
+                   SELECT 1 FROM publication_derivative_operations operation
+                   WHERE operation.id = ? AND operation.status = 'CLEANUP_PENDING'
+                     AND operation.derivative_key = ?
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM publications p
+                   WHERE p.id = ? AND p.status = 'PUBLISHED'
+                     AND EXISTS (
+                       SELECT 1 FROM publication_assets active_asset
+                       WHERE active_asset.id = publication_assets.id
+                         AND active_asset.revoked_at IS NULL
+                         AND active_asset.derivative_key = ?
+                         AND active_asset.derivative_status = 'READY'
+                     )
+                 )`,
+            ).bind(timestamp, operation.publication_asset_id, operation.publication_id,
+              operation.derivative_key, operation.id, operation.derivative_key,
+              operation.publication_id, operation.derivative_key),
+          ]);
+          if (recovered[0]?.meta.changes !== 1) {
+            throw new Error("Manual-review derivative recovery lost operation ownership");
+          }
+          logSafeInfo("publication.media_cleanup_manual_review_rechecked", "lifecycle", {
+            operation_id: operation.id,
+            recovery_outcome: "provider_object_confirmed",
+          });
+        } else {
+          const retryDelay = operation.provider_create_succeeded_at === null
+            ? DERIVATIVE_ORPHAN_RECHECK_MS
+            : Math.min(24 * 60 * 60_000,
+              60_000 * 2 ** Math.min(10, operation.cleanup_attempts));
+          const retryAt = new Date(now.getTime() + retryDelay).toISOString();
+          const deferred = await env.DB.prepare(
+            `UPDATE publication_derivative_operations
+             SET cleanup_lease_token = NULL, cleanup_lease_expires_at = NULL,
+               next_cleanup_at = ?, last_cleanup_error_code = 'PROVIDER_LOOKUP_INCONCLUSIVE',
+               updated_at = ?
+             WHERE id = ? AND status = 'MANUAL_REVIEW' AND cleanup_lease_token = ?`,
+          ).bind(retryAt, timestamp, operation.id, cleanupToken).run();
+          if (deferred.meta.changes !== 1) {
+            throw new Error("Manual-review derivative recovery lost operation ownership");
+          }
+          logSafeInfo("publication.media_cleanup_manual_review_rechecked", "lifecycle", {
+            operation_id: operation.id,
+            recovery_outcome: "provider_object_absent_inconclusive",
+          });
+        }
+      } catch (error) {
+        const retryAt = new Date(now.getTime() + Math.min(24 * 60 * 60_000,
+          60_000 * 2 ** Math.min(10, operation.cleanup_attempts))).toISOString();
+        await env.DB.prepare(
+          `UPDATE publication_derivative_operations
+           SET cleanup_lease_token = NULL, cleanup_lease_expires_at = NULL,
+             next_cleanup_at = ?, last_cleanup_error_code = ?, updated_at = ?
+           WHERE id = ? AND status = 'MANUAL_REVIEW' AND cleanup_lease_token = ?`,
+        ).bind(retryAt,
+          error instanceof Error ? error.name.slice(0, 60) : "UNKNOWN_ERROR",
+          timestamp, operation.id, cleanupToken).run();
+        logSafeError("publication.media_cleanup_manual_review_recheck_failed",
+          "storage", error, {
+            operation_id: operation.id,
+            recovery_outcome: "recheck_failed",
+          });
+        retryable++;
+      }
+      continue;
+    }
+    await env.DB.prepare(
+      `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING', updated_at = ?
+       WHERE id = ? AND derivative_key = ?
+         AND derivative_status IN ('PENDING','READY')
+         AND EXISTS (
+           SELECT 1 FROM publication_derivative_operations operation
+           WHERE operation.id = ? AND operation.status = 'CLEANUP_PENDING'
+             AND operation.cleanup_lease_token = ?
+         )`,
+    ).bind(timestamp, operation.publication_asset_id, operation.derivative_key,
+      operation.id, cleanupToken).run();
     try {
-      await env.STORAGE.deletePublishedDerivative(row.derivative_key);
-      await env.DB.prepare(
-        `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'DELETED',
-           updated_at = ? WHERE id = ? AND derivative_key = ?`,
-      ).bind(nowIso(), row.id, row.derivative_key).run();
+      await derivativeProviderCall(
+        env.STORAGE.deletePublishedDerivative(operation.derivative_key),
+      );
+      const remaining = await derivativeProviderCall(
+        env.STORAGE.getPublishedDerivative(operation.derivative_key),
+        (lateResult) => lateResult?.body?.cancel(),
+      );
+      if (remaining) {
+        await remaining.body?.cancel();
+        throw new Error("Published derivative remains after cleanup");
+      }
+      const verifiedAt = timestamp;
+      const finalized = await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'DELETED',
+             updated_at = ?
+           WHERE id = ? AND publication_id = ? AND derivative_key = ?
+             AND derivative_status = 'CLEANUP_PENDING'
+             AND EXISTS (
+               SELECT 1 FROM publication_derivative_operations operation
+               WHERE operation.id = ? AND operation.status = 'CLEANUP_PENDING'
+                 AND operation.cleanup_lease_token = ?
+                 AND operation.provider_create_succeeded_at IS ?
+             )`,
+        ).bind(verifiedAt, operation.publication_asset_id, operation.publication_id,
+          operation.derivative_key, operation.id, cleanupToken,
+          operation.provider_create_succeeded_at),
+        env.DB.prepare(
+          `UPDATE publication_derivative_operations AS operation
+           SET status = CASE WHEN provider_create_succeeded_at IS NULL
+                 THEN 'MANUAL_REVIEW' ELSE 'CLEANED' END,
+             cleanup_lease_token = NULL,
+             cleanup_lease_expires_at = NULL,
+             next_cleanup_at = CASE WHEN provider_create_succeeded_at IS NULL THEN ? ELSE ? END,
+             last_cleanup_error_code = CASE WHEN provider_create_succeeded_at IS NULL
+                 THEN 'PROVIDER_CREATE_OUTCOME_UNCONFIRMED' ELSE NULL END,
+             updated_at = ?
+           WHERE id = ? AND status = 'CLEANUP_PENDING' AND cleanup_lease_token = ?
+             AND provider_create_succeeded_at IS ?
+             AND NOT EXISTS (
+               SELECT 1 FROM publication_assets pa
+               WHERE pa.id = operation.publication_asset_id
+                 AND pa.publication_id = operation.publication_id
+                 AND pa.derivative_key = operation.derivative_key
+             )
+             AND ${activeReadyReference}`,
+        ).bind(new Date(now.getTime() + DERIVATIVE_ORPHAN_RECHECK_MS).toISOString(),
+          verifiedAt, verifiedAt, operation.id, cleanupToken,
+          operation.provider_create_succeeded_at),
+      ]);
+      if (finalized[1]?.meta.changes !== 1) {
+        throw new Error("Publication derivative cleanup ownership changed before completion");
+      }
+      if (operation.provider_create_succeeded_at !== null) cleaned++;
     } catch (error) {
-      success = false;
-      logSafeError("publication.media_cleanup_failed", "storage", error);
+      const failedAt = timestamp;
       await env.DB.prepare(
-        `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING', updated_at = ?
-         WHERE id = ? AND derivative_key = ?`,
-      ).bind(nowIso(), row.id, row.derivative_key).run();
+        `UPDATE publication_derivative_operations
+         SET status = CASE WHEN cleanup_attempts + 1 >= ? THEN 'MANUAL_REVIEW'
+               ELSE 'CLEANUP_PENDING' END,
+           cleanup_attempts = cleanup_attempts + 1,
+           cleanup_lease_token = NULL, cleanup_lease_expires_at = NULL,
+           next_cleanup_at = ?, last_cleanup_error_code = ?, updated_at = ?
+         WHERE id = ? AND status = 'CLEANUP_PENDING' AND cleanup_lease_token = ?
+           AND provider_create_succeeded_at IS ?`,
+      ).bind(
+        DERIVATIVE_CLEANUP_MAX_FAILURES,
+        new Date(now.getTime() + Math.min(24 * 60 * 60_000,
+          60_000 * 2 ** Math.min(10, operation.cleanup_attempts + 1))).toISOString(),
+        error instanceof Error ? error.name.slice(0, 60) : "UNKNOWN_ERROR",
+        failedAt, operation.id, cleanupToken, operation.provider_create_succeeded_at,
+      ).run();
+      logSafeError("publication.media_cleanup_failed", "storage", error);
+      retryable++;
     }
   }
-  return success;
+  const unresolved = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+     FROM publication_derivative_operations operation
+     WHERE operation.status = 'MANUAL_REVIEW'
+       ${options.publicationId === undefined ? "" : "AND operation.publication_id = ?"}`,
+  ).bind(...publicationArgs).first<{ count: number }>();
+  manualReview += Number(unresolved?.count ?? 0);
+  const dueRemaining = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+     FROM publication_derivative_operations operation
+     WHERE (
+       (operation.status = 'CLEANUP_PENDING' AND operation.next_cleanup_at <= ?) OR
+       (operation.status = 'CLEANED' AND operation.provider_create_succeeded_at IS NULL
+         AND operation.next_cleanup_at <= ?) OR
+       (operation.status = 'CREATING' AND operation.operation_lease_expires_at <= ?) OR
+       (operation.status = 'MANUAL_REVIEW' AND operation.next_cleanup_at <= ?)
+     )
+       AND (operation.cleanup_lease_expires_at IS NULL
+         OR operation.cleanup_lease_expires_at <= ?)
+       AND ${activeReadyReference}
+       ${publicationFilter}`,
+  ).bind(timestamp, timestamp, timestamp, timestamp, timestamp,
+    ...publicationArgs).first<{ count: number }>();
+  const deferred = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+     FROM publication_derivative_operations operation
+     WHERE operation.status IN ('CREATING','CLEANUP_PENDING','CLEANED')
+       AND (
+         (operation.status = 'CREATING' AND operation.operation_lease_expires_at > ?) OR
+         (operation.status = 'CLEANUP_PENDING'
+           AND (operation.next_cleanup_at > ? OR
+             operation.operation_lease_expires_at > ? OR
+             operation.cleanup_lease_expires_at > ?)) OR
+         (operation.status = 'CLEANED' AND operation.provider_create_succeeded_at IS NULL
+           AND (operation.operation_lease_expires_at > ? OR
+             operation.cleanup_lease_expires_at > ? OR operation.next_cleanup_at > ?))
+       )
+       AND ${activeReadyReference}
+       ${publicationFilter}`,
+  ).bind(
+    timestamp, timestamp, timestamp, timestamp, timestamp, timestamp, timestamp,
+    ...publicationArgs,
+  ).first<{ count: number }>();
+  return derivativeCleanupResult({
+    processed,
+    cleaned,
+    pending: Number(dueRemaining?.count ?? 0),
+    deferred: Number(deferred?.count ?? 0),
+    retryable,
+    manualReview,
+  });
+}
+
+function derivativeCleanupResult(result: {
+  processed: number;
+  cleaned: number;
+  pending: number;
+  deferred: number;
+  retryable: number;
+  manualReview: number;
+}): PublicationDerivativeCleanupResult {
+  const status: PublicationDerivativeCleanupStatus = result.manualReview > 0
+    ? "manual_review"
+    : result.retryable > 0
+      ? "failed"
+      : result.pending > 0
+        ? "pending"
+        : result.deferred > 0
+          ? "deferred"
+          : "completed";
+  return {
+    ...result,
+    status,
+    hasMore: result.pending > 0,
+  };
+}
+
+function derivativeCleanupErrorCode(status: PublicationDerivativeCleanupStatus): string {
+  if (status === "manual_review") return "MEDIA_CLEANUP_MANUAL_REVIEW";
+  if (status === "failed") return "MEDIA_CLEANUP_FAILED";
+  if (status === "deferred") return "MEDIA_CLEANUP_DEFERRED";
+  return "MEDIA_CLEANUP_PENDING";
 }
 
 export async function runPublicationLifecycle(
@@ -547,7 +993,8 @@ export async function runPublicationLifecycle(
       retryable++;
       continue;
     }
-    if (!await cleanupAssets(env, publication.id)) {
+    const cleanup = await cleanupAssets(env, publication.id, nowDate);
+    if (cleanup.status !== "completed") {
       retryable++;
       continue;
     }
@@ -665,41 +1112,143 @@ async function publish(
     if (item.derivative_status === "CLEANUP_PENDING") {
       return apiError(requestId, 503, "MEDIA_CLEANUP_PENDING", "Photo cleanup must complete before republishing");
     }
-    let derivativeKey = item.derivative_key;
-    if (!derivativeKey || item.derivative_status === "DELETED") {
-      const extension = item.media_type === "image/png" ? "png" :
-        item.media_type === "image/jpeg" ? "jpg" : null;
-      if (!extension || !Number.isSafeInteger(item.byte_size) || item.byte_size < 1) {
-        return apiError(requestId, 422, "ASSET_UNAVAILABLE", "A selected image has invalid metadata");
+    if (item.derivative_status === "READY" && item.derivative_key) {
+      const currentOperation = await env.DB.prepare(
+        `SELECT id FROM publication_derivative_operations
+         WHERE publication_asset_id = ? AND derivative_key = ? AND status = 'READY'`,
+      ).bind(item.id, item.derivative_key).first<{ id: string }>();
+      if (!currentOperation) {
+        return apiError(requestId, 503, "MEDIA_CLEANUP_PENDING",
+          "Photo operation state must be reconciled before publishing");
       }
-      derivativeKey = `published/${randomToken(32)}-${extension}`;
-      const staged = await env.DB.prepare(
-        `UPDATE publication_assets SET derivative_key = ?, derivative_status = 'PENDING', updated_at = ?
-         WHERE id = ? AND revoked_at IS NULL AND derivative_status IN ('PENDING','DELETED')`,
-      ).bind(derivativeKey, nowIso(), item.id).run();
-      if (staged.meta.changes !== 1) return apiError(requestId, 409, "CONFLICT", "Photo consent changed during publish");
+      continue;
     }
-    if (item.derivative_status !== "READY" || !item.derivative_key) {
-      try {
-        await env.STORAGE.createPublishedDerivative(item.object_key, derivativeKey);
-      } catch (error) {
-        logSafeError("publication.media_creation_failed", "storage", error, { request_id: requestId });
-        return apiError(requestId, 503, "MEDIA_PUBLISH_FAILED", "Could not prepare an approved photo");
-      }
-      const ready = await env.DB.prepare(
+    if (item.derivative_key || item.derivative_status === "CLEANUP_PENDING") {
+      return apiError(requestId, 503, "MEDIA_CLEANUP_PENDING",
+        "Photo operation state must be reconciled before publishing");
+    }
+    const extension = item.media_type === "image/png" ? "png" :
+      item.media_type === "image/jpeg" ? "jpg" : null;
+    if (!extension || !Number.isSafeInteger(item.byte_size) || item.byte_size < 1) {
+      return apiError(requestId, 422, "ASSET_UNAVAILABLE", "A selected image has invalid metadata");
+    }
+    const derivativeKey = `published/${randomToken(32)}-${extension}`;
+    const operationId = crypto.randomUUID();
+    const operationToken = randomToken(32);
+    const stagedAt = nowIso();
+    const operationLeaseExpiresAt = new Date(
+      Date.parse(stagedAt) + DERIVATIVE_OPERATION_LEASE_MS,
+    ).toISOString();
+    const staged = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE publication_assets SET derivative_key = ?, derivative_status = 'PENDING', updated_at = ?
+         WHERE id = ? AND revoked_at IS NULL AND derivative_status IN ('PENDING','DELETED')
+           AND derivative_key IS NULL
+           AND EXISTS (
+             SELECT 1 FROM publications
+             WHERE id = ? AND status = 'UNPUBLISHED' AND lifecycle_revision = ?
+           )`,
+      ).bind(derivativeKey, stagedAt, item.id, publicationId, expectedLifecycle),
+      env.DB.prepare(
+        `INSERT INTO publication_derivative_operations (
+          id, publication_asset_id, publication_id, derivative_key, status, operation_token,
+           operation_lease_expires_at, next_cleanup_at, created_at, updated_at
+         )
+         SELECT ?, ?, ?, ?, 'CREATING', ?, ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM publication_assets pa JOIN publications p ON p.id = pa.publication_id
+           WHERE pa.id = ? AND pa.derivative_key = ? AND pa.derivative_status = 'PENDING'
+             AND pa.revoked_at IS NULL AND p.id = ? AND p.status = 'UNPUBLISHED'
+             AND p.lifecycle_revision = ?
+         )`,
+      ).bind(operationId, item.id, publicationId, derivativeKey, operationToken, operationLeaseExpiresAt,
+        operationLeaseExpiresAt, stagedAt, stagedAt, item.id, derivativeKey,
+        publicationId, expectedLifecycle),
+    ]);
+    if (staged[0]?.meta.changes !== 1 || staged[1]?.meta.changes !== 1) {
+      return apiError(requestId, 409, "CONFLICT", "Photo consent changed during publish");
+    }
+    try {
+      await env.STORAGE.createPublishedDerivative(item.object_key, derivativeKey);
+    } catch (error) {
+      logSafeError("publication.media_creation_failed", "storage", error, { request_id: requestId });
+      const failedAt = nowIso();
+      const orphanRecheckAt = new Date(
+        Date.parse(failedAt) + DERIVATIVE_ORPHAN_RECHECK_MS,
+      ).toISOString();
+      await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE publication_derivative_operations
+           SET status = 'CLEANUP_PENDING', next_cleanup_at = ?,
+             operation_lease_expires_at = ?, updated_at = ?
+           WHERE id = ? AND status = 'CREATING' AND operation_token = ?`,
+        ).bind(failedAt, orphanRecheckAt, failedAt, operationId, operationToken),
+        env.DB.prepare(
+          `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING', updated_at = ?
+           WHERE id = ? AND derivative_key = ? AND derivative_status = 'PENDING'
+             AND EXISTS (
+               SELECT 1 FROM publication_derivative_operations
+               WHERE id = ? AND status = 'CLEANUP_PENDING'
+             )`,
+        ).bind(nowIso(), item.id, derivativeKey, operationId),
+      ]);
+      return apiError(requestId, 503, "MEDIA_PUBLISH_FAILED", "Could not prepare an approved photo");
+    }
+    const readyAt = nowIso();
+    const observed = await env.DB.prepare(
+      `UPDATE publication_derivative_operations
+       SET provider_create_succeeded_at = COALESCE(provider_create_succeeded_at, ?),
+         operation_lease_expires_at = CASE WHEN provider_create_succeeded_at IS NULL
+           THEN ? ELSE operation_lease_expires_at END,
+         status = CASE WHEN provider_create_succeeded_at IS NULL
+             AND status IN ('MANUAL_REVIEW','CLEANED')
+           THEN 'CLEANUP_PENDING' ELSE status END,
+         cleanup_attempts = CASE WHEN provider_create_succeeded_at IS NULL
+             AND status = 'MANUAL_REVIEW'
+           THEN 0 ELSE cleanup_attempts END,
+         next_cleanup_at = CASE WHEN provider_create_succeeded_at IS NULL
+             AND status IN ('MANUAL_REVIEW','CLEANED','CLEANUP_PENDING')
+           THEN ? ELSE next_cleanup_at END,
+         last_cleanup_error_code = CASE WHEN provider_create_succeeded_at IS NULL
+             AND status IN ('MANUAL_REVIEW','CLEANED','CLEANUP_PENDING')
+           THEN NULL ELSE last_cleanup_error_code END,
+         updated_at = ?
+       WHERE id = ? AND operation_token = ?`,
+    ).bind(readyAt, readyAt, readyAt, readyAt, operationId, operationToken).run();
+    if (observed.meta.changes !== 1) {
+      throw new Error("Published derivative operation disappeared after provider success");
+    }
+    const ready = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE publication_derivative_operations
+         SET status = 'READY', operation_lease_expires_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'CREATING' AND operation_token = ?
+           AND provider_create_succeeded_at IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM publication_assets pa JOIN publications p ON p.id = pa.publication_id
+             WHERE pa.id = ? AND pa.derivative_key = ? AND pa.derivative_status = 'PENDING'
+               AND pa.revoked_at IS NULL AND p.id = ? AND p.status = 'UNPUBLISHED'
+               AND p.lifecycle_revision = ?
+           )`,
+      ).bind(readyAt, readyAt, operationId, operationToken, item.id, derivativeKey,
+        publicationId, expectedLifecycle),
+      env.DB.prepare(
         `UPDATE publication_assets SET derivative_status = 'READY', updated_at = ?
-         WHERE id = ? AND derivative_key = ? AND revoked_at IS NULL`,
-      ).bind(nowIso(), item.id, derivativeKey).run();
-      if (ready.meta.changes !== 1) {
-        try {
-          await env.STORAGE.deletePublishedDerivative(derivativeKey);
-        } catch (error) {
-          logSafeError("publication.uncommitted_media_cleanup_failed", "storage", error, {
-            request_id: requestId,
-          });
-        }
-        return apiError(requestId, 409, "CONFLICT", "Photo consent changed during publish");
-      }
+         WHERE id = ? AND derivative_key = ? AND derivative_status = 'PENDING'
+           AND revoked_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM publication_derivative_operations
+             WHERE id = ? AND status = 'READY' AND operation_token = ?
+           )
+           AND EXISTS (
+             SELECT 1 FROM publications
+             WHERE id = ? AND status = 'UNPUBLISHED' AND lifecycle_revision = ?
+           )`,
+      ).bind(readyAt, item.id, derivativeKey, operationId, operationToken,
+        publicationId, expectedLifecycle),
+    ]);
+    if (ready[0]?.meta.changes !== 1 || ready[1]?.meta.changes !== 1) {
+      return apiError(requestId, 409, "CONFLICT", "Publication or photo consent changed during publish");
     }
   }
 
@@ -710,15 +1259,22 @@ async function publish(
          unpublished_at = NULL, lifecycle_revision = lifecycle_revision + 1, updated_at = ?
      WHERE id = ? AND status = 'UNPUBLISHED' AND lifecycle_revision = ?
        AND (expires_at IS NULL OR expires_at > ?)
+       AND NOT EXISTS (
+         SELECT 1 FROM publication_assets pa
+         LEFT JOIN publication_derivative_operations operation
+           ON operation.publication_asset_id = pa.id
+          AND operation.derivative_key = pa.derivative_key
+         WHERE pa.publication_id = publications.id AND pa.revoked_at IS NULL
+           AND (pa.derivative_status <> 'READY' OR operation.status <> 'READY')
+       )
        AND EXISTS (
          SELECT 1 FROM orders o
          JOIN designs d ON d.id = o.design_id AND d.customer_id = o.customer_id
          JOIN order_design_snapshots snapshot ON snapshot.order_id = o.id
            AND snapshot.design_id = d.id AND snapshot.design_revision = o.design_revision
          JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
-         JOIN payments payment ON payment.order_id = o.id AND payment.provider = 'SEPAY'
-         JOIN payment_webhook_events e ON e.provider = payment.provider
-           AND e.event_id = payment.provider_payment_id AND e.outcome = 'PROCESSED'
+         JOIN payments payment ON payment.order_id = o.id
+           AND payment.provider IN ('SEPAY', 'MANUAL_BANK_TRANSFER')
          JOIN templates t ON t.id = snapshot.template_id AND t.status = 'ACTIVE'
          JOIN template_versions v ON v.template_id = snapshot.template_id
            AND v.schema_version = snapshot.schema_version AND v.status = 'ACTIVE'
@@ -730,10 +1286,10 @@ async function publish(
            AND snapshot.schema_version = publications.schema_version
            AND i.reference_id = snapshot.template_id
            AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = snapshot.schema_version
-           AND payment.status = 'SUCCEEDED' AND payment.provider_payment_id IS NOT NULL
-           AND payment.provider_payment_id <> '' AND payment.succeeded_at IS NOT NULL
+           AND payment.status = 'SUCCEEDED' AND payment.succeeded_at IS NOT NULL
            AND payment.review_required = 0 AND payment.amount_minor = o.total_minor
            AND payment.currency = o.currency
+           AND ${verifiedSettlementEvidence("payment", "o")}
            AND NOT EXISTS (
              SELECT 1 FROM order_items pricing_item
              WHERE pricing_item.order_id = o.id AND pricing_item.item_type = 'ADD_ON'
@@ -801,14 +1357,17 @@ async function unpublishOrRevoke(
   if (result[0]?.meta.changes !== 1) {
     return apiError(requestId, 409, "CONFLICT", "Publication state changed; retry");
   }
-  const cleaned = await cleanupAssets(env, publicationId);
+  const cleanup = await cleanupAssets(env, publicationId);
   await env.DB.prepare(
     `INSERT INTO audit_logs (
        id, actor_type, actor_id, action, entity_type, entity_id, request_id, metadata_json, created_at
-     ) VALUES (?, 'CUSTOMER', ?, ?, 'publication', ?, ?, '{}', ?)`,
+     ) VALUES (?, 'CUSTOMER', ?, ?, 'publication', ?, ?, ?, ?)`,
   ).bind(safeId(), customerId, revoke ? "publication.revoked" : "publication.unpublished",
-    publicationId, requestId, now).run();
-  if (!cleaned) return apiError(requestId, 503, "MEDIA_CLEANUP_PENDING", "Link is disabled; media cleanup will be retried");
+    publicationId, requestId, JSON.stringify({ cleanup_status: cleanup.status }), now).run();
+  if (cleanup.status !== "completed") {
+    return apiError(requestId, 503, derivativeCleanupErrorCode(cleanup.status),
+      "Link is disabled; media cleanup will be retried");
+  }
   return jsonResponse({ status, lifecycle_revision: expectedLifecycle + 1 }, 200, requestId);
 }
 
@@ -840,9 +1399,9 @@ async function revokeAssetConsent(
   const row = await loadOwnedPublication(env, customerId, publicationId);
   if (!row) return apiError(requestId, 404, "NOT_FOUND", "Publication not found");
   const consent = await env.DB.prepare(
-    `SELECT id, derivative_key FROM publication_assets
+    `SELECT id FROM publication_assets
      WHERE publication_id = ? AND asset_id = ? AND customer_id = ? AND revoked_at IS NULL`,
-  ).bind(publicationId, assetId, customerId).first<{ id: string; derivative_key: string | null }>();
+  ).bind(publicationId, assetId, customerId).first<{ id: string }>();
   if (!consent) return apiError(requestId, 404, "NOT_FOUND", "Publication consent not found");
   const snapshot = JSON.parse(row.snapshot_json) as { data: TemplateData };
   const data = removeAssetReference(row.template_id, snapshot.data, assetId);
@@ -866,26 +1425,18 @@ async function revokeAssetConsent(
   if ((updated[0]?.meta.changes ?? 0) !== 1 || (updated[1]?.meta.changes ?? 0) !== 1) {
     return apiError(requestId, 409, "CONFLICT", "Publication state changed; reload before revoking consent");
   }
-  if (consent.derivative_key && env.STORAGE) {
-    try {
-      await env.STORAGE.deletePublishedDerivative(consent.derivative_key);
-      await env.DB.prepare(
-        `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'DELETED',
-           updated_at = ? WHERE id = ? AND derivative_key = ?`,
-      ).bind(nowIso(), consent.id, consent.derivative_key).run();
-    } catch (error) {
-      logSafeError("publication.consent_revocation_cleanup_failed", "storage", error, {
-        request_id: requestId,
-      });
-      return apiError(requestId, 503, "MEDIA_CLEANUP_PENDING", "Image access is revoked; media cleanup is pending");
-    }
-  }
+  const cleanup = await cleanupAssets(env, publicationId);
   await env.DB.prepare(
     `INSERT INTO audit_logs (
        id, actor_type, actor_id, action, entity_type, entity_id, request_id, metadata_json, created_at
      ) VALUES (?, 'CUSTOMER', ?, 'publication.asset_consent_revoked',
        'publication', ?, ?, ?, ?)`,
-  ).bind(safeId(), customerId, publicationId, requestId, JSON.stringify({ asset_id: assetId }), now).run();
+  ).bind(safeId(), customerId, publicationId, requestId,
+    JSON.stringify({ asset_id: assetId, cleanup_status: cleanup.status }), now).run();
+  if (cleanup.status !== "completed") {
+    return apiError(requestId, 503, derivativeCleanupErrorCode(cleanup.status),
+      "Image access is revoked; media cleanup is pending");
+  }
   return jsonResponse({
     consent_revoked: true,
     lifecycle_revision: row.lifecycle_revision + 1,
@@ -1019,8 +1570,11 @@ async function updateSnapshot(
   );
   const result = await env.DB.batch(statements);
   if ((result[0]?.meta.changes ?? 0) !== 1) return apiError(requestId, 409, "CONFLICT", "Publication state changed; reload");
-  const cleaned = await cleanupAssets(env, publicationId);
-  if (!cleaned) return apiError(requestId, 503, "MEDIA_CLEANUP_PENDING", "Update is saved but old media cleanup is pending");
+  const cleanup = await cleanupAssets(env, publicationId);
+  if (cleanup.status !== "completed") {
+    return apiError(requestId, 503, derivativeCleanupErrorCode(cleanup.status),
+      "Update is saved but old media cleanup is pending");
+  }
   return jsonResponse({
     status: "UNPUBLISHED",
     lifecycle_revision: (body.expected_lifecycle_revision as number) + 1,
@@ -1488,16 +2042,14 @@ export async function handleFulfillmentForOrder(
          JOIN order_items i ON i.order_id = o.id AND i.item_type = 'ADD_ON'
            AND json_extract(i.metadata_json, '$.kind') = 'STORAGE_PLAN'
          JOIN storage_plans sp ON sp.id = i.reference_id
-         JOIN payments payment ON payment.order_id = o.id AND payment.provider = 'SEPAY'
-         JOIN payment_webhook_events webhook ON webhook.provider = payment.provider
-           AND webhook.event_id = payment.provider_payment_id AND webhook.outcome = 'PROCESSED'
+         JOIN payments payment ON payment.order_id = o.id
+           AND payment.provider IN ('SEPAY', 'MANUAL_BANK_TRANSFER')
          WHERE o.id = ? AND o.renewal_publication_id IS NULL
            AND o.status = 'FULFILLING' AND o.paid_at IS NOT NULL
            AND o.payment_review_required = 0 AND p.status = 'PUBLISHED'
            AND payment.status = 'SUCCEEDED' AND payment.review_required = 0
-           AND payment.provider_payment_id IS NOT NULL AND payment.provider_payment_id <> ''
-           AND payment.succeeded_at IS NOT NULL
            AND payment.amount_minor = o.total_minor AND payment.currency = o.currency
+           AND ${verifiedSettlementEvidence("payment", "o")}
            AND EXISTS (
              SELECT 1 FROM fulfillment_jobs
              WHERE order_id = o.id AND status = 'PROCESSING' AND lease_token = ?
@@ -1513,16 +2065,15 @@ export async function handleFulfillmentForOrder(
            )
            AND EXISTS (
              SELECT 1 FROM payments payment
-             JOIN payment_webhook_events e ON e.provider = payment.provider
-               AND e.event_id = payment.provider_payment_id AND e.outcome = 'PROCESSED'
              JOIN publications p ON (p.order_id = orders.id OR p.id = orders.renewal_publication_id)
                AND (p.status = 'PUBLISHED' OR
                  (orders.renewal_publication_id IS NOT NULL AND p.status = 'UNPUBLISHED'))
-             WHERE payment.order_id = orders.id AND payment.provider = 'SEPAY'
+             WHERE payment.order_id = orders.id
+               AND payment.provider IN ('SEPAY', 'MANUAL_BANK_TRANSFER')
                AND payment.status = 'SUCCEEDED' AND payment.succeeded_at IS NOT NULL
-               AND payment.provider_payment_id IS NOT NULL AND payment.provider_payment_id <> ''
                AND payment.review_required = 0 AND payment.amount_minor = orders.total_minor
                AND payment.currency = orders.currency
+               AND ${verifiedSettlementEvidence("payment", "orders")}
            )`,
       ).bind(publishedAt, orderId, leaseToken),
       env.DB.prepare(
@@ -1648,9 +2199,9 @@ async function publicPublication(
      JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
        AND i.reference_id = p.template_id
        AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = p.schema_version
-     JOIN payments payment ON payment.order_id = o.id AND payment.provider = 'SEPAY'
-       AND payment.status = 'SUCCEEDED' AND payment.provider_payment_id IS NOT NULL
-       AND payment.provider_payment_id <> '' AND payment.succeeded_at IS NOT NULL
+     JOIN payments payment ON payment.order_id = o.id
+       AND payment.provider IN ('SEPAY', 'MANUAL_BANK_TRANSFER')
+       AND payment.status = 'SUCCEEDED' AND payment.succeeded_at IS NOT NULL
        AND payment.review_required = 0 AND payment.amount_minor = o.total_minor
        AND payment.currency = o.currency
        AND NOT EXISTS (
@@ -1659,12 +2210,11 @@ async function publicPublication(
            AND json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') IS NOT NULL
            AND CAST(json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER) <> o.total_minor
        )
-     JOIN payment_webhook_events e ON e.provider = payment.provider
-       AND e.event_id = payment.provider_payment_id AND e.outcome = 'PROCESSED'
      JOIN templates t ON t.id = p.template_id AND t.status = 'ACTIVE'
      JOIN template_versions v ON v.template_id = p.template_id
        AND v.schema_version = p.schema_version AND v.status = 'ACTIVE'
-     WHERE p.slug_hash = ? AND p.renderer_version <> 'unsupported'`,
+     WHERE p.slug_hash = ? AND p.renderer_version <> 'unsupported'
+       AND ${verifiedSettlementEvidence("payment", "o")}`,
   ).bind(await sha256(slug)).first<{
     id: string;
     template_id: string;
@@ -1737,9 +2287,9 @@ async function publicAsset(
      JOIN order_items i ON i.order_id = o.id AND i.item_type = 'TEMPLATE_LICENSE'
        AND i.reference_id = p.template_id
        AND CAST(json_extract(i.metadata_json, '$.schema_version') AS INTEGER) = p.schema_version
-     JOIN payments payment ON payment.order_id = o.id AND payment.provider = 'SEPAY'
-       AND payment.status = 'SUCCEEDED' AND payment.provider_payment_id IS NOT NULL
-       AND payment.provider_payment_id <> '' AND payment.succeeded_at IS NOT NULL
+     JOIN payments payment ON payment.order_id = o.id
+       AND payment.provider IN ('SEPAY', 'MANUAL_BANK_TRANSFER')
+       AND payment.status = 'SUCCEEDED' AND payment.succeeded_at IS NOT NULL
        AND payment.review_required = 0 AND payment.amount_minor = o.total_minor
        AND payment.currency = o.currency
        AND NOT EXISTS (
@@ -1748,8 +2298,6 @@ async function publicAsset(
            AND json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') IS NOT NULL
            AND CAST(json_extract(pricing_item.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER) <> o.total_minor
        )
-     JOIN payment_webhook_events e ON e.provider = payment.provider
-       AND e.event_id = payment.provider_payment_id AND e.outcome = 'PROCESSED'
      JOIN templates t ON t.id = p.template_id AND t.status = 'ACTIVE'
      JOIN template_versions v ON v.template_id = p.template_id
        AND v.schema_version = p.schema_version AND v.status = 'ACTIVE'
@@ -1759,6 +2307,7 @@ async function publicAsset(
      JOIN assets a ON a.id = pa.asset_id AND a.customer_id = o.customer_id
        AND a.status = 'READY'
      WHERE p.slug_hash = ? AND p.status = 'PUBLISHED'
+       AND ${verifiedSettlementEvidence("payment", "o")}
        AND (p.expires_at IS NULL OR p.expires_at > ?)`,
   ).bind(assetId, await sha256(slug), nowIso()).first<{
     derivative_key: string | null;
@@ -1791,6 +2340,35 @@ export async function handlePublicationRoutes(
   path: string,
   requestId: string,
 ): Promise<Response | null> {
+  const qrMatch = path.match(/^\/api\/v1\/publications\/([0-9a-f-]{36})\/qr\.svg$/i);
+  if (qrMatch) {
+    if (request.method !== "GET") return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");
+    const required = await requireSession(request, env, requestId);
+    if (required.response) return required.response;
+    const row = await loadOwnedPublication(env, required.session!.customerId, qrMatch[1]);
+    if (!row || row.status !== "PUBLISHED" || !row.slug) {
+      return apiError(requestId, 404, "NOT_FOUND", "Published website not found");
+    }
+    const publicRead = await publicPublication(env, requestId, row.slug);
+    await publicRead.body?.cancel();
+    if (!publicRead.ok) {
+      return apiError(requestId, 404, "NOT_FOUND", "Published website not found");
+    }
+    const code = qrcode(0, "H");
+    code.addData(createPublicationUrl(request, row.slug, env));
+    code.make();
+    return new Response(code.createSvgTag({ cellSize: 8, margin: 4, scalable: true }), {
+      headers: {
+        "Content-Type": "image/svg+xml; charset=utf-8",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "X-Request-ID": requestId,
+        "Referrer-Policy": "no-referrer",
+      },
+    });
+  }
   const publicAssetMatch = path.match(/^\/api\/v1\/publications\/(g[A-Za-z0-9_-]{20,40})\/assets\/([0-9a-f-]{36})$/i);
   if (publicAssetMatch) {
     if (request.method !== "GET") return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");
@@ -1804,7 +2382,7 @@ export async function handlePublicationRoutes(
   if (path === "/api/v1/publications") {
     if (request.method === "GET") return listCustomerWebsites(request, env, requestId);
     if (request.method !== "POST") return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");
-    const unavailable = await requireLocalPublishing(requestId, env);
+    const unavailable = await requirePublicationMutations(requestId, env);
     if (unavailable) return unavailable;
     const required = await requireSession(request, env, requestId);
     if (required.response) return required.response;
@@ -1818,7 +2396,7 @@ export async function handlePublicationRoutes(
   const match = path.match(/^\/api\/v1\/publications\/([0-9a-f-]{36})(?:\/(publish|republish|unpublish|revoke|assets\/([0-9a-f-]{36})\/consent))?$/i);
   if (!match) return null;
   const [, publicationId, action, assetId] = match;
-  const unavailable = await requireLocalPublishing(requestId, env);
+  const unavailable = await requirePublicationMutations(requestId, env);
   if (unavailable) return unavailable;
   const required = await requireSession(request, env, requestId);
   if (required.response) return required.response;

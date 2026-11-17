@@ -260,7 +260,7 @@ describe("storage provider selection and R2 adapter", () => {
     );
   });
 
-  it("rejects staging, local, incomplete Cloudinary configuration, and unidentified environments", () => {
+  it("requires separate complete staging Cloudinary credentials and rejects local or unidentified environments", () => {
     const unsafeStagingConfigurations = [
       { ENVIRONMENT: "staging", STORAGE_PROVIDER: "cloudinary" },
       {
@@ -287,9 +287,19 @@ describe("storage provider selection and R2 adapter", () => {
     for (const environment of unsafeStagingConfigurations) {
       assert.throws(
         () => createStorageFromEnvironment(environment),
-        /disabled in staging/,
+        /Cloudinary|staging|credentials|isolation/i,
       );
     }
+
+    const previewStorage = createStorageFromEnvironment({
+      ENVIRONMENT: "staging",
+      STORAGE_PROVIDER: "cloudinary",
+      CLOUDINARY_STAGING_CLOUD_NAME: "synthetic-preview-cloud",
+      CLOUDINARY_STAGING_API_KEY: "synthetic-preview-key",
+      CLOUDINARY_STAGING_API_SECRET: "synthetic-preview-secret",
+      CLOUDINARY_PRODUCTION_CLOUD_NAME: "synthetic-production-cloud",
+    });
+    assert.ok(previewStorage instanceof CloudinaryStorageAdapter);
 
     assert.throws(
       () => createStorageFromEnvironment({

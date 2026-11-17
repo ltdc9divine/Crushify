@@ -200,6 +200,14 @@ h1 {
   border-radius: 14px;
 }
 
+.payment-method {
+  font-weight: 700;
+}
+
+#payment-qr-container {
+  margin: 14px 0;
+}
+
 .qr-panel p,
 .mock-note,
 .footer-note {
@@ -275,6 +283,22 @@ h1 {
   color: #c5acbd;
   font-size: 0.9rem;
   line-height: 1.6;
+}
+
+.edit-design-link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  margin: 0 0 8px;
+  color: #ffadd1;
+  text-underline-offset: 3px;
+}
+
+.edit-design-link:focus-visible,
+.footer-note a:focus-visible {
+  outline: 2px solid #ffadd1;
+  outline-offset: 4px;
+  border-radius: 2px;
 }
 
 .field-label {

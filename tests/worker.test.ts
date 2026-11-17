@@ -22,11 +22,6 @@ describe("legacy Worker storage isolation", () => {
       CRON_SECRET: "synthetic-operator-secret-with-32-characters",
       STAGING_LIFECYCLE_SECRET: "c".repeat(64),
     };
-    assert.throws(
-      () => createStorageFromEnvironment(unsafeStaging),
-      /disabled in staging/,
-    );
-
     let databaseAccessed = false;
     const response = await worker.fetch(
       new Request("https://worker.example.test/api/ops/staging/publication-lifecycle", {

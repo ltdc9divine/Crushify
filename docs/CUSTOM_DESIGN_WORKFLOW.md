@@ -1,6 +1,14 @@
 # Custom Design Service Workflow
 
-**Status:** admin-operated v1 workflow design. No project portal, quote or custom-payment backend exists yet.
+**Status:** customer intake, owner-scoped status lookup and replies to admin information requests, and server-authorized admin review/communication are implemented. Quote versioning, customer quote acceptance, custom-payment processing, and the full project portal remain unimplemented. No custom price or delivery promise is configured.
+
+## 0. Implemented intake and communication workflow
+
+- `POST /api/v1/custom-design/requests` creates an authenticated, CSRF-protected, idempotent request in `QUOTE_PENDING` / `AWAITING_REVIEW`; the server applies validation and a per-customer request limit.
+- `GET /api/v1/custom-design/requests` and `GET /api/v1/custom-design/requests/{id}` return only requests owned by the authenticated customer.
+- An authorized admin may start review, request more information, or reply. These operations are CSRF-protected and create immutable request and admin-activity audit records.
+- `POST /api/v1/custom-design/requests/{id}/replies` accepts a 1–2,000-character customer reply only while the owned request is awaiting customer action. It requires CSRF and an idempotency key, transitions the request back to `IN_REVIEW` / `RESPONDED`, and stores the reply in an immutable, owner-bound history table. Admin operations expose the latest reply.
+- A request awaiting a quote remains quote-pending until an administrator reviews it. This workflow does not set a price, create an order, accept payment, or promise delivery.
 
 ## 1. State graph
 

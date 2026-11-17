@@ -16,7 +16,7 @@
     <section class="checkout-card" aria-labelledby="page-title">
       <p class="environment-badge">CRUSHIFY · THÔNG TIN ĐẶT HÀNG</p>
       <h1 id="page-title">Hoàn tất món quà</h1>
-      <p class="intro">59.000đ gồm tháng hosting đầu tiên; mỗi tháng thêm 10.000đ. Gói trọn đời là 199.000đ. Không có thanh toán định kỳ. Giá được xác định phía máy chủ.</p>
+      <p class="intro">Chọn thời hạn để xem ước tính từ danh mục giá hiện hành. Máy chủ sẽ tính lại tổng tiền trước khi tạo đơn.</p>
 
       <div id="notice" class="notice" role="status" aria-live="polite">Đang kiểm tra phiên đăng nhập…</div>
 
@@ -32,15 +32,16 @@
           <div><dt>Tổng dự kiến</dt><dd id="order-total-preview">—</dd></div>
         </dl>
         <p id="design-summary" class="design-summary"></p>
+        <a id="edit-design-link" class="edit-design-link" href="/">Quay lại chỉnh sửa</a>
         <form id="checkout-form">
           <label class="field-label" for="duration-type">Gói hosting</label>
-          <select id="duration-type" name="duration_type" required>
+          <select id="duration-type" name="duration_type" aria-describedby="duration-note" required>
             <option value="monthly">Hosting theo tháng</option>
             <option value="lifetime">Gói trọn đời</option>
           </select>
           <label class="field-label" for="hosting-months">Số tháng hosting</label>
-          <input id="hosting-months" name="hosting_months" type="number" min="1" step="1" inputmode="numeric" value="1" required>
-          <p id="duration-note" class="duration-note"></p>
+          <input id="hosting-months" name="hosting_months" type="number" min="1" step="1" inputmode="numeric" value="1" aria-describedby="duration-note" required>
+          <p id="duration-note" class="duration-note" role="status" aria-live="polite"></p>
           <p id="lifetime-policy-note" class="policy-note" hidden>
             Lifetime là giá trọn gói, không cộng thêm giá mẫu. Gói này không cam kết website tồn tại nếu nền tảng hoặc nhà cung cấp ngừng hoạt động; không bao gồm bảo trì, chỉnh sửa hay thiết kế mới.
           </p>
@@ -52,7 +53,7 @@
             <input id="terms-confirm" type="checkbox">
             <span>Tôi đã kiểm tra nội dung và thời hạn hosting đã chọn.</span>
           </label>
-          <p class="policy-note">Thông tin chính sách hủy/hoàn tiền chưa được công bố. Không chuyển tiền thật; tính năng thanh toán Production chưa bật.</p>
+          <p class="policy-note">Chỉ thanh toán khi màn hình đơn hàng hiển thị thông tin nhận tiền. Thanh toán Production hiện chưa được bật.</p>
           <button id="submit-order" class="submit-order" type="submit" disabled>Tạo đơn hàng</button>
         </form>
       </section>
@@ -68,11 +69,14 @@
         <p id="tracking-help" class="tracking-help" hidden></p>
         <a id="publication-link" class="publication-link" hidden></a>
         <div id="qr-panel" class="qr-panel" hidden>
-          <img id="payment-qr" alt="Mã QR thanh toán thử nghiệm SePay">
+          <p id="payment-method" class="payment-method"></p>
+          <figure id="payment-qr-container" hidden>
+            <img id="payment-qr" alt="Mã QR chuyển khoản thử nghiệm">
+          </figure>
           <p id="qr-error" class="qr-error" role="status" aria-live="polite" hidden>
             Không tải được mã QR. Bạn vẫn có thể nhập thông tin chuyển khoản bên dưới.
           </p>
-          <p class="test-warning">Chỉ dùng tài khoản Test mode của SePay. Không quét mã này bằng tài khoản ngân hàng thật.</p>
+          <p id="transfer-safety-note" class="test-warning"></p>
           <dl class="transfer-details">
             <div><dt>Ngân hàng</dt><dd id="payment-bank">—</dd></div>
             <div>
@@ -95,7 +99,7 @@
           Chế độ mock không tạo mã QR hoặc giao dịch ngân hàng. Webhook kiểm thử được xác minh phía máy chủ.
         </p>
       </section>
-      <p class="footer-note">Chưa có thanh toán hoặc xuất bản Production. <a href="/account/websites/">Xem thiết kế và đơn hàng của bạn</a> · <a href="mailto:hello@crushify.love">Liên hệ hỗ trợ</a>.</p>
+      <p class="footer-note">Chưa có thanh toán hoặc xuất bản Production. <a href="/">Quay lại trang chủ</a> · <a href="/account/websites/">Xem thiết kế và đơn hàng của bạn</a> · <a href="mailto:hello@crushify.love">Liên hệ hỗ trợ</a>.</p>
     </section>
   </main>
 </body>

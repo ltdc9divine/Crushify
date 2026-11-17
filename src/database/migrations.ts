@@ -85,6 +85,10 @@ export async function applyMigrations(
 
     const transaction = await client.transaction("write");
     try {
+      const foreignKeys = await transaction.execute("PRAGMA foreign_keys");
+      if (Number(foreignKeys.rows[0]?.foreign_keys) !== 1) {
+        throw new Error("Migration transaction does not enforce foreign keys");
+      }
       await transaction.executeMultiple(migration.sql);
       await transaction.execute({
         sql: `INSERT INTO schema_migrations (version, name, checksum, applied_at)
@@ -113,7 +117,9 @@ export async function applyMigrations(
 export async function verifyMigrationSchema(
   client: Client,
   migrations: SqlMigration[],
+  onStage?: (stage: "build-expected-schema" | "read-schema" | "validate-schema") => void,
 ): Promise<void> {
+  onStage?.("build-expected-schema");
   const expected = new Set<string>();
   const declaration = /CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))/gi;
   for (const migration of migrations) {
@@ -123,11 +129,13 @@ export async function verifyMigrationSchema(
     }
   }
 
+  onStage?.("read-schema");
   const result = await client.execute(
     "SELECT type, name FROM sqlite_master " +
     "WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'",
   );
   const actual = new Set(result.rows.map((row) => `${String(row.type)}:${String(row.name)}`));
+  onStage?.("validate-schema");
   if (expected.size !== actual.size || [...expected].some((object) => !actual.has(object))) {
     throw new Error("Database tables and indexes do not match the applied migrations");
   }

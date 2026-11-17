@@ -1,6 +1,6 @@
 # Publication and Customer Delivery
 
-**Status:** implemented and integration-tested in local Worker/D1/R2 mode only. Publication mutations are deliberately disabled outside local test mode. This document does not record a staging or production deployment.
+**Status:** implemented and integration-tested locally. Source also allows publication mutations in Vercel Preview only behind the complete explicit customer-flow gate and an available storage adapter; Production mutations remain disabled. No Preview or Production deployment is verified by this document.
 
 ## 1. Publication flow
 
@@ -13,7 +13,7 @@ Owned design revision
   → template-specific renderer loads safe published data
 ```
 
-The current order/checkout prototype is limited to Our Universe and is local-only. Tests use synthetic order, payment, and processed-webhook rows in disposable local D1. No browser endpoint can set an order or payment to `PAID`, and no real payment provider or live transaction is involved.
+The order/checkout prototype is local-only and is not enabled for real payments. All five template pages have editor adapters and checkout navigation in source. Tests use synthetic order, payment, and processed-webhook rows in disposable local D1. No browser endpoint can set an order or payment to `PAID`, and no real payment provider or live transaction is involved.
 
 ## 2. Eligibility and lifecycle
 
@@ -31,7 +31,7 @@ The bounded lifecycle runner expires publications at the exact UTC boundary (`ex
 
 Original uploaded objects remain private. A media item is copied to a publication-specific derivative only when the customer explicitly consents to that asset. The API serves a derivative only while its publication is active, the related payment remains eligible, the source asset is ready, and consent has not been withdrawn.
 
-Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately deny public reads. Derivative/source deletion is tracked in D1; a failed deletion leaves cleanup pending and does not produce a success response for design deletion. The Cloudflare Worker retains a scheduled maintenance handler for rollback, but both Wrangler cron triggers are disabled. The Vercel Production Cron is the sole configured lifecycle schedule. Vercel Preview has no scheduled lifecycle. Its manual `POST /api/ops/staging/publication-lifecycle` requires a Preview-only `STAGING_LIFECYCLE_SECRET` (exactly 64 hexadecimal characters), independently generated from Production secrets; `CRON_SECRET` alone cannot authorize it. Although authorization remains isolated, the route returns `STORAGE_UNAVAILABLE` before database access because Preview has no approved durable media provider, so it performs no lifecycle mutation. Preview durable storage is unavailable until a separate staging provider is approved and configured. Local synthetic tests cover the route's fail-closed behavior and the unchanged local lifecycle retry/cleanup behavior; no deployed scheduler or manual lifecycle execution was verified.
+Unpublish, revoke, expiry, consent withdrawal, and design deletion immediately deny public reads. Derivative/source deletion is tracked in D1; a failed deletion leaves cleanup pending and does not produce a success response for design deletion. The Cloudflare Worker retains a scheduled maintenance handler for rollback, but both Wrangler cron triggers are disabled. The Vercel Production Cron is the sole configured lifecycle schedule. Vercel Preview has no scheduled lifecycle. Its manual `POST /api/ops/staging/publication-lifecycle` requires a Preview-only `STAGING_LIFECYCLE_SECRET` (exactly 64 hexadecimal characters), independently generated from Production secrets; `CRON_SECRET` alone cannot authorize it. The route also requires an available storage adapter and fails closed before database access when storage is unavailable. Preview storage is configuration-gated and its remote availability is unverified. Local synthetic tests cover the route's fail-closed behavior and the unchanged local lifecycle retry/cleanup behavior; no deployed scheduler or manual lifecycle execution was verified.
 
 When retention cleanup or customer-requested design deletion fails, the customer website list keeps the retained design visible with a cleanup-pending state. A draft with no protected financial/publication history can be retried by its owner; physical cleanup checkpoints each successfully removed source asset and archives/clears the draft only after cleanup completes. It is blocked while an order or fulfillment is in progress and while another active or retained publication references one of its assets.
 
@@ -53,13 +53,13 @@ A customer deletion request for a design with a paid/refunded order, publication
 - `/account/websites/`: customer dashboard with consent selection and lifecycle actions.
 - `POST /api/ops/staging/publication-lifecycle`: Preview-only operator lifecycle trigger; not a customer or generic database-mutation API.
 
-All publication mutations require `LOCAL_TEST_MODE=true` and an unset or `local` `ENVIRONMENT`. Otherwise the API returns `PUBLICATION_DISABLED`. The customer dashboard is not evidence that a remote publishing service is enabled.
+Publication mutations are enabled for local test mode or for Vercel Preview only when `ENVIRONMENT=staging` and `PREVIEW_CUSTOMER_FLOW_ENABLED=true`; they also require an available storage adapter. Production and other runtimes remain disabled. The customer dashboard and source gate are not evidence that a remote publishing service is configured or enabled.
 
 ## 5. Template integration boundary
 
 All five templates have schema-v1 server validators, safe public-data conversion, and renderer-version mappings. Each existing template page loads the shared publication bootstrap but retains its own CSS, JavaScript, and scene. The bootstrap fetches current publication data before hydrating the page; it does not trust stale browser session state.
 
-Only Our Universe currently uses server-backed customer authentication, draft save/reload, private image upload, and bearer preview. The other four editors still rely on their existing browser-side authoring/persistence flows; their editor changes and photos are not saved to these APIs. Recipient rendering support must not be presented as complete commerce-ready creator support.
+All five template editors are connected in source to customer authentication, owner-scoped draft save/reload, private preview, and checkout navigation. Our Universe has its own adapter; Love Letter, Our Memories, Say Yes, and Distance Means Nothing register adapters with the shared customer-editor module. Photo-capable editors also serialize private media through the shared asset APIs. This is source-level capability, not evidence that a Vercel Preview is configured or that the customer journey has been remotely deployed and verified. Publication and checkout remain independently gated by runtime policy.
 
 ## 6. Verification and remaining work
 
@@ -69,7 +69,7 @@ The local browser check returned 200 for the homepage and all five template path
 
 Still required before staging/commercial delivery:
 
-- Connect all four remaining editors to server-backed save/reload, uploads, and preview.
+- Verify the five editor adapters end-to-end against the isolated Preview runtime; local source wiring does not prove deployment-level authentication, media, or browser behavior.
 - Configure and validate isolated staging D1/R2 and deploy a staging Worker; no remote resource was used for this implementation.
 - Test external-device delivery, real storage, expiry/retry operations, security headers/logging, accessibility, reduced motion, and physical mobile devices.
-- Approve product pricing, terms, privacy/retention, support, and payment-provider operations. No production checkout or publication should be enabled before these gates pass.
+- Approve terms, privacy/retention, support, custom-service scope/pricing, and payment-provider operations. Standard-template prices are defined in `src/product-catalog.ts`; no production checkout or publication should be enabled before the remaining gates pass.

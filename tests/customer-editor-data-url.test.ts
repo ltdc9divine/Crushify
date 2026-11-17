@@ -30,14 +30,21 @@ describe("customer editor data URL images", () => {
     assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [...bytes]);
   });
 
-  it("leaves non-data URLs to the normal fetch path", async () => {
+  it("returns null for arbitrary URLs instead of treating them as upload data", async () => {
     const parse = await loadDataImageParser();
     assert.equal(parse("blob:https://example.test/image-id"), null);
+    assert.equal(parse("https://example.test/photo.jpg"), null);
   });
 
   it("rejects unsupported or malformed data URLs", async () => {
     const parse = await loadDataImageParser();
     assert.throws(() => parse("data:image/svg+xml;base64,PHN2Zy8+"), /Ảnh dữ liệu/);
     assert.throws(() => parse("data:image/jpeg;base64,%%%"), /Ảnh dữ liệu/);
+  });
+
+  it("rejects data URLs larger than the 5 MiB upload limit", async () => {
+    const parse = await loadDataImageParser();
+    const oversized = Buffer.alloc(5 * 1024 * 1024 + 1).toString("base64");
+    assert.throws(() => parse(`data:image/jpeg;base64,${oversized}`), /vượt quá 5 MB/);
   });
 });

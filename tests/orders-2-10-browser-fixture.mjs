@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +10,7 @@ const root = process.cwd();
 const origin = "http://127.0.0.1:8799";
 const controlServer = createServer();
 const persistDirectory = await mkdtemp(join(tmpdir(), "crushify-orders-2-10-"));
+const wranglerConfig = join(persistDirectory, "wrangler.browser.jsonc");
 const emailSink = await createLocalEmailSink();
 const wrangler = "node_modules/wrangler/bin/wrangler.js";
 const templates = new Set([
@@ -37,6 +37,7 @@ function startWorker() {
   worker = spawn(process.execPath, [
     wrangler,
     "dev",
+    "--config", wranglerConfig,
     "--ip", "127.0.0.1",
     "--port", "8799",
     "--local-protocol", "http",
@@ -66,7 +67,7 @@ async function prepareSyntheticLogin() {
   const requested = await fetch(`${origin}/api/v1/customers/session`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: `orders-2-10-${randomUUID()}@example.test` }),
+    body: JSON.stringify({ email: "orders-2-10-admin@example.test" }),
   });
   if (requested.status !== 202) throw new Error(`Synthetic sign-in request returned ${requested.status}`);
   if (/magic_token=/.test(logs)) throw new Error("Magic link was unexpectedly written to Worker logs");
@@ -101,9 +102,37 @@ async function cleanup() {
 }
 
 try {
+  await writeFile(wranglerConfig, JSON.stringify({
+    name: "crushify-browser-fixture",
+    main: join(root, "src", "index.ts"),
+    compatibility_date: "2025-11-01",
+    workers_dev: false,
+    assets: {
+      directory: root,
+      binding: "ASSETS",
+      run_worker_first: ["/api/*"],
+      not_found_handling: "none",
+    },
+    vars: {
+      DATABASE_PROVIDER: "d1",
+      STORAGE_PROVIDER: "r2",
+      ADMIN_EMAILS: "orders-2-10-admin@example.test",
+    },
+    d1_databases: [{
+      binding: "DB",
+      database_name: "crushify-local",
+      database_id: "00000000-0000-4000-8000-000000000001",
+      migrations_dir: join(root, "migrations"),
+    }],
+    r2_buckets: [{
+      binding: "MEDIA",
+      bucket_name: "crushify-media-local",
+    }],
+  }, null, 2));
   execFileSync(process.execPath, [
     wrangler,
     "d1", "migrations", "apply", "crushify-local", "--local",
+    "--config", wranglerConfig,
     "--persist-to", persistDirectory,
   ], { cwd: root, stdio: ["ignore", "ignore", "pipe"] });
   startWorker();

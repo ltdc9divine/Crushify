@@ -321,6 +321,13 @@ export async function runDatabaseContract({
   });
   assert.equal(previewWithPhoto.response.status, 200, `${label}: preview new revision`);
   assert.equal(previewWithPhoto.body.data.photos[0].caption, "Kỷ niệm");
+  assert.equal(
+    previewWithPhoto.body.data.photos[0].url,
+    `/api/v1/previews/assets/${grant.body.asset_id}`,
+    `${label}: preview exposes media through its scoped capability URL`,
+  );
+  assert.equal(previewWithPhoto.body.data.photos[0].asset_id, undefined,
+    `${label}: preview does not expose private asset identifiers`);
   const sharedPreviewWithPhoto = await request("/previews", other, {
     token: refreshedPreview.body.token,
   });

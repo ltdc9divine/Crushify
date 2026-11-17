@@ -1,6 +1,6 @@
 # Shared Template Engine
 
-**Status:** all five publication validators, recipient payload adapters, shared customer editor controls, server-backed draft/preview adapters, and publication bootstrap are wired. Customer draft APIs, payment, and publication are local-test only. The shared catalog exposes all five standard designs and approved prices; checkout authorization remains separate and is disabled in Production and Preview.
+**Status:** all five publication validators, recipient payload adapters, shared customer editor controls, server-backed draft/preview adapters, and publication bootstrap are wired. Local synthetic flows are tested; the source also has a separately gated Vercel Preview path. Production checkout and publication mutations remain disabled. The shared catalog exposes all five standard designs and approved prices; checkout authorization is disabled in Production and by default in Preview.
 **Goal:** share services/data lifecycle while keeping five distinct visual experiences.
 
 ## 1. Current state and gaps
@@ -15,7 +15,7 @@ The gallery links to five independent HTML applications; some CSS/JS are inline 
 | `say-yes` | Proposal editor, YES/NO interactions, local image selection and 2D fallback. | Schema-v1 draft save/restore, photo upload and bearer-token preview through the shared customer tools. Three.js CDN fallback includes a vendor path not present in the repository. |
 | `distance-means-nothing` | Names, dates, time-zone clocks/countdown/distance editor and 3D/2D scene; no image upload. | Schema-v1 draft save/restore and bearer-token preview through the shared customer tools. Existing hash-based sharing remains separate. Three.js 0.160.0, addon modules and fonts depend on external CDN/import-map hosts. |
 
-The registry validates and converts recipient data for all five templates, and each template's own page loads the published payload through the shared bootstrap without merging its CSS, JavaScript, or 3D scene. Shared server-backed editing, authentication, preview and checkout navigation exist for all five in local Worker mode. The approved standard price is 59,000 VND including the first month, plus 10,000 VND per additional month, or 199,000 VND Lifetime. Production and Preview checkout remain disabled independently of catalog visibility. Browser checks establish local behavior, not production-scale reliability, physical-device behavior, CDN-failure resilience, or commercial readiness. No template uses webcam/camera capture.
+The registry validates and converts recipient data for all five templates, and each template's own page loads the published payload through the shared bootstrap without merging its CSS, JavaScript, or 3D scene. Shared server-backed editing, authentication, preview and checkout navigation exist for all five in source. The approved standard price is 59,000 VND including the first month, plus 10,000 VND per additional month, or 199,000 VND Lifetime. Production checkout is disabled; Preview checkout is disabled by default and requires the complete explicit isolation gate. Browser checks establish local behavior, not production-scale reliability, physical-device behavior, CDN-failure resilience, or commercial readiness. No template uses webcam/camera capture.
 
 ## 2. Per-template manifest contract
 
@@ -69,7 +69,7 @@ interface PublishingService {
 }
 ```
 
-API contracts in [API_SPECIFICATION.md](API_SPECIFICATION.md) are authoritative. Draft/asset/preview interfaces are not fully adopted by the four non-Universe editors; publication APIs and recipient adapters are present but fail closed outside local test mode.
+API contracts in [API_SPECIFICATION.md](API_SPECIFICATION.md) are authoritative. All five template pages have editor adapters in source: Our Universe uses its own API client, while the other four register with `shared/customer-editor.js` for draft save/reload, private preview, and checkout navigation. Photo-capable templates serialize media through the shared asset APIs. These are local/source capabilities; deployed customer flows and production checkout/publication remain unverified or gated.
 
 ## 4. Schema validation and compatibility
 
@@ -95,7 +95,7 @@ Templates store only references such as `{ asset_id, caption, position }`. Durin
 
 1. **Done locally:** inventory/default data, canonical IDs, schema-v1 validators and fixtures for all five templates.
 2. **Done for recipient path:** safe payload conversion, consented media URLs, and template-specific hydration through the shared publication bootstrap.
-3. **Partial:** Our Universe has local Worker autosave/restore/upload/preview; remaining four editor adapters are not connected to backend drafts or uploads.
+3. **Implemented in source/local flows:** Our Universe has its own Worker API integration; Love Letter, Our Memories, Say Yes, and Distance Means Nothing register shared customer-editor adapters. Draft save/reload and private preview are supported; asset upload is used by photo-capable templates. Deployment and cross-device behavior still require verification.
 4. **Local test only:** paid-order-gated publication lifecycle and customer websites dashboard; no production payment, price catalog, or remote publishing service.
 5. **Still required:** cross-template editor save/reload/upload, deployed staging flow, and browser/accessibility/device QA before purchase activation.
 
@@ -106,4 +106,4 @@ Templates store only references such as `{ asset_id, caption, position }`. Durin
 - Recipient sees only the purchased/published revision; unlisted draft IDs/tokens do not reveal content.
 - A template-specific visual or animation change cannot silently alter another template; shared service tests run across all five.
 
-Current status: schema validation, recipient payload handling and local publication lifecycle tests cover all five templates. The all-template creator reload criterion is not met; only Our Universe currently uses the server draft/upload APIs, and no remote deployment has been tested.
+Current status: schema validation, recipient payload handling, and editor adapters cover all five templates in source. Local tests do not establish remote deployment, provider readiness, or cross-device browser behavior; those remain release gates.

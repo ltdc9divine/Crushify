@@ -4,13 +4,20 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { createClient, type Client } from "@libsql/client";
+import qrcode from "qrcode-generator";
 import type { Database, DatabaseStatement } from "../src/database.ts";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
 import { handleApiRequest } from "../src/index.ts";
 import { reconcileUploadAttemptCleanup } from "../src/assets.ts";
 import { createVercelApiHandler } from "../src/platform/vercel.ts";
-import { handleFulfillmentForOrder, runPublicationLifecycle } from "../src/publications.ts";
+import {
+  cleanupAssets,
+  handleFulfillmentForOrder,
+  recoverPendingFulfillments,
+  reconcilePublicationDerivativeCleanup,
+  runPublicationLifecycle,
+} from "../src/publications.ts";
 import { runScheduledPublicationLifecycle } from "../src/scheduler.ts";
 import type { Storage, StorageObject } from "../src/storage.ts";
 
@@ -35,19 +42,51 @@ class PausableDatabase implements Database {
     entered: ReturnType<typeof deferred>;
     released: ReturnType<typeof deferred>;
   } | null = null;
+  private runGate: {
+    query: string;
+    entered: ReturnType<typeof deferred>;
+    released: ReturnType<typeof deferred>;
+  } | null = null;
 
   constructor(inner: Database) {
     this.inner = inner;
   }
 
   prepare(query: string): DatabaseStatement {
-    return this.inner.prepare(query);
+    if (!this.runGate || !query.includes(this.runGate.query)) {
+      return this.inner.prepare(query);
+    }
+    return this.wrapStatement(query, this.inner.prepare(query));
+  }
+
+  private wrapStatement(query: string, statement: DatabaseStatement): DatabaseStatement {
+    return {
+      bind: (...values) => this.wrapStatement(query, statement.bind(...values)),
+      first: (columnName) => statement.first(columnName),
+      all: () => statement.all(),
+      run: async () => {
+        const gate = this.runGate;
+        if (gate && query.includes(gate.query)) {
+          this.runGate = null;
+          gate.entered.resolve();
+          await gate.released.promise;
+        }
+        return statement.run();
+      },
+    };
   }
 
   pauseNextBatch() {
     const entered = deferred();
     const released = deferred();
     this.batchGate = { entered, released };
+    return { entered: entered.promise, release: released.resolve };
+  }
+
+  pauseNextRun(query: string) {
+    const entered = deferred();
+    const released = deferred();
+    this.runGate = { query, entered, released };
     return { entered: entered.promise, release: released.resolve };
   }
 
@@ -68,10 +107,18 @@ function createRaceStorage(options: {
   afterGet?: () => Promise<void>;
   beforeDelete?: (key: string) => Promise<void>;
   beforeDerivative?: (key: string) => Promise<void>;
+  afterDerivative?: (key: string) => Promise<void>;
+  beforeDerivativeGet?: (key: string) => Promise<void>;
+  derivativeGetFailures?: number;
+  beforeDerivativeDelete?: (key: string) => Promise<void>;
+  afterDerivativeDelete?: (key: string) => Promise<void>;
   sourceDeleteFailures?: number;
+  derivativeDeleteFailures?: number;
 } = {}): { storage: Storage; objects: Map<string, Uint8Array> } {
   const objects = new Map<string, Uint8Array>();
   let sourceDeleteFailures = options.sourceDeleteFailures ?? 0;
+  let derivativeGetFailures = options.derivativeGetFailures ?? 0;
+  let derivativeDeleteFailures = options.derivativeDeleteFailures ?? 0;
   const asObject = async (key: string): Promise<StorageObject | null> => {
     const bytes = objects.get(key);
     if (!bytes) return null;
@@ -105,9 +152,25 @@ function createRaceStorage(options: {
       const bytes = objects.get(source);
       if (!bytes) throw new Error("Source asset is missing");
       objects.set(derivative, new Uint8Array(bytes));
+      await options.afterDerivative?.(derivative);
     },
-    getPublishedDerivative: asObject,
-    async deletePublishedDerivative(key) { objects.delete(key); },
+    async getPublishedDerivative(key) {
+      await options.beforeDerivativeGet?.(key);
+      if (derivativeGetFailures > 0) {
+        derivativeGetFailures--;
+        throw new Error("Injected derivative lookup failure");
+      }
+      return asObject(key);
+    },
+    async deletePublishedDerivative(key) {
+      await options.beforeDerivativeDelete?.(key);
+      if (derivativeDeleteFailures > 0) {
+        derivativeDeleteFailures--;
+        throw new Error("Injected derivative cleanup failure");
+      }
+      objects.delete(key);
+      await options.afterDerivativeDelete?.(key);
+    },
   };
   return { storage, objects };
 }
@@ -270,6 +333,23 @@ async function createFixture(
   const data = String(template.rows[0]?.default_data_json);
   const lifetime = options.lifetime ?? false;
   const planId = lifetime ? "lifetime" : "1-month";
+  const evidenceSchema = await client.execute(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'payment_settlement_evidence'",
+  );
+  const settlementEvidenceStatements = evidenceSchema.rows.length === 1
+    ? [{
+      sql: `INSERT INTO payment_settlement_evidence (
+              id, payment_id, provider, evidence_source, source_transaction_id,
+              amount_minor, currency, verified_at, payload_hash, status, created_at
+            )
+            SELECT ?, p.id, p.provider, 'SEPAY_WEBHOOK', p.provider_payment_id,
+              p.amount_minor, p.currency, e.processed_at, e.payload_hash, 'VERIFIED', e.processed_at
+            FROM payments p JOIN payment_webhook_events e
+              ON e.provider = p.provider AND e.event_id = p.provider_payment_id
+            WHERE p.order_id = ?`,
+      args: [id(), orderId],
+    }]
+    : [];
   if (!options.customerId) {
     await client.execute({
       sql: `INSERT INTO customers (id, email, email_normalized, status, created_at, updated_at)
@@ -326,11 +406,14 @@ async function createFixture(
     },
     {
       sql: `INSERT INTO payment_webhook_events (
-              id, provider, event_id, payload_hash, received_at, processed_at, outcome, raw_payload
-            ) SELECT ?, 'SEPAY', provider_payment_id, ?, ?, ?, 'PROCESSED', '{}'
+              id, provider, event_id, payload_hash, received_at, processed_at, outcome,
+              raw_payload, provider_transaction_id, actual_amount_minor
+            ) SELECT ?, 'SEPAY', provider_payment_id, ?, ?, ?, 'PROCESSED', '{}',
+                     provider_payment_id, amount_minor
               FROM payments WHERE order_id = ?`,
       args: [id(), "b".repeat(64), now, now, orderId],
     },
+    ...settlementEvidenceStatements,
     {
       sql: `INSERT INTO publications (
               id, design_id, order_id, published_revision, template_id, schema_version, renderer_version,
@@ -400,6 +483,25 @@ async function createFixture(
             ) VALUES (?, ?, ?, ?, 'public-image-v1', ?, ?, 'READY', ?, ?)`,
       args: [publicationAssetId, publicationId, assetId, customerId, now, derivativeKey, now, now],
     });
+    const derivativeOperations = await client.execute(
+      `SELECT 1 FROM sqlite_master
+       WHERE type = 'table' AND name = 'publication_derivative_operations'`,
+    );
+    if (derivativeOperations.rows.length === 1) {
+      await client.execute({
+        sql: `INSERT INTO publication_derivative_operations (
+                id, publication_asset_id, publication_id, derivative_key, status, operation_token,
+                operation_lease_expires_at, next_cleanup_at, provider_create_succeeded_at,
+                created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?, ?)`,
+        args: [
+          `fixture-derivative-${publicationAssetId}`, publicationAssetId, publicationId, derivativeKey,
+          `fixture-derivative-token-${publicationAssetId}`,
+          new Date(Date.parse(now) + 15 * 60_000).toISOString(),
+          new Date(Date.parse(now) + 60 * 60_000).toISOString(), now, now, now,
+        ],
+      });
+    }
     return {
       customerId, designId, orderId, publicationId, publicationAssetId, assetId, slug,
       sourceKey, derivativeKey, extraOrderId,
@@ -559,9 +661,20 @@ async function createOrderSnapshot(
     await client.batch([
       {
         sql: `INSERT INTO payment_webhook_events (
-                id, provider, event_id, payload_hash, received_at, processed_at, outcome, raw_payload
-              ) VALUES (?, 'SEPAY', ?, ?, ?, ?, 'PROCESSED', '{}')`,
-        args: [id(), transactionId, "f".repeat(64), now, now],
+                id, provider, event_id, payload_hash, received_at, processed_at,
+                outcome, raw_payload, provider_transaction_id, actual_amount_minor
+              ) VALUES (?, 'SEPAY', ?, ?, ?, ?, 'PROCESSED', '{}', ?, 1000)`,
+        args: [id(), transactionId, "f".repeat(64), now, now, transactionId],
+      },
+      {
+        sql: `INSERT INTO payment_settlement_evidence (
+                id, payment_id, provider, evidence_source, source_transaction_id,
+                amount_minor, currency, verified_at, payload_hash, status, created_at
+              )
+              SELECT ?, id, provider, 'SEPAY_WEBHOOK', provider_payment_id,
+                amount_minor, currency, ?, ?, 'VERIFIED', ?
+              FROM payments WHERE id = ?`,
+        args: [id(), now, "f".repeat(64), now, paymentId],
       },
       {
         sql: `INSERT INTO fulfillment_jobs (id, order_id, status, next_attempt_at, created_at, updated_at)
@@ -674,7 +787,239 @@ function deletionContext(
   };
 }
 
+describe("published website QR codes", () => {
+  it("encodes only the canonical URL and denies unavailable or non-owned publications", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const env = {
+      DB: adapter,
+      ENVIRONMENT: "local",
+      LOCAL_TEST_MODE: "true",
+      APP_ORIGIN: "https://crushify.test",
+    } as Parameters<typeof handleApiRequest>[1];
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const published = await createFixture(client, { expiresAt: null });
+      const ownerSession = await createSession(client, published.customerId);
+      const qrResponse = await assetRequest(
+        env, ownerSession, `/publications/${published.publicationId}/qr.svg`, { method: "GET" },
+      );
+      assert.equal(qrResponse.status, 200);
+      assert.match(qrResponse.headers.get("content-type") ?? "", /^image\/svg\+xml/);
+      assert.equal(qrResponse.headers.get("cache-control"), "private, no-store");
+      const expectedCode = qrcode(0, "H");
+      expectedCode.addData(`https://crushify.test/p/${published.slug}`);
+      expectedCode.make();
+      assert.equal(
+        await qrResponse.text(),
+        expectedCode.createSvgTag({ cellSize: 8, margin: 4, scalable: true }),
+      );
+
+      const unpublished = await createFixture(client, {
+        status: "UNPUBLISHED",
+        expiresAt: null,
+      });
+      const unpublishedSession = await createSession(client, unpublished.customerId);
+      const unpublishedQr = await assetRequest(
+        env, unpublishedSession, `/publications/${unpublished.publicationId}/qr.svg`, { method: "GET" },
+      );
+      assert.equal(unpublishedQr.status, 404);
+
+      const stranger = await createFixture(client, { expiresAt: null });
+      const strangerSession = await createSession(client, stranger.customerId);
+      const crossCustomerQr = await assetRequest(
+        env, strangerSession, `/publications/${published.publicationId}/qr.svg`, { method: "GET" },
+      );
+      assert.equal(crossCustomerQr.status, 404);
+
+      await client.execute(
+        `UPDATE payment_settlement_evidence SET status = 'REVOKED'
+         WHERE payment_id = (SELECT id FROM payments WHERE order_id = ?)`,
+        [published.orderId],
+      );
+      const invalidEvidenceQr = await assetRequest(
+        env, ownerSession, `/publications/${published.publicationId}/qr.svg`, { method: "GET" },
+      );
+      assert.equal(invalidEvidenceQr.status, 404);
+
+      const unauthenticatedQr = await handleApiRequest(
+        new Request(`https://crushify.test/api/v1/publications/${published.publicationId}/qr.svg`),
+        env,
+      );
+      assert.equal(unauthenticatedQr.status, 401);
+    } finally {
+      client.close();
+    }
+  });
+});
+
 describe("publication expiration lifecycle", () => {
+  it("blocks fulfillment recovery and public reads when settlement evidence is missing or invalid", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createStorage({ derivative: 0, source: 0 });
+    const env = {
+      DB: adapter,
+      STORAGE: storage,
+      ENVIRONMENT: "local",
+      LOCAL_TEST_MODE: "true",
+      PAYMENT_MODE: "mock",
+      APP_ORIGIN: "https://crushify.test",
+    } as Parameters<typeof handleFulfillmentForOrder>[0];
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const published = await createFixture(client, { expiresAt: null });
+
+      for (const invalidation of [
+        "missing",
+        "revoked",
+        "mismatched",
+        "wrong-payment",
+        "contradictory",
+      ] as const) {
+        const fixture = await createDraftFixture(client);
+        const order = await createOrderSnapshot(client, fixture, { paid: true });
+        if (invalidation === "missing") {
+          await client.execute(
+            `DELETE FROM payment_settlement_evidence
+             WHERE payment_id = (SELECT id FROM payments WHERE order_id = ?)`,
+            [order.orderId],
+          );
+        } else if (invalidation === "revoked") {
+          await client.execute(
+            `UPDATE payment_settlement_evidence SET status = 'REVOKED'
+             WHERE payment_id = (SELECT id FROM payments WHERE order_id = ?)`,
+            [order.orderId],
+          );
+        } else if (invalidation === "mismatched") {
+          await client.execute(
+            `UPDATE payment_settlement_evidence SET amount_minor = amount_minor + 1
+             WHERE payment_id = (SELECT id FROM payments WHERE order_id = ?)`,
+            [order.orderId],
+          );
+        } else if (invalidation === "contradictory") {
+          await client.execute(
+            `UPDATE payment_webhook_events SET review_reason = 'Conflicting event'
+             WHERE provider = 'SEPAY'
+               AND provider_transaction_id = ?`,
+            [order.transactionId],
+          );
+        } else {
+          await client.execute(
+            `UPDATE payment_settlement_evidence
+             SET payment_id = (SELECT id FROM payments WHERE order_id = ?)
+             WHERE payment_id = (SELECT id FROM payments WHERE order_id = ?)`,
+            [published.orderId, order.orderId],
+          );
+        }
+
+        const direct = await handleFulfillmentForOrder(env, order.orderId, NOW);
+        assert.equal(direct.completed, false, `${invalidation}: direct fulfillment is blocked`);
+        const recovery = await recoverPendingFulfillments(env, 10, NOW);
+        assert.equal(recovery.attempted, 0, `${invalidation}: scheduler recovery is blocked`);
+        const session = await createSession(client, fixture.customerId);
+        const statusResponse = await assetRequest(
+          env,
+          session,
+          `/orders/${order.orderId}/status`,
+          { method: "GET" },
+        );
+        const status = await statusResponse.json() as {
+          status: string;
+          payment: { status: string };
+        };
+        assert.equal(status.status, "MANUAL_REVIEW", `${invalidation}: unverified payment is reported blocked`);
+        assert.equal(status.payment.status, "MANUAL_REVIEW");
+        const state = await client.execute(
+          `SELECT o.status AS order_status, job.status AS job_status
+           FROM orders o JOIN fulfillment_jobs job ON job.order_id = o.id WHERE o.id = ?`,
+          [order.orderId],
+        );
+        assert.deepEqual(state.rows[0], { order_status: "PAID", job_status: "PENDING" });
+      }
+
+      await client.execute(
+        `UPDATE payment_settlement_evidence SET status = 'REVOKED'
+         WHERE payment_id = (SELECT id FROM payments WHERE order_id = ?)`,
+        [published.orderId],
+      );
+      const publicRead = await handleApiRequest(
+        new Request(`https://crushify.test/api/v1/publications/${published.slug}`),
+        env,
+      );
+      assert.equal(publicRead.status, 404, "revoked evidence denies an existing public page");
+
+      const pairedFixture = await createDraftFixture(client);
+      const pairedOrder = await createOrderSnapshot(client, pairedFixture, { paid: true });
+      await client.execute(
+        `INSERT INTO sepay_api_observations (
+           transaction_uuid, bank_account_id, transaction_date, transfer_type,
+           amount_in, amount_out, payload_hash, scan_type, status, reason_code,
+           payment_id, first_observed_at, last_observed_at
+         )
+         SELECT ?, 'f9e8d7c6-b5a4-3210-fedc-ba0987654321', ?, 'in',
+                amount_minor, 0, ?, 'DATE_WINDOW', 'MANUAL_REVIEW',
+                'TEST_ONLY', id, ?, ?
+         FROM payments WHERE order_id = ?`,
+        [randomUUID(), NOW, "a".repeat(64), NOW, NOW, pairedOrder.orderId],
+      );
+      const pairedEvidenceFulfillment = await handleFulfillmentForOrder(env, pairedOrder.orderId, NOW);
+      assert.equal(pairedEvidenceFulfillment.completed, true,
+        "a valid webhook remains authoritative when an API observation is also recorded");
+
+      const apiFixture = await createDraftFixture(client);
+      const apiOrder = await createOrderSnapshot(client, apiFixture, { paid: true });
+      await client.execute(
+        `INSERT INTO sepay_api_observations (
+           transaction_uuid, bank_account_id, transaction_date, transfer_type,
+           amount_in, amount_out, payload_hash, scan_type, status, reason_code,
+           payment_id, first_observed_at, last_observed_at
+         )
+         SELECT ?, 'f9e8d7c6-b5a4-3210-fedc-ba0987654321', ?, 'in',
+                amount_minor, 0, ?, 'DATE_WINDOW', 'MANUAL_REVIEW',
+                'TEST_ONLY', id, ?, ?
+         FROM payments WHERE order_id = ?`,
+        [randomUUID(), NOW, "a".repeat(64), NOW, NOW, apiOrder.orderId],
+      );
+      await client.execute(
+        `DELETE FROM payment_settlement_evidence
+         WHERE payment_id = (SELECT id FROM payments WHERE order_id = ?)`,
+        [apiOrder.orderId],
+      );
+      await client.execute(
+        "UPDATE payments SET provider_payment_id = NULL WHERE order_id = ?",
+        [apiOrder.orderId],
+      );
+      await client.execute(
+        `DELETE FROM payment_webhook_events
+         WHERE provider = 'SEPAY' AND provider_transaction_id = ?`,
+        [apiOrder.transactionId],
+      );
+      const apiOnlyFulfillment = await handleFulfillmentForOrder(env, apiOrder.orderId, NOW);
+      assert.equal(apiOnlyFulfillment.completed, false,
+        "an API v2 observation cannot authorize fulfillment without webhook evidence");
+      const apiOnlyRecovery = await recoverPendingFulfillments(env, 10, NOW);
+      assert.equal(apiOnlyRecovery.attempted, 0,
+        "recovery cannot authorize API-only evidence");
+      const apiOnlyArtifacts = await client.execute(
+        `SELECT o.status AS order_status, job.status AS job_status,
+                (SELECT COUNT(*) FROM publications WHERE order_id = o.id) AS publications
+         FROM orders o JOIN fulfillment_jobs job ON job.order_id = o.id
+         WHERE o.id = ?`,
+        [apiOrder.orderId],
+      );
+      assert.deepEqual(apiOnlyArtifacts.rows[0], {
+        order_status: "PAID",
+        job_status: "PENDING",
+        publications: 0,
+      });
+    } finally {
+      client.close();
+    }
+  });
+
   it("expires exact-boundary rows in bounded batches and leaves future and lifetime rows active", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -837,10 +1182,12 @@ describe("publication expiration lifecycle", () => {
         "https://crushify.test/api/cron/publication-lifecycle",
         { headers: { Authorization: `Bearer ${secret}` } },
       ));
-      assert.equal(firstResponse.status, 200);
+      assert.equal(firstResponse.status, 202,
+        "maintenance reports partial work rather than a success-shaped response");
       const firstResult = await firstResponse.json() as {
         acquired: boolean;
         failed: boolean;
+        pending: boolean;
         expired: number;
         erased: number;
         retryable: number;
@@ -848,10 +1195,24 @@ describe("publication expiration lifecycle", () => {
           fulfillmentRecovery: { status: string; result?: { attempted: number; completed: number } };
           publicationLifecycle: { status: string };
           uploadCleanup: { status: string; result?: { preserved: number } };
+          publicationDerivativeCleanup: {
+            status: string;
+            result?: {
+              status: string;
+              processed: number;
+              cleaned: number;
+              pending: number;
+              deferred: number;
+              retryable: number;
+              manualReview: number;
+              hasMore: boolean;
+            };
+          };
         };
       };
       assert.equal(firstResult.acquired, true);
       assert.equal(firstResult.failed, false);
+      assert.equal(firstResult.pending, true);
       assert.deepEqual(
         { expired: firstResult.expired, erased: firstResult.erased, retryable: firstResult.retryable },
         { expired: 1, erased: 0, retryable: 1 },
@@ -867,6 +1228,17 @@ describe("publication expiration lifecycle", () => {
       assert.equal(firstResult.operations.publicationLifecycle.status, "completed");
       assert.equal(firstResult.operations.uploadCleanup.status, "completed");
       assert.equal(firstResult.operations.uploadCleanup.result?.preserved, 1);
+      assert.equal(firstResult.operations.publicationDerivativeCleanup.status, "completed");
+      assert.deepEqual(firstResult.operations.publicationDerivativeCleanup.result, {
+        status: "deferred",
+        processed: 0,
+        cleaned: 0,
+        pending: 0,
+        deferred: 1,
+        retryable: 0,
+        manualReview: 0,
+        hasMore: false,
+      });
       assert.equal(connections, 1);
       assert.equal((await client.execute(
         "SELECT status FROM fulfillment_jobs WHERE order_id = ?",
@@ -898,14 +1270,21 @@ describe("publication expiration lifecycle", () => {
       );
       assert.equal(activeResponse.status, 200, await activeResponse.clone().text());
 
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET next_cleanup_at = '2000-01-01T00:00:00.000Z'
+         WHERE publication_id = ? AND status = 'CLEANUP_PENDING'`,
+        [retrying.publicationId],
+      );
       const sourceRetry = await handler(new Request(
         "https://crushify.test/api/cron/publication-lifecycle",
         { headers: { Authorization: `Bearer ${secret}` } },
       ));
-      assert.equal(sourceRetry.status, 200);
+      assert.equal(sourceRetry.status, 202);
       const sourceRetryResult = await sourceRetry.json() as typeof firstResult;
       assert.equal(sourceRetryResult.acquired, true);
       assert.equal(sourceRetryResult.failed, false);
+      assert.equal(sourceRetryResult.pending, true);
       assert.deepEqual(
         {
           expired: sourceRetryResult.expired,
@@ -922,10 +1301,12 @@ describe("publication expiration lifecycle", () => {
         "https://crushify.test/api/cron/publication-lifecycle",
         { headers: { Authorization: `Bearer ${secret}` } },
       ));
-      assert.equal(completed.status, 200);
+      assert.equal(completed.status, 200,
+        "known provider success and verified cleanup leave no future tombstone work");
       const completedResult = await completed.json() as typeof firstResult;
       assert.equal(completedResult.acquired, true);
       assert.equal(completedResult.failed, false);
+      assert.equal(completedResult.pending, false);
       assert.deepEqual(
         {
           expired: completedResult.expired,
@@ -1384,12 +1765,12 @@ describe("publication expiration lifecycle", () => {
         "owner can inspect a publication while lifecycle cleanup is pending");
       const sourceFailure = await runPublicationLifecycle(env, {
         limit: 10,
-        now: cleanupNow,
+        now: new Date(cleanupNow.getTime() + 3 * 60_000),
       });
       assert.equal(sourceFailure.retryable, 1);
       const completed = await runPublicationLifecycle(env, {
         limit: 10,
-        now: cleanupNow,
+        now: new Date(cleanupNow.getTime() + 60 * 60_000),
       });
       assert.equal(completed.erased, 1);
       const erased = await client.execute({
@@ -1406,6 +1787,1906 @@ describe("publication expiration lifecycle", () => {
       assert.equal(erased.rows[0]?.derivative_key, null);
       assert.equal(erased.rows[0]?.snapshot_json, "{}");
       assert.equal(erased.rows[0]?.retention_delete_after_at, null);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("does not delete a derivative when republish wins during unpublish cleanup", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const deleteStarted = deferred();
+    const releaseDelete = deferred();
+    const storage = createRaceStorage({
+      beforeDerivativeDelete: async () => {
+        deleteStarted.resolve();
+        await releaseDelete.promise;
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      const snapshot = await client.execute(
+        "SELECT snapshot_json FROM publications WHERE id = ?",
+        [fixture.publicationId],
+      );
+      const publicationData = JSON.parse(String(snapshot.rows[0]?.snapshot_json)) as {
+        data: Record<string, unknown>;
+      };
+      publicationData.data.photos = [{ asset_id: fixture.assetId, caption: "Race" }];
+      await client.execute(
+        "UPDATE publications SET snapshot_json = ? WHERE id = ?",
+        [JSON.stringify(publicationData), fixture.publicationId],
+      );
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      const session = await createSession(client, fixture.customerId);
+      const env = {
+        DB: adapter,
+        STORAGE: storage.storage,
+        APP_ORIGIN: "https://crushify.test",
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+      } as Parameters<typeof handleApiRequest>[1];
+      const mutate = (action: string, revision: number) => assetRequest(
+        env, session, `/publications/${fixture.publicationId}/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_lifecycle_revision: revision }),
+        },
+      );
+
+      const unpublishing = mutate("unpublish", 1);
+      await deleteStarted.promise;
+      const republished = await mutate("publish", 2);
+      assert.equal(republished.status, 503,
+        "republish must wait while cleanup owns the prior derivative");
+      releaseDelete.resolve();
+      assert.equal((await unpublishing).status, 200);
+      const retriedPublish = await mutate("publish", 2);
+      assert.equal(retriedPublish.status, 200);
+
+      const state = await client.execute({
+        sql: `SELECT p.status, pa.derivative_status, pa.derivative_key
+              FROM publications p JOIN publication_assets pa ON pa.publication_id = p.id
+              WHERE p.id = ?`,
+        args: [fixture.publicationId],
+      });
+      const newDerivativeKey = String(state.rows[0]?.derivative_key);
+      assert.notEqual(newDerivativeKey, fixture.derivativeKey);
+      assert.deepEqual(state.rows[0], {
+        status: "PUBLISHED",
+        derivative_status: "READY",
+        derivative_key: newDerivativeKey,
+      });
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null,
+        "the retired derivative has been deleted");
+      assert.ok(await storage.storage.getPublishedDerivative(
+        newDerivativeKey,
+      ), "republish creates and attaches a fresh derivative");
+    } finally {
+      releaseDelete.resolve();
+      client.close();
+    }
+  });
+
+  it("preserves the derivative when republish commits before stale unpublish cleanup resumes", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const database = new PausableDatabase(adapter);
+    const cleanupStarted = database.pauseNextRun(
+      "UPDATE publication_derivative_operations AS operation",
+    );
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      const snapshot = await client.execute(
+        "SELECT snapshot_json FROM publications WHERE id = ?",
+        [fixture.publicationId],
+      );
+      const publicationData = JSON.parse(String(snapshot.rows[0]?.snapshot_json)) as {
+        data: Record<string, unknown>;
+      };
+      publicationData.data.photos = [{ asset_id: fixture.assetId, caption: "Race" }];
+      await client.execute(
+        "UPDATE publications SET snapshot_json = ? WHERE id = ?",
+        [JSON.stringify(publicationData), fixture.publicationId],
+      );
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      const session = await createSession(client, fixture.customerId);
+      const env = {
+        DB: database,
+        STORAGE: storage.storage,
+        APP_ORIGIN: "https://crushify.test",
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+      } as Parameters<typeof handleApiRequest>[1];
+      const mutate = (action: string, revision: number) => assetRequest(
+        env, session, `/publications/${fixture.publicationId}/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_lifecycle_revision: revision }),
+        },
+      );
+
+      const unpublishing = mutate("unpublish", 1);
+      await cleanupStarted.entered;
+      const republished = await mutate("publish", 2);
+      assert.equal(republished.status, 200,
+        "republish commits while the earlier unpublish cleanup has not claimed the key");
+      cleanupStarted.release();
+      assert.equal((await unpublishing).status, 200);
+
+      const state = await client.execute(
+        `SELECT p.status, pa.derivative_status, pa.derivative_key
+         FROM publications p JOIN publication_assets pa ON pa.publication_id = p.id
+         WHERE p.id = ?`,
+        [fixture.publicationId],
+      );
+      assert.deepEqual(state.rows[0], {
+        status: "PUBLISHED",
+        derivative_status: "READY",
+        derivative_key: fixture.derivativeKey,
+      });
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey),
+        "stale cleanup must preserve the derivative required by the newer publication");
+    } finally {
+      cleanupStarted.release();
+      client.close();
+    }
+  });
+
+  it("reports future retry backoff as deferred cleanup work", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'CLEANUP_PENDING', next_cleanup_at = ?
+         WHERE publication_asset_id = ?`,
+        [new Date(NOW.getTime() + 60_000).toISOString(), fixture.publicationAssetId],
+      );
+
+      const result = await cleanupAssets({
+        DB: adapter,
+        STORAGE: storage.storage,
+      } as Parameters<typeof handleApiRequest>[1], fixture.publicationId, NOW);
+      assert.deepEqual(result, {
+        status: "deferred",
+        processed: 0,
+        cleaned: 0,
+        pending: 0,
+        deferred: 1,
+        retryable: 0,
+        manualReview: 0,
+        hasMore: false,
+      });
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+      assert.equal((await client.execute(
+        "SELECT status FROM publication_derivative_operations WHERE publication_asset_id = ?",
+        [fixture.publicationAssetId],
+      )).rows[0]?.status, "CLEANUP_PENDING");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("reports another worker's active cleanup lease as deferred work", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'CLEANUP_PENDING', next_cleanup_at = ?,
+             cleanup_lease_token = 'other-worker', cleanup_lease_expires_at = ?
+         WHERE publication_asset_id = ?`,
+        [new Date(NOW.getTime() - 60_000).toISOString(),
+          new Date(NOW.getTime() + 5 * 60_000).toISOString(), fixture.publicationAssetId],
+      );
+
+      const result = await cleanupAssets({
+        DB: adapter,
+        STORAGE: storage.storage,
+      } as Parameters<typeof handleApiRequest>[1], fixture.publicationId, NOW);
+      assert.deepEqual(result, {
+        status: "deferred",
+        processed: 0,
+        cleaned: 0,
+        pending: 0,
+        deferred: 1,
+        retryable: 0,
+        manualReview: 0,
+        hasMore: false,
+      });
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+      assert.equal((await client.execute(
+        "SELECT cleanup_lease_token FROM publication_derivative_operations WHERE publication_asset_id = ?",
+        [fixture.publicationAssetId],
+      )).rows[0]?.cleanup_lease_token, "other-worker");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("reports remaining due derivatives when the cleanup batch is bounded", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixtures = await Promise.all([
+        createFixture(client, {
+          status: "EXPIRED",
+          expiresAt: "2000-01-01T00:00:00.000Z",
+          withAsset: true,
+        }),
+        createFixture(client, {
+          status: "EXPIRED",
+          expiresAt: "2000-01-01T00:00:00.000Z",
+          withAsset: true,
+        }),
+      ]);
+      for (const fixture of fixtures) {
+        if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+          assert.fail("Expected publication derivative fixture");
+        }
+        await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+        await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      }
+
+      const result = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage } as Parameters<
+          typeof reconcilePublicationDerivativeCleanup
+        >[0],
+        { now: NOW, limit: 1 },
+      );
+      assert.deepEqual(result, {
+        status: "pending",
+        processed: 1,
+        cleaned: 1,
+        pending: 1,
+        deferred: 0,
+        retryable: 0,
+        manualReview: 0,
+        hasMore: true,
+      });
+      const operations = await client.execute(
+        `SELECT derivative_key, status FROM publication_derivative_operations
+         ORDER BY status, derivative_key`,
+      );
+      assert.equal(operations.rows.filter((row) => row.status === "CLEANED").length, 1);
+      assert.equal(operations.rows.filter((row) => row.status === "CLEANUP_PENDING").length, 1);
+      const cleanedKey = String(operations.rows.find((row) => row.status === "CLEANED")?.derivative_key);
+      const pendingKey = String(operations.rows.find((row) => row.status === "CLEANUP_PENDING")?.derivative_key);
+      assert.equal(await storage.storage.getPublishedDerivative(cleanedKey), null);
+      assert.ok(await storage.storage.getPublishedDerivative(pendingKey));
+    } finally {
+      client.close();
+    }
+  });
+
+  it("reports provider cleanup failure without claiming completion", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage({ derivativeDeleteFailures: 1 });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+
+      const result = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage } as Parameters<
+          typeof reconcilePublicationDerivativeCleanup
+        >[0],
+        { now: NOW },
+      );
+      assert.deepEqual(result, {
+        status: "failed",
+        processed: 1,
+        cleaned: 0,
+        pending: 0,
+        deferred: 1,
+        retryable: 1,
+        manualReview: 0,
+        hasMore: false,
+      });
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+      assert.equal((await client.execute(
+        "SELECT status FROM publication_derivative_operations WHERE publication_asset_id = ?",
+        [fixture.publicationAssetId],
+      )).rows[0]?.status, "CLEANUP_PENDING");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("retries atomic pointer detachment after a one-time database failure", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `CREATE TRIGGER fail_derivative_pointer_detach
+         BEFORE UPDATE OF derivative_key ON publication_assets
+         WHEN OLD.derivative_key IS NOT NULL AND NEW.derivative_key IS NULL
+         BEGIN SELECT RAISE(ABORT, 'injected pointer detachment failure'); END`,
+      );
+
+      const first = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage } as Parameters<
+          typeof reconcilePublicationDerivativeCleanup
+        >[0],
+        { now: NOW },
+      );
+      assert.equal(first.status, "failed");
+      assert.equal(first.retryable, 1);
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null,
+        "provider deletion succeeded before the database finalization failed");
+      assert.deepEqual((await client.execute(
+        `SELECT status, cleanup_attempts FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "CLEANUP_PENDING", cleanup_attempts: 1 });
+      assert.deepEqual((await client.execute(
+        `SELECT derivative_key, derivative_status FROM publication_assets WHERE id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], {
+        derivative_key: fixture.derivativeKey,
+        derivative_status: "CLEANUP_PENDING",
+      });
+
+      await client.execute("DROP TRIGGER fail_derivative_pointer_detach");
+      const retry = await reconcilePublicationDerivativeCleanup(
+        { DB: new TursoDatabaseAdapter(client), STORAGE: storage.storage },
+        { now: new Date(NOW.getTime() + 3 * 60_000) },
+      );
+      assert.equal(retry.status, "completed");
+      assert.equal(retry.cleaned, 1);
+      assert.deepEqual((await client.execute(
+        `SELECT status FROM publication_derivative_operations WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "CLEANED" });
+      assert.deepEqual((await client.execute(
+        `SELECT derivative_key, derivative_status FROM publication_assets WHERE id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { derivative_key: null, derivative_status: "DELETED" });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("rolls back pointer detachment when journal finalization fails in the same batch", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `CREATE TRIGGER fail_derivative_journal_finalization
+         BEFORE UPDATE OF status ON publication_derivative_operations
+         WHEN OLD.status = 'CLEANUP_PENDING' AND NEW.status = 'CLEANED'
+         BEGIN SELECT RAISE(ABORT, 'injected journal finalization failure'); END`,
+      );
+
+      const failed = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      assert.equal(failed.status, "failed");
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+      assert.deepEqual((await client.execute(
+        `SELECT status, cleanup_attempts FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "CLEANUP_PENDING", cleanup_attempts: 1 });
+      assert.deepEqual((await client.execute(
+        `SELECT derivative_key, derivative_status FROM publication_assets WHERE id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], {
+        derivative_key: fixture.derivativeKey,
+        derivative_status: "CLEANUP_PENDING",
+      }, "the batch must roll pointer detachment back if journal completion fails");
+
+      await client.execute("DROP TRIGGER fail_derivative_journal_finalization");
+      const retry = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: new Date(NOW.getTime() + 3 * 60_000) },
+      );
+      assert.equal(retry.status, "completed");
+      assert.deepEqual((await client.execute(
+        `SELECT status FROM publication_derivative_operations WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "CLEANED" });
+      assert.deepEqual((await client.execute(
+        `SELECT derivative_key, derivative_status FROM publication_assets WHERE id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { derivative_key: null, derivative_status: "DELETED" });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("recovers cleanup after restart between provider deletion and database finalization", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations SET status = 'CLEANUP_PENDING',
+           next_cleanup_at = ?, cleanup_lease_token = NULL, cleanup_lease_expires_at = NULL
+         WHERE publication_asset_id = ?`,
+        [NOW.toISOString(), fixture.publicationAssetId],
+      );
+      await client.execute(
+        `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING'
+         WHERE id = ?`,
+        [fixture.publicationAssetId],
+      );
+
+      await storage.storage.deletePublishedDerivative(fixture.derivativeKey);
+      const restarted = await reconcilePublicationDerivativeCleanup(
+        { DB: new TursoDatabaseAdapter(client), STORAGE: storage.storage },
+        { now: new Date(NOW.getTime() + 60_000) },
+      );
+      assert.equal(restarted.status, "completed");
+      assert.equal(restarted.cleaned, 1);
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+      assert.deepEqual((await client.execute(
+        `SELECT status FROM publication_derivative_operations WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "CLEANED" });
+      assert.deepEqual((await client.execute(
+        `SELECT derivative_key, derivative_status FROM publication_assets WHERE id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { derivative_key: null, derivative_status: "DELETED" });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("fences an overlapping cleanup worker with the active cleanup lease", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const deleteStarted = deferred();
+    const releaseDelete = deferred();
+    const storage = createRaceStorage({
+      beforeDerivativeDelete: async () => {
+        deleteStarted.resolve();
+        await releaseDelete.promise;
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+
+      const first = reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      await deleteStarted.promise;
+      const overlapping = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      assert.equal(overlapping.status, "deferred");
+      assert.equal(overlapping.processed, 0);
+      assert.equal(overlapping.deferred, 1);
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+
+      releaseDelete.resolve();
+      const completed = await first;
+      assert.equal(completed.status, "completed");
+      assert.equal(completed.cleaned, 1);
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+      assert.deepEqual((await client.execute(
+        `SELECT status FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "CLEANED" });
+      assert.deepEqual((await client.execute(
+        `SELECT derivative_key, derivative_status FROM publication_assets WHERE id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { derivative_key: null, derivative_status: "DELETED" });
+    } finally {
+      releaseDelete.resolve();
+      client.close();
+    }
+  });
+
+  it("does not detach a newer active publication pointer when stale cleanup resumes", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const deleteCompleted = deferred();
+    const resumeCleanup = deferred();
+    const storage = createRaceStorage({
+      afterDerivativeDelete: async () => {
+        deleteCompleted.resolve();
+        await resumeCleanup.promise;
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+
+      const staleCleanup = reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      await deleteCompleted.promise;
+
+      const newerKey = `published/new-${randomUUID()}.png`;
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, newerKey);
+      await client.execute(
+        `UPDATE publication_assets SET derivative_key = ?, derivative_status = 'READY'
+         WHERE id = ?`,
+        [newerKey, fixture.publicationAssetId],
+      );
+      await client.execute(
+        `INSERT INTO publication_derivative_operations (
+           id, publication_asset_id, publication_id, derivative_key, status, operation_token,
+           operation_lease_expires_at, next_cleanup_at, provider_create_succeeded_at,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?, ?)`,
+        [
+          `new-derivative-${fixture.publicationAssetId}`, fixture.publicationAssetId,
+          fixture.publicationId, newerKey, `new-operation-token-${fixture.publicationAssetId}`,
+          new Date(NOW.getTime() + 15 * 60_000).toISOString(),
+          new Date(NOW.getTime() + 60 * 60_000).toISOString(),
+          NOW.toISOString(), NOW.toISOString(), NOW.toISOString(),
+        ],
+      );
+      await client.execute(
+        `UPDATE publications SET status = 'PUBLISHED' WHERE id = ?`,
+        [fixture.publicationId],
+      );
+
+      resumeCleanup.resolve();
+      const staleResult = await staleCleanup;
+      assert.equal(staleResult.cleaned, 1,
+        "the retired derivative can finish cleanup after its pointer was replaced");
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+      assert.ok(await storage.storage.getPublishedDerivative(newerKey));
+      assert.deepEqual((await client.execute(
+        `SELECT p.status, pa.derivative_key, pa.derivative_status
+         FROM publications p JOIN publication_assets pa ON pa.publication_id = p.id
+         WHERE pa.id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], {
+        status: "PUBLISHED",
+        derivative_key: newerKey,
+        derivative_status: "READY",
+      });
+    } finally {
+      resumeCleanup.resolve();
+      client.close();
+    }
+  });
+
+  it("keeps a permanently failed pointer detachment in manual review", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'CLEANUP_PENDING', cleanup_attempts = 7, next_cleanup_at = ?
+         WHERE publication_asset_id = ?`,
+        [NOW.toISOString(), fixture.publicationAssetId],
+      );
+      await client.execute(
+        `CREATE TRIGGER keep_derivative_pointer_attached
+         BEFORE UPDATE OF derivative_key ON publication_assets
+         WHEN OLD.derivative_key IS NOT NULL AND NEW.derivative_key IS NULL
+         BEGIN SELECT RAISE(ABORT, 'persistent pointer detachment failure'); END`,
+      );
+
+      const failed = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      assert.equal(failed.status, "manual_review");
+      assert.equal(failed.manualReview, 1);
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+      assert.deepEqual((await client.execute(
+        `SELECT status, cleanup_attempts FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "MANUAL_REVIEW", cleanup_attempts: 8 });
+      assert.deepEqual((await client.execute(
+        `SELECT derivative_key, derivative_status FROM publication_assets WHERE id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], {
+        derivative_key: fixture.derivativeKey,
+        derivative_status: "CLEANUP_PENDING",
+      });
+
+      const checked = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: new Date(NOW.getTime() + 30 * 24 * 60 * 60_000) },
+      );
+      assert.equal(checked.status, "manual_review");
+      assert.equal(checked.manualReview, 1,
+        "provider absence alone must not resolve manual review");
+      assert.equal((await client.execute(
+        `SELECT status, provider_create_succeeded_at, last_cleanup_error_code
+         FROM publication_derivative_operations WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0]?.status, "MANUAL_REVIEW");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("keeps an uncertain provider delete visible after the object was removed", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage({
+      afterDerivativeDelete: async () => {
+        throw new Error("Provider accepted deletion but response timed out");
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+
+      const result = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage } as Parameters<
+          typeof reconcilePublicationDerivativeCleanup
+        >[0],
+        { now: NOW },
+      );
+      assert.equal(result.status, "failed");
+      assert.equal(result.retryable, 1);
+      assert.equal(result.deferred, 1);
+      assert.equal(result.cleaned, 0,
+        "provider uncertainty must not be reported as verified cleanup");
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+      assert.equal((await client.execute(
+        `SELECT status FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0]?.status, "CLEANUP_PENDING");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("avoids redundant tombstone rechecks after confirmed provider cleanup", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "UNPUBLISHED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      const env = {
+        DB: adapter,
+        STORAGE: storage.storage,
+      } as Parameters<typeof handleApiRequest>[1];
+
+      const completed = await cleanupAssets(env, fixture.publicationId, NOW);
+      assert.deepEqual(completed, {
+        status: "completed",
+        processed: 1,
+        cleaned: 1,
+        pending: 0,
+        deferred: 0,
+        retryable: 0,
+        manualReview: 0,
+        hasMore: false,
+      });
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+      assert.deepEqual((await client.execute(
+        `SELECT status, derivative_key FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "CLEANED", derivative_key: fixture.derivativeKey });
+
+      const scheduledRecheck = await reconcilePublicationDerivativeCleanup(env, {
+        now: NOW,
+      });
+      assert.equal(scheduledRecheck.status, "completed");
+      assert.equal(scheduledRecheck.deferred, 0);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("reports completed when the requested publication has no cleanup work", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "UNPUBLISHED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: false,
+      });
+
+      const result = await cleanupAssets({
+        DB: adapter,
+        STORAGE: storage.storage,
+      } as Parameters<typeof handleApiRequest>[1], fixture.publicationId, NOW);
+      assert.deepEqual(result, {
+        status: "completed",
+        processed: 0,
+        cleaned: 0,
+        pending: 0,
+        deferred: 0,
+        retryable: 0,
+        manualReview: 0,
+        hasMore: false,
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("reports deferred while an uncertain CLEANED tombstone awaits its next provider recheck", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "UNPUBLISHED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("derivativeKey" in fixture)) assert.fail("Expected derivative fixture");
+      await storage.storage.deletePublishedDerivative(fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'CLEANED', provider_create_succeeded_at = NULL,
+             operation_lease_expires_at = ?,
+             next_cleanup_at = ?, cleanup_lease_token = NULL, cleanup_lease_expires_at = NULL
+         WHERE publication_asset_id = ?`,
+        [
+          new Date(NOW.getTime() - 60_000).toISOString(),
+          new Date(NOW.getTime() + 60 * 60_000).toISOString(),
+          fixture.publicationAssetId,
+        ],
+      );
+      await client.execute(
+        `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'DELETED'
+         WHERE id = ?`,
+        [fixture.publicationAssetId],
+      );
+
+      const result = await cleanupAssets({
+        DB: adapter,
+        STORAGE: storage.storage,
+      } as Parameters<typeof handleApiRequest>[1], fixture.publicationId, NOW);
+      assert.equal(result.status, "deferred");
+      assert.equal(result.deferred, 1);
+      assert.equal(result.cleaned, 0);
+      assert.deepEqual((await client.execute(
+        `SELECT status, next_cleanup_at FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], {
+        status: "CLEANED",
+        next_cleanup_at: new Date(NOW.getTime() + 60 * 60_000).toISOString(),
+      });
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("reports deferred cleanup through overlapping scheduler invocations", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const database = new PausableDatabase(adapter);
+    const cleanupStarted = database.pauseNextRun(
+      "UPDATE publication_derivative_operations AS operation",
+    );
+    const storage = createRaceStorage();
+    const logged: string[] = [];
+    const originalInfo = console.info;
+    console.info = (message?: unknown) => logged.push(String(message));
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      const nextCleanupAt = new Date(NOW.getTime() + 60_000).toISOString();
+      await client.execute(
+        `UPDATE publications SET retention_delete_after_at = ?
+         WHERE id = ?`,
+        [NOW.toISOString(), fixture.publicationId],
+      );
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'CLEANUP_PENDING', next_cleanup_at = ?
+         WHERE publication_asset_id = ?`,
+        [nextCleanupAt, fixture.publicationAssetId],
+      );
+      const env = {
+        DB: database,
+        STORAGE: storage.storage,
+        ENVIRONMENT: "staging",
+      } as Parameters<typeof runScheduledPublicationLifecycle>[0];
+
+      const firstRun = runScheduledPublicationLifecycle(env, { now: NOW, limit: 10 });
+      await cleanupStarted.entered;
+      const overlappingRun = await runScheduledPublicationLifecycle(env, { now: NOW, limit: 10 });
+      assert.deepEqual(overlappingRun, { acquired: false });
+      cleanupStarted.release();
+      const result = await firstRun;
+      assert.equal(result.acquired, true);
+      assert.equal(result.failed, false);
+      assert.equal(result.pending, true);
+      assert.equal(
+        result.operations?.publicationDerivativeCleanup.status,
+        "completed",
+      );
+      assert.equal(
+        result.operations?.publicationDerivativeCleanup.result?.status,
+        "deferred",
+      );
+      assert.ok(logged.some((message) =>
+        message.includes('"event":"scheduler.derivative_cleanup_deferred"')));
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+      assert.equal((await client.execute(
+        `SELECT status FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0]?.status, "CLEANUP_PENDING");
+    } finally {
+      cleanupStarted.release();
+      console.info = originalInfo;
+      client.close();
+    }
+  });
+
+  it("retains and reconciles a timed-out derivative creation after consent revocation", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const createStarted = deferred();
+    const releaseCreate = deferred();
+    let lateDerivativeKey = "";
+    const storage = createRaceStorage({
+      beforeDerivative: async (key) => {
+        if (!lateDerivativeKey) lateDerivativeKey = key;
+        createStarted.resolve();
+        await releaseCreate.promise;
+      },
+      afterDerivative: async () => {
+        throw new Error("Provider accepted derivative but response timed out");
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "UNPUBLISHED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture)) assert.fail("Expected publication source fixture");
+      const snapshot = await client.execute(
+        "SELECT snapshot_json FROM publications WHERE id = ?",
+        [fixture.publicationId],
+      );
+      const publicationData = JSON.parse(String(snapshot.rows[0]?.snapshot_json)) as {
+        data: Record<string, unknown>;
+      };
+      publicationData.data.photos = [{ asset_id: fixture.assetId, caption: "Race" }];
+      await client.execute(
+        "UPDATE publications SET snapshot_json = ? WHERE id = ?",
+        [JSON.stringify(publicationData), fixture.publicationId],
+      );
+      await client.execute(
+        `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'PENDING'
+         WHERE id = ?`,
+        [fixture.publicationAssetId],
+      );
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      const session = await createSession(client, fixture.customerId);
+      const env = {
+        DB: adapter,
+        STORAGE: storage.storage,
+        APP_ORIGIN: "https://crushify.test",
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+      } as Parameters<typeof handleApiRequest>[1];
+      const publishing = assetRequest(
+        env, session, `/publications/${fixture.publicationId}/publish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_lifecycle_revision: 1 }),
+        },
+      );
+      await createStarted.promise;
+      const consentRevoked = await assetRequest(
+        env, session,
+        `/publications/${fixture.publicationId}/assets/${fixture.assetId}/consent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      assert.equal(consentRevoked.status, 503,
+        "revocation is effective but in-flight provider creation remains deferred");
+      const revokeAudit = await client.execute(
+        `SELECT metadata_json FROM audit_logs
+         WHERE entity_id = ? AND action = 'publication.asset_consent_revoked'`,
+        [fixture.publicationId],
+      );
+      assert.deepEqual(JSON.parse(String(revokeAudit.rows[0]?.metadata_json)), {
+        asset_id: fixture.assetId,
+        cleanup_status: "manual_review",
+      });
+      releaseCreate.resolve();
+      assert.equal((await publishing).status, 503);
+
+      const state = await client.execute({
+        sql: `SELECT pa.revoked_at, pa.derivative_status, pa.derivative_key,
+                p.status AS publication_status
+              FROM publication_assets pa JOIN publications p ON p.id = pa.publication_id
+              WHERE pa.id = ?`,
+        args: [fixture.publicationAssetId],
+      });
+      assert.equal(state.rows[0]?.revoked_at !== null, true);
+      assert.equal(state.rows[0]?.derivative_key, null);
+      assert.equal(state.rows[0]?.derivative_status, "DELETED");
+      const retainedAttempt = await client.execute(
+        `SELECT status, provider_create_succeeded_at, last_cleanup_error_code
+         FROM publication_derivative_operations
+         WHERE derivative_key = ?`,
+        [lateDerivativeKey],
+      );
+      assert.deepEqual(retainedAttempt.rows[0], {
+        status: "MANUAL_REVIEW",
+        provider_create_succeeded_at: null,
+        last_cleanup_error_code: "PROVIDER_CREATE_OUTCOME_UNCONFIRMED",
+      }, "uncertain provider creation must remain visible after pointer detachment");
+      assert.ok(await storage.storage.getPublishedDerivative(lateDerivativeKey),
+        "the test provider created the object after revocation cleanup completed");
+
+      const recoveryTime = new Date(Date.now() + 2 * 60 * 60_000);
+      const scheduled = await runScheduledPublicationLifecycle(env, {
+        now: recoveryTime,
+        limit: 25,
+      });
+      assert.equal(scheduled.operations.publicationDerivativeCleanup.status, "completed");
+      const recovered = scheduled.operations.publicationDerivativeCleanup.result;
+      assert.ok(recovered);
+      assert.equal(recovered.status, "pending");
+      assert.equal(recovered.cleaned, 0,
+        "positive lookup queues cleanup for the next bounded reconciliation pass");
+      assert.ok(await storage.storage.getPublishedDerivative(lateDerivativeKey));
+      const deleted = await reconcilePublicationDerivativeCleanup(env, {
+        publicationId: fixture.publicationId,
+        now: recoveryTime,
+      });
+      assert.equal(deleted.status, "completed");
+      assert.equal(deleted.cleaned, 1);
+      assert.equal(await storage.storage.getPublishedDerivative(lateDerivativeKey), null,
+        "scheduled reconciliation deletes the late object by its durable attempt key");
+      const repeated = await reconcilePublicationDerivativeCleanup(env, {
+        publicationId: fixture.publicationId,
+        now: new Date(recoveryTime.getTime() + 2 * 60 * 60_000),
+      });
+      assert.equal(repeated.status, "completed", "repeated cleanup remains idempotent");
+      assert.equal(repeated.cleaned, 0);
+      assert.equal(await storage.storage.getPublishedDerivative(lateDerivativeKey), null);
+    } finally {
+      releaseCreate.resolve();
+      client.close();
+    }
+  });
+
+  it("reconciles a provider success after cleanup has reached manual review", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const createStarted = deferred();
+    const releaseCreate = deferred();
+    let lateDerivativeKey = "";
+    const storage = createRaceStorage({
+      beforeDerivative: async (key) => {
+        if (!lateDerivativeKey) lateDerivativeKey = key;
+        createStarted.resolve();
+        await releaseCreate.promise;
+      },
+      derivativeDeleteFailures: 2,
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "UNPUBLISHED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture)) assert.fail("Expected publication source fixture");
+      const snapshot = await client.execute(
+        "SELECT snapshot_json FROM publications WHERE id = ?",
+        [fixture.publicationId],
+      );
+      const publicationData = JSON.parse(String(snapshot.rows[0]?.snapshot_json)) as {
+        data: Record<string, unknown>;
+      };
+      publicationData.data.photos = [{ asset_id: fixture.assetId, caption: "Late success" }];
+      await client.execute(
+        "UPDATE publications SET snapshot_json = ? WHERE id = ?",
+        [JSON.stringify(publicationData), fixture.publicationId],
+      );
+      await client.execute(
+        "DELETE FROM publication_derivative_operations WHERE publication_asset_id = ?",
+        [fixture.publicationAssetId],
+      );
+      await client.execute(
+        `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'PENDING'
+         WHERE id = ?`,
+        [fixture.publicationAssetId],
+      );
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      const session = await createSession(client, fixture.customerId);
+      const env = {
+        DB: adapter,
+        STORAGE: storage.storage,
+        APP_ORIGIN: "https://crushify.test",
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+      } as Parameters<typeof handleApiRequest>[1];
+      const publishing = assetRequest(
+        env, session, `/publications/${fixture.publicationId}/publish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_lifecycle_revision: 1 }),
+        },
+      );
+      await createStarted.promise;
+
+      const revoked = await assetRequest(
+        env, session,
+        `/publications/${fixture.publicationId}/assets/${fixture.assetId}/consent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      assert.equal(revoked.status, 503);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'CLEANUP_PENDING', cleanup_attempts = 7,
+             next_cleanup_at = ?, operation_lease_expires_at = ?
+         WHERE derivative_key = ?`,
+        [
+          new Date(NOW.getTime() - 60_000).toISOString(),
+          new Date(NOW.getTime() - 60_000).toISOString(),
+          lateDerivativeKey,
+        ],
+      );
+      const exhausted = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      assert.equal(exhausted.status, "manual_review");
+      assert.equal(exhausted.manualReview, 1);
+      assert.equal((await client.execute(
+        `SELECT status, cleanup_attempts FROM publication_derivative_operations
+         WHERE derivative_key = ?`,
+        [lateDerivativeKey],
+      )).rows[0]?.status, "MANUAL_REVIEW");
+      assert.equal(await storage.storage.getPublishedDerivative(lateDerivativeKey), null);
+
+      releaseCreate.resolve();
+      assert.equal((await publishing).status, 409);
+      const observedLateSuccess = (await client.execute(
+        `SELECT status, provider_create_succeeded_at
+         FROM publication_derivative_operations WHERE derivative_key = ?`,
+        [lateDerivativeKey],
+      )).rows[0];
+      assert.equal(observedLateSuccess?.status, "CLEANUP_PENDING");
+      assert.ok(observedLateSuccess?.provider_create_succeeded_at);
+
+      const activePublication = await createFixture(client, {
+        status: "PUBLISHED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in activePublication) || !("derivativeKey" in activePublication)) {
+        assert.fail("Expected active derivative fixture");
+      }
+      await storage.storage.upload(activePublication.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(
+        activePublication.sourceKey, activePublication.derivativeKey,
+      );
+
+      assert.ok(await storage.storage.getPublishedDerivative(lateDerivativeKey));
+
+      const restartedEnv = { ...env };
+      const reconciled = await reconcilePublicationDerivativeCleanup(
+        restartedEnv,
+        { now: new Date(Date.now() + 60_000), limit: 25 },
+      );
+      assert.ok(reconciled.cleaned >= 1);
+      const operationAfterLateSuccess = await client.execute(
+        `SELECT status, provider_create_succeeded_at
+         FROM publication_derivative_operations WHERE derivative_key = ?`,
+        [lateDerivativeKey],
+      );
+      assert.equal(operationAfterLateSuccess.rows[0]?.status, "CLEANED");
+      assert.ok(operationAfterLateSuccess.rows[0]?.provider_create_succeeded_at);
+      assert.equal(await storage.storage.getPublishedDerivative(lateDerivativeKey), null);
+      assert.ok(await storage.storage.getPublishedDerivative(activePublication.derivativeKey),
+        "late cleanup must not remove a newer publication's distinct derivative");
+      assert.deepEqual((await client.execute(
+        `SELECT derivative_status, derivative_key FROM publication_assets WHERE id = ?`,
+        [activePublication.publicationAssetId],
+      )).rows[0], {
+        derivative_status: "READY",
+        derivative_key: activePublication.derivativeKey,
+      });
+      assert.equal((await client.execute(
+        "SELECT status FROM publications WHERE id = ?",
+        [fixture.publicationId],
+      )).rows[0]?.status, "UNPUBLISHED");
+    } finally {
+      releaseCreate.resolve();
+      client.close();
+    }
+  });
+
+  it("fences cleanup finalization when provider success arrives during deletion", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const createStarted = deferred();
+    const releaseCreate = deferred();
+    const deleteStarted = deferred();
+    const releaseDelete = deferred();
+    let derivativeKey = "";
+    const storage = createRaceStorage({
+      beforeDerivative: async (key) => {
+        derivativeKey = key;
+        createStarted.resolve();
+        await releaseCreate.promise;
+      },
+      beforeDerivativeDelete: async () => {
+        deleteStarted.resolve();
+        await releaseDelete.promise;
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "UNPUBLISHED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture)) assert.fail("Expected publication source fixture");
+      const snapshot = await client.execute(
+        "SELECT snapshot_json FROM publications WHERE id = ?",
+        [fixture.publicationId],
+      );
+      const publicationData = JSON.parse(String(snapshot.rows[0]?.snapshot_json)) as {
+        data: Record<string, unknown>;
+      };
+      publicationData.data.photos = [{ asset_id: fixture.assetId, caption: "Cleanup race" }];
+      await client.execute(
+        "UPDATE publications SET snapshot_json = ? WHERE id = ?",
+        [JSON.stringify(publicationData), fixture.publicationId],
+      );
+      await client.execute(
+        "DELETE FROM publication_derivative_operations WHERE publication_asset_id = ?",
+        [fixture.publicationAssetId],
+      );
+      await client.execute(
+        `UPDATE publication_assets SET derivative_key = NULL, derivative_status = 'PENDING'
+         WHERE id = ?`,
+        [fixture.publicationAssetId],
+      );
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      const session = await createSession(client, fixture.customerId);
+      const env = {
+        DB: adapter,
+        STORAGE: storage.storage,
+        APP_ORIGIN: "https://crushify.test",
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+      } as Parameters<typeof handleApiRequest>[1];
+      const publishing = assetRequest(
+        env, session, `/publications/${fixture.publicationId}/publish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_lifecycle_revision: 1 }),
+        },
+      );
+      await createStarted.promise;
+
+      const revoking = assetRequest(
+        env, session, `/publications/${fixture.publicationId}/assets/${fixture.assetId}/consent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      await deleteStarted.promise;
+      releaseCreate.resolve();
+      assert.equal((await publishing).status, 409);
+      const successMarker = await client.execute(
+        `SELECT provider_create_succeeded_at FROM publication_derivative_operations
+         WHERE derivative_key = ?`,
+        [derivativeKey],
+      );
+      assert.ok(successMarker.rows[0]?.provider_create_succeeded_at);
+
+      releaseDelete.resolve();
+      assert.equal((await revoking).status, 503,
+        "the stale cleanup claim must not report a fenced finalization as complete");
+      const fenced = await client.execute(
+        `SELECT status, provider_create_succeeded_at, cleanup_lease_token
+         FROM publication_derivative_operations WHERE derivative_key = ?`,
+        [derivativeKey],
+      );
+      assert.equal(fenced.rows[0]?.status, "CLEANUP_PENDING");
+      assert.ok(fenced.rows[0]?.provider_create_succeeded_at);
+      assert.ok(fenced.rows[0]?.cleanup_lease_token,
+        "the old claim remains fenced until its lease expires");
+      assert.equal(await storage.storage.getPublishedDerivative(derivativeKey), null);
+
+      const recoveryTime = new Date(Date.now() + 60_000);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET next_cleanup_at = ?, cleanup_lease_expires_at = ?
+         WHERE derivative_key = ?`,
+        [
+          new Date(recoveryTime.getTime() - 60_000).toISOString(),
+          new Date(recoveryTime.getTime() - 60_000).toISOString(),
+          derivativeKey,
+        ],
+      );
+      const recovered = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: recoveryTime },
+      );
+      assert.ok(recovered.cleaned >= 1);
+      assert.equal((await client.execute(
+        `SELECT status FROM publication_derivative_operations WHERE derivative_key = ?`,
+        [derivativeKey],
+      )).rows[0]?.status, "CLEANED");
+      assert.equal(await storage.storage.getPublishedDerivative(derivativeKey), null);
+    } finally {
+      releaseCreate.resolve();
+      releaseDelete.resolve();
+      client.close();
+    }
+  });
+
+  it("counts exhausted derivative cleanup once and leaves it for manual review", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage({ derivativeDeleteFailures: 1 });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'CLEANUP_PENDING', cleanup_attempts = 7,
+             next_cleanup_at = '2000-01-01T00:00:00.000Z'
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      );
+
+      const exhausted = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage } as Parameters<
+          typeof reconcilePublicationDerivativeCleanup
+        >[0],
+        { now: NOW },
+      );
+      assert.deepEqual(exhausted, {
+        status: "manual_review",
+        processed: 1,
+        cleaned: 0,
+        pending: 0,
+        deferred: 0,
+        retryable: 1,
+        manualReview: 1,
+        hasMore: false,
+      });
+      assert.deepEqual(
+        (await client.execute(
+          `SELECT status, cleanup_attempts FROM publication_derivative_operations
+           WHERE publication_asset_id = ?`,
+          [fixture.publicationAssetId],
+        )).rows[0],
+        { status: "MANUAL_REVIEW", cleanup_attempts: 8 },
+      );
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+
+      const later = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage } as Parameters<
+          typeof reconcilePublicationDerivativeCleanup
+        >[0],
+        { now: new Date(NOW.getTime() + 30 * 24 * 60 * 60_000) },
+      );
+      assert.deepEqual(later, {
+        status: "pending",
+        processed: 1,
+        cleaned: 0,
+        pending: 1,
+        deferred: 0,
+        retryable: 0,
+        manualReview: 0,
+        hasMore: true,
+      });
+      assert.equal((await client.execute(
+        `SELECT status, cleanup_attempts FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0]?.status, "CLEANUP_PENDING",
+      "a confirmed provider object reopens bounded cleanup instead of remaining ignored");
+      const completed = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: new Date(NOW.getTime() + 30 * 24 * 60 * 60_000) },
+      );
+      assert.equal(completed.status, "completed");
+      assert.equal(completed.cleaned, 1);
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("recovers a provider create after restart when manual-review lookup confirms the object", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'MANUAL_REVIEW', cleanup_attempts = 8,
+             provider_create_succeeded_at = NULL, next_cleanup_at = ?,
+             cleanup_lease_token = NULL, cleanup_lease_expires_at = NULL
+         WHERE publication_asset_id = ?`,
+        [NOW.toISOString(), fixture.publicationAssetId],
+      );
+      await client.execute(
+        `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING'
+         WHERE id = ?`,
+        [fixture.publicationAssetId],
+      );
+
+      const restarted = await reconcilePublicationDerivativeCleanup(
+        { DB: new TursoDatabaseAdapter(client), STORAGE: storage.storage },
+        { now: NOW, limit: 1 },
+      );
+      assert.equal(restarted.status, "pending");
+      assert.equal(restarted.processed, 1);
+      assert.equal(restarted.manualReview, 0);
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey),
+        "confirmed presence is queued for cleanup rather than deleted by the lookup step");
+      assert.deepEqual((await client.execute(
+        `SELECT status, provider_create_succeeded_at, cleanup_lease_token
+         FROM publication_derivative_operations WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], {
+        status: "CLEANUP_PENDING",
+        provider_create_succeeded_at: NOW.toISOString(),
+        cleanup_lease_token: null,
+      });
+
+      const cleanup = await reconcilePublicationDerivativeCleanup(
+        { DB: new TursoDatabaseAdapter(client), STORAGE: storage.storage },
+        { now: NOW, limit: 1 },
+      );
+      assert.equal(cleanup.status, "completed");
+      assert.equal(cleanup.cleaned, 1);
+      assert.equal(await storage.storage.getPublishedDerivative(fixture.derivativeKey), null);
+      assert.deepEqual((await client.execute(
+        `SELECT status, derivative_key FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], { status: "CLEANED", derivative_key: fixture.derivativeKey });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("keeps an absent manual-review object inconclusive and schedules a bounded recheck", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("derivativeKey" in fixture)) assert.fail("Expected publication derivative fixture");
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'MANUAL_REVIEW', cleanup_attempts = 8,
+             provider_create_succeeded_at = NULL, next_cleanup_at = ?
+         WHERE publication_asset_id = ?`,
+        [NOW.toISOString(), fixture.publicationAssetId],
+      );
+      await client.execute(
+        `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING'
+         WHERE id = ?`,
+        [fixture.publicationAssetId],
+      );
+
+      const result = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      assert.equal(result.status, "manual_review");
+      assert.equal(result.manualReview, 1);
+      assert.deepEqual((await client.execute(
+        `SELECT status, provider_create_succeeded_at, cleanup_lease_token,
+                last_cleanup_error_code, next_cleanup_at
+         FROM publication_derivative_operations WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], {
+        status: "MANUAL_REVIEW",
+        provider_create_succeeded_at: null,
+        cleanup_lease_token: null,
+        last_cleanup_error_code: "PROVIDER_LOOKUP_INCONCLUSIVE",
+        next_cleanup_at: new Date(NOW.getTime() + 60 * 60_000).toISOString(),
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("keeps manual review visible when provider lookup fails", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage({ derivativeGetFailures: 1 });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'MANUAL_REVIEW', cleanup_attempts = 8,
+             provider_create_succeeded_at = NULL, next_cleanup_at = ?
+         WHERE publication_asset_id = ?`,
+        [NOW.toISOString(), fixture.publicationAssetId],
+      );
+      await client.execute(
+        `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING'
+         WHERE id = ?`,
+        [fixture.publicationAssetId],
+      );
+
+      const result = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      assert.equal(result.status, "manual_review");
+      assert.equal(result.retryable, 1);
+      assert.equal(result.manualReview, 1);
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+      const state = (await client.execute(
+        `SELECT status, provider_create_succeeded_at, cleanup_lease_token,
+                last_cleanup_error_code
+         FROM publication_derivative_operations WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0];
+      assert.equal(state?.status, "MANUAL_REVIEW");
+      assert.equal(state?.provider_create_succeeded_at, null);
+      assert.equal(state?.cleanup_lease_token, null);
+      assert.equal(state?.last_cleanup_error_code, "Error");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("prevents concurrent manual-review provider lookups with the cleanup lease", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const lookupStarted = deferred();
+    const releaseLookup = deferred();
+    let lookupCount = 0;
+    const storage = createRaceStorage({
+      beforeDerivativeGet: async () => {
+        lookupCount++;
+        lookupStarted.resolve();
+        await releaseLookup.promise;
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "EXPIRED",
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'MANUAL_REVIEW', cleanup_attempts = 8,
+             provider_create_succeeded_at = NULL, next_cleanup_at = ?
+         WHERE publication_asset_id = ?`,
+        [NOW.toISOString(), fixture.publicationAssetId],
+      );
+
+      const first = reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      await lookupStarted.promise;
+      const overlapping = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      assert.equal(overlapping.status, "manual_review");
+      assert.equal(overlapping.processed, 0);
+      assert.equal(lookupCount, 1);
+      assert.ok((await client.execute(
+        `SELECT cleanup_lease_token FROM publication_derivative_operations
+         WHERE publication_asset_id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0]?.cleanup_lease_token);
+
+      releaseLookup.resolve();
+      const recovered = await first;
+      assert.equal(recovered.status, "pending");
+      assert.equal(recovered.processed, 1);
+      assert.equal(lookupCount, 1);
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+    } finally {
+      releaseLookup.resolve();
+      client.close();
+    }
+  });
+
+  it("does not recover a manual-review derivative still referenced by an active publication", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createFixture(client, {
+        status: "PUBLISHED",
+        expiresAt: "2100-01-01T00:00:00.000Z",
+        withAsset: true,
+      });
+      if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+        assert.fail("Expected publication derivative fixture");
+      }
+      await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+      await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+      await client.execute(
+        `UPDATE publication_derivative_operations
+         SET status = 'MANUAL_REVIEW', cleanup_attempts = 8,
+             provider_create_succeeded_at = NULL, next_cleanup_at = ?
+         WHERE publication_asset_id = ?`,
+        [NOW.toISOString(), fixture.publicationAssetId],
+      );
+
+      const result = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW },
+      );
+      assert.equal(result.status, "manual_review");
+      assert.equal(result.processed, 0);
+      assert.equal(result.manualReview, 1);
+      assert.ok(await storage.storage.getPublishedDerivative(fixture.derivativeKey));
+      assert.deepEqual((await client.execute(
+        `SELECT p.status, pa.derivative_key, pa.derivative_status
+         FROM publications p JOIN publication_assets pa ON pa.publication_id = p.id
+         WHERE pa.id = ?`,
+        [fixture.publicationAssetId],
+      )).rows[0], {
+        status: "PUBLISHED",
+        derivative_key: fixture.derivativeKey,
+        derivative_status: "READY",
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("stops starting manual-review work when the reconciliation time budget expires", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    let lookupCount = 0;
+    const storage = createRaceStorage({
+      beforeDerivativeGet: async () => {
+        lookupCount++;
+        if (lookupCount === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixtures = [
+        await createFixture(client, {
+          status: "UNPUBLISHED",
+          expiresAt: "2100-01-01T00:00:00.000Z",
+          withAsset: true,
+        }),
+        await createFixture(client, {
+          status: "UNPUBLISHED",
+          expiresAt: "2100-01-01T00:00:00.000Z",
+          withAsset: true,
+        }),
+      ];
+      for (const fixture of fixtures) {
+        if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+          assert.fail("Expected publication derivative fixture");
+        }
+        await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+        await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+        await client.execute(
+          `UPDATE publication_derivative_operations
+           SET status = 'MANUAL_REVIEW', cleanup_attempts = 8,
+               provider_create_succeeded_at = NULL, next_cleanup_at = ?
+           WHERE publication_asset_id = ?`,
+          [NOW.toISOString(), fixture.publicationAssetId],
+        );
+      }
+
+      const result = await reconcilePublicationDerivativeCleanup(
+        { DB: adapter, STORAGE: storage.storage },
+        { now: NOW, limit: 25, timeBudgetMs: 50 },
+      );
+      assert.equal(result.processed, 1);
+      assert.equal(lookupCount, 1,
+        "no additional provider lookup starts after the time budget is exhausted");
+      assert.equal(result.manualReview, 1);
+      assert.ok(result.hasMore);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("bounds scheduled manual-review recovery by the configured batch size", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    let lookupCount = 0;
+    const storage = createRaceStorage({
+      beforeDerivativeGet: async () => { lookupCount++; },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixtures = [
+        await createFixture(client, {
+          status: "UNPUBLISHED",
+          expiresAt: "2100-01-01T00:00:00.000Z",
+          withAsset: true,
+        }),
+        await createFixture(client, {
+          status: "UNPUBLISHED",
+          expiresAt: "2100-01-01T00:00:00.000Z",
+          withAsset: true,
+        }),
+      ];
+      for (const fixture of fixtures) {
+        if (!("sourceKey" in fixture) || !("derivativeKey" in fixture)) {
+          assert.fail("Expected publication derivative fixture");
+        }
+        await storage.storage.upload(fixture.sourceKey, IMAGE, { contentType: "image/png" });
+        await storage.storage.createPublishedDerivative(fixture.sourceKey, fixture.derivativeKey);
+        await client.execute(
+          `UPDATE publication_derivative_operations
+           SET status = 'MANUAL_REVIEW', cleanup_attempts = 8,
+               provider_create_succeeded_at = NULL, next_cleanup_at = ?
+           WHERE publication_asset_id = ?`,
+          [NOW.toISOString(), fixture.publicationAssetId],
+        );
+        await client.execute(
+          `UPDATE publication_assets SET derivative_status = 'CLEANUP_PENDING'
+           WHERE id = ?`,
+          [fixture.publicationAssetId],
+        );
+      }
+
+      const scheduled = await runScheduledPublicationLifecycle({
+        DB: adapter,
+        STORAGE: storage.storage,
+        ENVIRONMENT: "local",
+        LOCAL_TEST_MODE: "true",
+      } as Parameters<typeof runScheduledPublicationLifecycle>[0], {
+        now: NOW,
+        limit: 1,
+      });
+      const cleanup = scheduled.operations?.publicationDerivativeCleanup;
+      assert.equal(scheduled.failed, true,
+        "unresolved manual-review work remains an explicit scheduler failure");
+      assert.equal(cleanup?.status, "completed");
+      assert.equal(cleanup?.result?.status, "manual_review");
+      assert.equal(cleanup?.result?.processed, 1);
+      assert.equal(cleanup?.result?.manualReview, 1);
+      assert.ok(cleanup?.result?.hasMore);
+      assert.equal(lookupCount, 1,
+        "the scheduled invocation does not exceed its one-operation batch limit");
     } finally {
       client.close();
     }
@@ -1610,6 +3891,11 @@ describe("publication expiration lifecycle", () => {
       assert.equal(pendingDesign?.deletion_requested, true);
       assert.equal(pendingDesign?.media_cleanup_pending, true);
 
+      await client.execute(
+        `UPDATE publication_derivative_operations SET next_cleanup_at = '2000-01-01T00:00:00.000Z'
+         WHERE publication_asset_id = ? AND status = 'CLEANUP_PENDING'`,
+        [fixture.publicationAssetId],
+      );
       const retried = await harness.deleteDesign(fixture.designId);
       assert.equal(retried.status, 202);
       const repeated = await harness.deleteDesign(fixture.designId);
@@ -1802,10 +4088,10 @@ describe("publication expiration lifecycle", () => {
       await client.execute({
         sql: `INSERT INTO publication_assets (
                 id, publication_id, asset_id, customer_id, consent_version, consented_at,
-                derivative_status, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, 'public-image-v1', ?, 'DELETED', ?, ?)`,
+                derivative_key, derivative_status, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 'public-image-v1', ?, ?, 'PENDING', ?, ?)`,
         args: [publicationAssetId, retainingPublication.publicationId, retainedAssetId,
-          customerId, now, now, now],
+          customerId, now, "public/legacy-pending.webp", now, now],
       });
       const backfilled = await client.execute({
         sql: `SELECT asset_id, revision FROM design_asset_refs
@@ -1816,6 +4102,10 @@ describe("publication expiration lifecycle", () => {
         { asset_id: firstAssetId, revision: 1 },
         { asset_id: retainedAssetId, revision: 1 },
       ].sort((a, b) => a.asset_id.localeCompare(b.asset_id)));
+      await client.execute(
+        "UPDATE publication_assets SET derivative_status = 'PENDING' WHERE id = ?",
+        [publicationAssetId],
+      );
 
       storage.objects.delete(firstKey);
       await assert.rejects(
@@ -1831,8 +4121,20 @@ describe("publication expiration lifecycle", () => {
         [firstAssetId],
       )).rows[0]?.status, "READY");
 
-      assert.deepEqual(await applyMigrations(client, migrations), [12]);
+      assert.deepEqual(await applyMigrations(client, migrations),
+        [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
       assert.deepEqual(await applyMigrations(client, migrations), []);
+      assert.deepEqual(
+        (await client.execute(
+          `SELECT status FROM publication_derivative_operations
+           WHERE publication_asset_id IN (
+             SELECT id FROM publication_assets WHERE publication_id = ?
+           )`,
+          [retainingPublication.publicationId],
+        )).rows,
+        [{ status: "CREATING" }],
+        "migration 0013 preserves in-flight derivatives for recovery rather than forgetting their keys",
+      );
       await assert.rejects(
         client.execute(
           "UPDATE assets SET status = 'DELETION_PENDING' WHERE id = ?",
@@ -2782,9 +5084,17 @@ describe("checkout revision snapshot integrity", () => {
         },
         {
           sql: `INSERT INTO payment_webhook_events (
-            id, provider, event_id, payload_hash, received_at, processed_at, outcome, raw_payload
-          ) VALUES (?, 'SEPAY', ?, ?, ?, ?, 'PROCESSED', '{}')`,
-          args: [randomUUID(), providerPaymentId, "b".repeat(64), now, now],
+            id, provider, event_id, payload_hash, received_at, processed_at,
+            outcome, raw_payload, provider_transaction_id, actual_amount_minor
+          ) VALUES (?, 'SEPAY', ?, ?, ?, ?, 'PROCESSED', '{}', ?, 1000)`,
+          args: [randomUUID(), providerPaymentId, "b".repeat(64), now, now, providerPaymentId],
+        },
+        {
+          sql: `INSERT INTO payment_settlement_evidence (
+            id, payment_id, provider, evidence_source, source_transaction_id,
+            amount_minor, currency, verified_at, payload_hash, status, created_at
+          ) VALUES (?, ?, 'SEPAY', 'SEPAY_WEBHOOK', ?, 1000, 'VND', ?, ?, 'VERIFIED', ?)`,
+          args: [randomUUID(), paymentId, providerPaymentId, now, "b".repeat(64), now],
         },
       ]);
 
@@ -3867,7 +6177,8 @@ describe("upload and design deletion concurrency", () => {
         }));
       }
 
-      assert.deepEqual(await applyMigrations(client, migrations), [12]);
+      assert.deepEqual(await applyMigrations(client, migrations),
+        [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
       assert.deepEqual(await applyMigrations(client, migrations), []);
 
       for (const fixture of protectedFixtures) {
