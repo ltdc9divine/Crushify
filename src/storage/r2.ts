@@ -1,4 +1,5 @@
 import { MAX_IMAGE_BYTES } from "../http.ts";
+import { stripImageMetadata } from "../image-sanitizer.ts";
 import type { Storage, StorageObject, StorageUploadOptions } from "../storage.ts";
 
 export class R2StorageAdapter implements Storage {
@@ -54,10 +55,12 @@ export class R2StorageAdapter implements Storage {
     if (contentType !== "image/png" && contentType !== "image/jpeg") {
       throw new Error("Private source asset has an unsupported media type");
     }
-    const bytes = await source.arrayBuffer();
-    if (bytes.byteLength !== source.size || bytes.byteLength < 1 || bytes.byteLength > MAX_IMAGE_BYTES) {
+    const sourceBytes = new Uint8Array(await source.arrayBuffer());
+    if (sourceBytes.byteLength !== source.size ||
+        sourceBytes.byteLength < 1 || sourceBytes.byteLength > MAX_IMAGE_BYTES) {
       throw new Error("Private source asset has an invalid size");
     }
+    const bytes = stripImageMetadata(sourceBytes, contentType);
     await this.bucket.put(derivativeKey, bytes, {
       httpMetadata: { contentType, cacheControl: "private, no-store" },
       customMetadata: { publishedDerivative: "true" },

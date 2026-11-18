@@ -262,7 +262,7 @@ function clearAuthenticationCookies(requestId: string, env: Env): Response {
   return jsonResponse({ authenticated: false }, 200, requestId, headers);
 }
 
-async function applyRateLimit(
+export async function applyRateLimit(
   env: Env,
   key: string,
   now: number,

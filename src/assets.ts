@@ -1,7 +1,8 @@
-import { requireCsrf, requireSession } from "./auth.ts";
+import { applyRateLimit, requireCsrf, requireSession } from "./auth.ts";
 import { logSafeError } from "./logging.ts";
 import { apiError, MAX_IMAGE_BYTES, nowIso, randomToken, readBoundedBody, readJson, safeId, sha256, jsonResponse } from "./http.ts";
 import { serveAsset } from "./designs.ts";
+import { stripImageMetadata } from "./image-sanitizer.ts";
 import type { Env } from "./types.ts";
 import { assetReferences, type TemplateData } from "./template-registry.ts";
 
@@ -9,6 +10,10 @@ const UPLOAD_LEASE_MS = 15 * 60 * 1000;
 const UPLOAD_CLEANUP_DELAY_MS = 60 * 60 * 1000;
 const UPLOAD_ORPHAN_RECHECK_MS = 60 * 60 * 1000;
 const UPLOAD_CLEANUP_MAX_FAILURES = 8;
+const MAX_CUSTOMER_UPLOAD_BYTES = 64 * 1024 * 1024;
+const UPLOAD_GRANT_LIMIT = 20;
+const UPLOAD_CONTENT_LIMIT = 20;
+const UPLOAD_RATE_WINDOW_SECONDS = 10 * 60;
 
 interface ImageInfo {
   contentType: "image/png" | "image/jpeg";
@@ -86,6 +91,15 @@ async function createUpload(
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
+  if (!await applyRateLimit(
+    env,
+    `asset-grant:${required.session!.customerId}`,
+    Math.floor(Date.now() / 1000),
+    UPLOAD_GRANT_LIMIT,
+    UPLOAD_RATE_WINDOW_SECONDS,
+  )) {
+    return apiError(requestId, 429, "RATE_LIMITED", "Too many upload requests. Try again later.");
+  }
   const parsed = await readJson(request, requestId);
   if (parsed.response) return parsed.response;
   const value = parsed.value;
@@ -118,6 +132,13 @@ async function createUpload(
   if ((count?.count ?? 0) >= maxAssets) {
     return apiError(requestId, 409, "PHOTO_LIMIT", `Design already has ${maxAssets} photos`);
   }
+  const usage = await env.DB.prepare(
+    "SELECT COALESCE(SUM(byte_size), 0) AS bytes FROM assets WHERE customer_id = ? AND status <> 'DELETED'",
+  ).bind(required.session!.customerId).first<{ bytes: number }>();
+  if ((usage?.bytes ?? 0) + size > MAX_CUSTOMER_UPLOAD_BYTES) {
+    return apiError(requestId, 413, "CUSTOMER_STORAGE_QUOTA",
+      "Your saved images exceed the 64 MiB account limit");
+  }
 
   const id = safeId();
   const uploadSessionId = safeId();
@@ -143,10 +164,15 @@ async function createUpload(
          SELECT COUNT(*) FROM assets
          WHERE design_id = ? AND customer_id = ?
            AND status IN ('PENDING','QUARANTINED','READY')
-       ) < ?`,
+       ) < ?
+       AND (
+         SELECT COALESCE(SUM(byte_size), 0) FROM assets
+         WHERE customer_id = ? AND status <> 'DELETED'
+       ) + ? <= ?`,
     ).bind(
       id, required.session!.customerId, designId, key, mediaType, size, now, now,
       designId, required.session!.customerId, designId, required.session!.customerId, maxAssets,
+      required.session!.customerId, size, MAX_CUSTOMER_UPLOAD_BYTES,
     ),
     env.DB.prepare(
       `INSERT INTO asset_upload_sessions
@@ -178,6 +204,23 @@ async function createUpload(
     ).bind(id, id),
   ]);
   if (inserted[0]?.meta.changes !== 1 || inserted[1]?.meta.changes !== 1) {
+    if (inserted[0]?.meta.changes !== 1) {
+      const currentUsage = await env.DB.prepare(
+        "SELECT COALESCE(SUM(byte_size), 0) AS bytes FROM assets WHERE customer_id = ? AND status <> 'DELETED'",
+      ).bind(required.session!.customerId).first<{ bytes: number }>();
+      if ((currentUsage?.bytes ?? 0) + size > MAX_CUSTOMER_UPLOAD_BYTES) {
+        return apiError(requestId, 413, "CUSTOMER_STORAGE_QUOTA",
+          "Your saved images exceed the 64 MiB account limit");
+      }
+      const currentCount = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM assets
+         WHERE design_id = ? AND customer_id = ?
+           AND status IN ('PENDING','QUARANTINED','READY')`,
+      ).bind(designId, required.session!.customerId).first<{ count: number }>();
+      if ((currentCount?.count ?? 0) >= maxAssets) {
+        return apiError(requestId, 409, "PHOTO_LIMIT", `Design already has ${maxAssets} photos`);
+      }
+    }
     return apiError(requestId, 409, "DESIGN_CHANGED",
       "This design is no longer available for uploads. Reopen an active draft and try again.");
   }
@@ -232,6 +275,15 @@ async function uploadContent(
   if (session.upload_status === "PENDING" && session.expires_at <= checkedAt) {
     return apiError(requestId, 401, "INVALID_UPLOAD_TOKEN", "Upload capability is invalid or expired");
   }
+  if (!await applyRateLimit(
+    env,
+    `asset-content:${session.customer_id}`,
+    Math.floor(Date.now() / 1000),
+    UPLOAD_CONTENT_LIMIT,
+    UPLOAD_RATE_WINDOW_SECONDS,
+  )) {
+    return apiError(requestId, 429, "RATE_LIMITED", "Too many image uploads. Try again later.");
+  }
   const declaredLength = Number(request.headers.get("content-length") ?? 0);
   const maxBytes = uploadMaxBytes(env);
   if (session.byte_size > maxBytes || declaredLength > maxBytes ||
@@ -254,6 +306,18 @@ async function uploadContent(
   const headerType = request.headers.get("content-type")?.split(";")[0].trim();
   if (!info || info.contentType !== session.media_type || info.contentType !== headerType) {
     return apiError(requestId, 422, "UPLOAD_REJECTED", "Only valid PNG and JPEG images are accepted");
+  }
+  let sanitizedBytes: Uint8Array;
+  try {
+    sanitizedBytes = stripImageMetadata(bytes, info.contentType);
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+    return apiError(requestId, 422, "UPLOAD_REJECTED", "Image metadata could not be sanitized");
+  }
+  const sanitizedInfo = detectImage(sanitizedBytes);
+  if (!sanitizedInfo || sanitizedInfo.contentType !== info.contentType ||
+      sanitizedInfo.width !== info.width || sanitizedInfo.height !== info.height) {
+    return apiError(requestId, 422, "UPLOAD_REJECTED", "Image metadata could not be sanitized");
   }
 
   const now = nowIso();
@@ -321,20 +385,20 @@ async function uploadContent(
       "This upload was cancelled because its design changed or was deleted.");
   }
 
-  const digest = await sha256(bytes);
+  const digest = await sha256(sanitizedBytes);
   try {
-    await env.STORAGE.upload(attemptObjectKey, bytes, {
-      contentType: info.contentType,
+    await env.STORAGE.upload(attemptObjectKey, sanitizedBytes, {
+      contentType: sanitizedInfo.contentType,
       sha256: digest,
-      width: info.width,
-      height: info.height,
+      width: sanitizedInfo.width,
+      height: sanitizedInfo.height,
     });
     const finalizedAt = nowIso();
     const finalized = await env.DB.batch([
       env.DB.prepare(
         `UPDATE assets
          SET object_key = ?, sha256 = ?, width = ?, height = ?,
-           status = 'QUARANTINED', updated_at = ?
+           byte_size = ?, status = 'QUARANTINED', updated_at = ?
          WHERE id = ? AND customer_id = ? AND status = 'PENDING'
            AND EXISTS (
              SELECT 1 FROM designs
@@ -356,7 +420,8 @@ async function uploadContent(
                AND object_key = ? AND status = 'UPLOADING'
            )`,
       ).bind(
-        attemptObjectKey, digest, info.width, info.height, finalizedAt,
+        attemptObjectKey, digest, sanitizedInfo.width, sanitizedInfo.height,
+        sanitizedBytes.byteLength, finalizedAt,
         assetId, session.customer_id, session.customer_id,
         leaseToken, finalizedAt, attemptId, leaseToken, attemptObjectKey,
       ),

@@ -1,4 +1,5 @@
 import { MAX_IMAGE_BYTES } from "../http.ts";
+import { stripImageMetadata } from "../image-sanitizer.ts";
 import { StorageError, type Storage, type StorageObject, type StorageUploadOptions } from "../storage.ts";
 import { validatePublishedStorageKey, validateStorageKey, validateUpload } from "./r2.ts";
 
@@ -152,10 +153,12 @@ export class CloudinaryStorageAdapter implements Storage {
     if (!source || (source.contentType !== "image/png" && source.contentType !== "image/jpeg")) {
       throw new StorageError("Private source asset is unavailable or invalid");
     }
-    const bytes = new Uint8Array(await source.arrayBuffer());
-    if (bytes.byteLength !== source.size || bytes.byteLength < 1 || bytes.byteLength > MAX_IMAGE_BYTES) {
+    const sourceBytes = new Uint8Array(await source.arrayBuffer());
+    if (sourceBytes.byteLength !== source.size ||
+        sourceBytes.byteLength < 1 || sourceBytes.byteLength > MAX_IMAGE_BYTES) {
       throw new StorageError("Private source asset has an invalid size");
     }
+    const bytes = stripImageMetadata(sourceBytes, source.contentType);
     const timestamp = Math.floor(this.now() / 1000);
     const parameters = {
       overwrite: "true",

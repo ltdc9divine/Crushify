@@ -1,4 +1,4 @@
-import { requireCsrf, requireSession } from "./auth.ts";
+import { applyRateLimit, requireCsrf, requireSession } from "./auth.ts";
 import { logSafeError } from "./logging.ts";
 import {
   cleanupAssets,
@@ -17,6 +17,10 @@ import {
 import type { Env } from "./types.ts";
 
 const TOKEN_SECONDS = 15 * 60;
+const DESIGN_CREATE_LIMIT = 10;
+const DESIGN_CREATE_WINDOW_SECONDS = 60 * 60;
+const DESIGN_SAVE_LIMIT = 1_200;
+const DESIGN_SAVE_WINDOW_SECONDS = 10 * 60;
 
 const designHasProtectedHistory = `(
   EXISTS (
@@ -129,6 +133,15 @@ async function updateDesign(
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
+  if (!await applyRateLimit(
+    env,
+    `design-save:${required.session!.customerId}`,
+    Math.floor(Date.now() / 1000),
+    DESIGN_SAVE_LIMIT,
+    DESIGN_SAVE_WINDOW_SECONDS,
+  )) {
+    return apiError(requestId, 429, "RATE_LIMITED", "Too many design saves. Try again later.");
+  }
   const parsed = await readJson(request, requestId);
   if (parsed.response) return parsed.response;
   if (!isRecord(parsed.value) || Object.keys(parsed.value).length !== 3 ||
@@ -589,6 +602,15 @@ async function createDesign(
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
+  if (!await applyRateLimit(
+    env,
+    `design-create:${required.session!.customerId}`,
+    Math.floor(Date.now() / 1000),
+    DESIGN_CREATE_LIMIT,
+    DESIGN_CREATE_WINDOW_SECONDS,
+  )) {
+    return apiError(requestId, 429, "RATE_LIMITED", "Too many designs created. Try again later.");
+  }
   const parsed = await readJson(request, requestId);
   if (parsed.response) return parsed.response;
   const payload = validateCreatePayload(parsed.value);

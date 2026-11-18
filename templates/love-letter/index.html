@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-tMNpvwpaAi+7nhcLvkeVtJEYFs5rbK50DoVZc0lHefI='; style-src 'self' https://fonts.googleapis.com 'sha256-q4AC7yvZtYqCPOZOhLpRbF8AVe2aI5IJiaD3CfJ9GAE='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-kFjS7lqa0CAeVwtmHLj4G9MbUZN6u825V33S43zDVRQ='; style-src 'self' https://fonts.googleapis.com 'sha256-q4AC7yvZtYqCPOZOhLpRbF8AVe2aI5IJiaD3CfJ9GAE='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
 <meta name="referrer" content="no-referrer">
 <title>Crushify · Lá thư tình 3D</title>
 <link rel="stylesheet" href="/shared/publication-bootstrap.css">
@@ -84,7 +84,7 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 <script src="/shared/publication-bootstrap.js"></script>
 <script src="/shared/customer-editor-data-url.js"></script>
 <script src="/shared/customer-editor.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 ;(async()=>{const publicationData=await window.loadCrushifyPublication('love-letter');if(publicationData===false)return;
 const $=s=>document.querySelector(s),clamp=(v,a,b)=>Math.min(b,Math.max(a,v)),lerp=(a,b,t)=>a+(b-a)*t,rnd=(a,b)=>a+Math.random()*(b-a),ease=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
@@ -101,7 +101,7 @@ let rc=Q.get('mode')==='recipient'||Q.has('preview');const app=$('#app');
 function setRc(v){const was=rc;rc=v;app.classList.toggle('rc',v);const exit=$('#exit');exit.hidden=!(v&&Q.get('mode')!=='recipient');if(v&&!exit.hidden)exit.focus();else if(!v&&was)$('#b-pv').focus()}
 function fb(m){$('#cv').hidden=true;const f=$('#fb');f.hidden=false;f.innerHTML='';const h=document.createElement('h2'),p=document.createElement('p'),s=document.createElement('p'),n=document.createElement('small');h.textContent=D.title||('Gửi '+D.to);p.textContent=D.msg;s.textContent=(D.from||'')+' ♥';n.textContent=m;f.append(h,p,s,n)}
 let toastT,lastToastMessage='';function toast(m,ms=4500){const t=$('#toast');t.textContent=m===lastToastMessage?`${m}\u00a0`:m;lastToastMessage=m;t.classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('on'),ms)}
-function ld(u){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=u;s.onload=ok;s.onerror=no;document.head.appendChild(s)})}
+const THREE_FALLBACK_URL='https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',THREE_INTEGRITY='sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu';function ld(u){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=u;if(u===THREE_FALLBACK_URL){s.integrity=THREE_INTEGRITY;s.crossOrigin='anonymous';s.referrerPolicy='no-referrer'}s.onload=ok;s.onerror=no;document.head.appendChild(s)})}
 (async()=>{setRc(rc);if(!window.THREE){try{await ld('https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js')}catch(e){}}
 try{main()}catch(e){console.error(e);fb('Không khởi tạo được cảnh 3D trên thiết bị này.')}})();
 

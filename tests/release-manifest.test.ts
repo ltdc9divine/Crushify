@@ -13,6 +13,7 @@ test("Vercel release retains runtime entry points and migration packaging", asyn
     readFile(join(root, ".vercelignore"), "utf8"),
     readFile(join(root, "docs/FINAL-API-HANDOFF.md"), "utf8"),
   ]);
+  const versionedApiSource = await readFile(join(root, "api/v1.ts"), "utf8");
   const vercel = JSON.parse(vercelSource) as {
     functions?: Record<string, { includeFiles?: string }>;
     builds?: unknown;
@@ -22,6 +23,7 @@ test("Vercel release retains runtime entry points and migration packaging", asyn
   assert.equal(vercel.functions?.["api/[...path].ts"]?.includeFiles, "migrations/**");
   assert.equal(vercel.builds, undefined);
   assert.equal(packageJson.scripts?.build, undefined);
+  assert.match(versionedApiSource, /import handler from "\.\/\[\.\.\.path\]\.ts"/);
   for (const pattern of [
     ".agents",
     ".assetsignore",
@@ -44,6 +46,7 @@ test("Vercel release retains runtime entry points and migration packaging", asyn
 
   for (const file of [
     "api/[...path].ts",
+    "api/v1.ts",
     "api/cron/publication-lifecycle.ts",
     "index.html",
     "css/style.css",

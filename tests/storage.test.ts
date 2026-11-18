@@ -9,7 +9,10 @@ const now = 1_800_000_000_000;
 const secret = "local-cloudinary-test-secret";
 const key = `private/${"a".repeat(43)}-png`;
 const legacyKey = `private/${"b".repeat(43)}.png`;
-const bytes = new Uint8Array([1, 2, 3, 4]);
+const bytes = new Uint8Array(Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/r9sAAAAASUVORK5CYII=",
+  "base64",
+));
 const options: StorageUploadOptions = {
   contentType: "image/png",
   sha256: "a".repeat(64),

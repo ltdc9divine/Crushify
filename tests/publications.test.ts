@@ -8,6 +8,7 @@ import qrcode from "qrcode-generator";
 import type { Database, DatabaseStatement } from "../src/database.ts";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
+import { applyRateLimit } from "../src/auth.ts";
 import { handleApiRequest } from "../src/index.ts";
 import { reconcileUploadAttemptCleanup } from "../src/assets.ts";
 import { createVercelApiHandler } from "../src/platform/vercel.ts";
@@ -5165,6 +5166,87 @@ describe("checkout revision snapshot integrity", () => {
 });
 
 describe("upload and design deletion concurrency", () => {
+  it("rejects upload grants that exceed the customer's active storage quota", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      await client.execute({
+        sql: "UPDATE assets SET byte_size = ? WHERE id = ?",
+        args: [64 * 1024 * 1024, fixture.assetId],
+      });
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      assert.equal(grant.response.status, 413);
+      assert.equal(
+        (grant.body as unknown as { error: { code: string } }).error.code,
+        "CUSTOMER_STORAGE_QUOTA",
+      );
+      assert.equal(
+        Number((await client.execute(
+          "SELECT COUNT(*) AS count FROM assets WHERE customer_id = ?",
+          [fixture.customerId],
+        )).rows[0]?.count),
+        1,
+      );
+    } finally {
+      client.close();
+    }
+  });
+
+  it("enforces the customer storage quota atomically for concurrent upload grants", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    const bothBatchesStarted = deferred();
+    const releaseBatches = deferred();
+    let batchCount = 0;
+    const database: Database = {
+      prepare: (query) => adapter.prepare(query),
+      async batch(statements) {
+        batchCount++;
+        if (batchCount === 2) bothBatchesStarted.resolve();
+        await releaseBatches.promise;
+        return adapter.batch(statements);
+      },
+    };
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      await client.execute({
+        sql: "UPDATE assets SET byte_size = ? WHERE id = ?",
+        args: [64 * 1024 * 1024 - UPLOAD_PNG.byteLength, fixture.assetId],
+      });
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(database, storage.storage, session);
+      const grantsPromise = Promise.all([
+        createUploadGrant(harness.env, session, fixture.designId),
+        createUploadGrant(harness.env, session, fixture.designId),
+      ]);
+
+      await bothBatchesStarted.promise;
+      releaseBatches.resolve();
+      const grants = await grantsPromise;
+      assert.deepEqual(grants.map((grant) => grant.response.status).sort(), [201, 413]);
+      assert.equal(
+        Number((await client.execute(
+          "SELECT SUM(byte_size) AS bytes FROM assets WHERE customer_id = ?",
+          [fixture.customerId],
+        )).rows[0]?.bytes),
+        64 * 1024 * 1024,
+      );
+    } finally {
+      releaseBatches.resolve();
+      client.close();
+    }
+  });
+
   it("serializes design reference creation before asset deletion", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -6244,6 +6326,23 @@ describe("upload and design deletion concurrency", () => {
         [unrelated.assetId],
       )).rows[0]?.status, "DELETED");
       assert.deepEqual((await client.execute("PRAGMA foreign_key_check")).rows, []);
+    } finally {
+      client.close();
+    }
+  });
+});
+
+describe("database-backed request limits", () => {
+  it("enforces a fixed-window limit and resets at the next window", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    try {
+      await applyMigrations(client, await loadMigrations());
+      const env = { DB: adapter } as Parameters<typeof applyRateLimit>[0];
+      assert.equal(await applyRateLimit(env, "customer:test", 100, 2, 60), true);
+      assert.equal(await applyRateLimit(env, "customer:test", 101, 2, 60), true);
+      assert.equal(await applyRateLimit(env, "customer:test", 102, 2, 60), false);
+      assert.equal(await applyRateLimit(env, "customer:test", 160, 2, 60), true);
     } finally {
       client.close();
     }

@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-n0kqVptLGkdcX7QLmr27FyXkjSW86BTHJEK7wm7iH5c='; style-src 'self' https://fonts.googleapis.com 'sha256-DiqkVsyLiSy7U7a+C908KfaI9uepcP6H90F/l0e3VII='; style-src-attr 'unsafe-hashes' 'sha256-ksGPa9rBx3qdJd85P0QDyQNATrJagvS5YtLUpHxWuto='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-xSIUsFtqn+8xk7a0BGh8OjdsZSYHRUL4jYE9m+XaHnI='; style-src 'self' https://fonts.googleapis.com 'sha256-DiqkVsyLiSy7U7a+C908KfaI9uepcP6H90F/l0e3VII='; style-src-attr 'unsafe-hashes' 'sha256-ksGPa9rBx3qdJd85P0QDyQNATrJagvS5YtLUpHxWuto='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'" />
 <meta name="referrer" content="no-referrer">
 <title>Crushify · Vũ trụ của chúng mình</title>
 <link rel="stylesheet" href="/shared/publication-bootstrap.css">
@@ -81,7 +81,7 @@ button:hover,.btn:hover{border-color:var(--a)}button.on{border-color:var(--a);ba
 </main></div>
 <div id="lb" hidden><figure><img alt=""><figcaption></figcaption></figure></div>
 <script src="/shared/publication-bootstrap.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 ;(async()=>{const publicationData=await window.loadCrushifyPublication('our-universe');if(publicationData===false)return;
 const $=s=>document.querySelector(s),clamp=(v,a,b)=>Math.min(b,Math.max(a,v)),lerp=(a,b,t)=>a+(b-a)*t,rnd=(a,b)=>a+Math.random()*(b-a),ease=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
@@ -177,7 +177,7 @@ for(let i=0;i<1800;i++){const u=Math.random()*6.283,r=Math.sqrt(Math.random());h
 let a=0;(function f(){requestAnimationFrame(f);const w=c.width=c.clientWidth,h=c.height=c.clientHeight;g.fillStyle='#05050b';g.fillRect(0,0,w,h);g.globalCompositeOperation='lighter';
 st.forEach(s=>{g.fillStyle=`rgba(255,255,255,${.35+.35*Math.sin(a*2+s[3])})`;g.fillRect(s[0]*w,s[1]*h,s[2],s[2])});a+=.01;const ca=Math.cos(a),sa=Math.sin(a),sc=Math.min(w,h)/38,cx=w*(w>820?.64:.5),cy=h*.46;
 g.fillStyle='rgba(240,77,178,.75)';hp.forEach(p=>{const x=p[0]*ca-p[2]*sa,z=p[0]*sa+p[2]*ca,k=1+z*.02;g.fillRect(cx+x*sc*k,cy+p[1]*sc*k,2,2)});g.globalCompositeOperation='source-over'})()}
-function ld(u){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=u;s.onload=ok;s.onerror=no;document.head.appendChild(s)})}
+const THREE_FALLBACK_URL='https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',THREE_INTEGRITY='sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu';function ld(u){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=u;if(u===THREE_FALLBACK_URL){s.integrity=THREE_INTEGRITY;s.crossOrigin='anonymous';s.referrerPolicy='no-referrer'}s.onload=ok;s.onerror=no;document.head.appendChild(s)})}
 (async()=>{await initializeApi();if(!revision&&!previewToken){setTheme(D.theme);setAnim(D.animation);renderText()}if(Q.has('d')&&!Q.has('design'))history.replaceState(null,'',location.pathname);
 if(!window.THREE){try{await ld('https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js')}catch(e){}}
 try{if(!window.THREE)throw new Error('Không tải được Three.js.');initGL()}catch(e){console.error(e);fb2d(e.message||'WebGL không khả dụng.')}})();

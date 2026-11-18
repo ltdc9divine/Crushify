@@ -13,7 +13,7 @@ The Vercel payload includes the following runtime files and recursive static tre
 | Purpose | Files |
 |---|---|
 | Vercel and runtime configuration | `vercel.json`, `package.json`, `package-lock.json`, `tsconfig.json` |
-| API entry points | `api/[...path].ts`, `api/cron/publication-lifecycle.ts` |
+| API entry points | `api/v1.ts`, `api/[...path].ts`, `api/cron/publication-lifecycle.ts` |
 | Server runtime | `src/admin.ts`, `src/assets.ts`, `src/auth.ts`, `src/custom-design.ts`, `src/database.ts`, `src/designs.ts`, `src/http.ts`, `src/index.ts`, `src/logging.ts`, `src/payments.ts`, `src/product-catalog.ts`, `src/publications.ts`, `src/scheduler.ts`, `src/security-headers.ts`, `src/storage-plans.ts`, `src/storage.ts`, `src/template-registry.ts`, `src/types.ts`, `src/universe.ts` |
 | Database runtime | `src/database/d1.ts`, `src/database/migrations.ts`, `src/database/provider.ts`, `src/database/turso.ts` |
 | Payment runtime | `src/payments/evidence.ts`, `src/payments/policy.ts`, `src/payments/provider.ts`, `src/payments/sepay-api-v2.ts`, `src/payments/sepay-reconciliation-policy.ts`, `src/payments/sepay-reconciliation.ts`, `src/payments/sepay.ts` |

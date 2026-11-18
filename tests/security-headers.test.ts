@@ -163,6 +163,76 @@ describe("static security headers and CSP", () => {
     }
   });
 
+  it("pins every remote Three.js script and import-map module with Subresource Integrity", async () => {
+    const threeR128Integrity =
+      "sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu";
+    for (const file of ["templates/our-universe/index.html", "templates/love-letter/index.html"]) {
+      const html = await readFile(new URL(file, root), "utf8");
+      const tag = [...html.matchAll(/<script\b([^>]*)>/gi)]
+        .map((match) => match[1])
+        .find((attributes) =>
+          attributes.includes("https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js")
+        );
+      assert.ok(tag, `Missing pinned Three.js tag in ${file}`);
+      assert.ok(tag.includes(`integrity="${threeR128Integrity}"`), `Missing SRI in ${file}`);
+      assert.match(tag, /\bcrossorigin="anonymous"/i);
+      assert.match(tag, /\breferrerpolicy="no-referrer"/i);
+    }
+
+    for (const file of ["templates/our-universe/index.html", "templates/love-letter/index.html"]) {
+      const source = await readFile(new URL(file, root), "utf8");
+      assert.ok(source.includes(
+        `const THREE_FALLBACK_URL='https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',THREE_INTEGRITY='${threeR128Integrity}'`,
+      ), `Missing fallback SRI mapping in ${file}`);
+      assert.match(source, /s\.integrity=THREE_INTEGRITY;s\.crossOrigin='anonymous';s\.referrerPolicy='no-referrer'/);
+    }
+
+    for (const file of ["templates/our-memories/our-memories.js", "templates/say-yes/say-yes.js"]) {
+      const source = await readFile(new URL(file, root), "utf8");
+      assert.ok(source.includes(`'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js':'${threeR128Integrity}'`),
+        `Missing cdnjs SRI mapping in ${file}`);
+      assert.ok(source.includes(`'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js':'${threeR128Integrity}'`),
+        `Missing jsDelivr SRI mapping in ${file}`);
+      assert.match(source, /e\.integrity=integrity;e\.crossOrigin='anonymous';e\.referrerPolicy='no-referrer'/);
+    }
+
+    const distanceHtml = await readFile(
+      new URL("templates/distance-means-nothing/index.html", root),
+      "utf8",
+    );
+    const importMapBody = distanceHtml.match(/<script type="importmap">([\s\S]*?)<\/script>/i)?.[1];
+    assert.ok(importMapBody, "Missing Distance Means Nothing import map");
+    const importMap = JSON.parse(importMapBody) as {
+      integrity?: Record<string, string>;
+    };
+    assert.deepEqual(importMap.integrity, {
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js":
+        "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js":
+        "sha384-qlO/ZugKPxAQUAvTlQoo0QECzxJIJySZmCF/DHdb2Xn/hHndFwX/vfUAC9Hbk6LP",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js":
+        "sha384-L+Ns9skCAqjab7aG8LH5VLknBCoENW7p37sOj39jnITwlWZFabWc29JwzgYf6ygy",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/OutputPass.js":
+        "sha384-RJJc+pg+Ue2ZwXlf8n78cPHMiHrqfr+AxxabF5vkXMXjNPF6nSUoqb20IQXkMo6c",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/RenderPass.js":
+        "sha384-LwKrkOBAkmQ2KT4cv6P6q9Rb9L01GIFU34Zp16tGWZoBnrVuujfjpYZb7OxEMb0J",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js":
+        "sha384-R734/7SvtqjjeteDKG4qcQA0adDCZ1ZcKfYUZsbVr9qqHGlgSXH9eNN4b3NIgwuc",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/Pass.js":
+        "sha384-gSqIFh8vMmp1veyOysIS3KPVUl/A5JPefYvW4b89OeYeW0bwkrjN7qcC1h0XJK/K",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/MaskPass.js":
+        "sha384-SDM80tiGflO8UDV/QzR/mASjcc/+wF7KfRVFNHJUIPcTctwoPI8GoWVTlccZw7V4",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/ShaderPass.js":
+        "sha384-zetU6HhR/vTtgSvnS9DE+GQPZhVT/ZOSLa/1+DSM6rkM9hvBgQWr9bCEosZt93ch",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/shaders/CopyShader.js":
+        "sha384-kzVlcj2amFaRNIWZ5zE0PmIN+QTNWWvrgKk31S8N/7w0nf7Qq3xqxHRLbD2UPPSl",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/shaders/LuminosityHighPassShader.js":
+        "sha384-621kiA/kIdX8rtH6VU6+SwMVx+B8g7MQ6x0fei5dZVX3CQZSLkpOlglIk9sxE+/g",
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/shaders/OutputShader.js":
+        "sha384-fT4woAJJtXcAxElHG1cGfIZkiSxaj7u+24LHlfNVDZZ9aSjZvr2emMGPmcD9eF0V",
+    });
+  });
+
   it("loads the shared customer editor styles without runtime inline style injection", async () => {
     const source = await readFile(new URL("../shared/customer-editor.js", import.meta.url), "utf8");
     assert.doesNotMatch(source, /createElement\(["']style["']\)/);
@@ -198,6 +268,7 @@ describe("static security headers and CSP", () => {
     };
 
     assert.deepEqual(vercel.rewrites, [
+      { source: "/api/v1/:path*", destination: "/api/v1?__crushify_path=:path*" },
       { source: "/p/:slug", destination: "/p/index.html" },
     ]);
     assert.deepEqual(vercel.crons, [
