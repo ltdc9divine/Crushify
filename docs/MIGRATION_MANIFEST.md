@@ -1,6 +1,6 @@
 # Database Migration Manifest
 
-Apply migrations in ascending order, from 0001 through 0023.
+Apply migrations in ascending order, from 0001 through 0024.
 
 Do not edit or replace a released migration. Make future schema changes in a new, consecutively numbered migration.
 
@@ -29,3 +29,4 @@ Do not edit or replace a released migration. Make future schema changes in a new
 | 21 | 0021 | `0021_admin_activity_audit.sql` | `a68311d13e6532628ece129c409b9d771c2e617a8a831b0f0f9b5a7244b0fe5e` |
 | 22 | 0022 | `0022_custom_design_customer_replies.sql` | `1d8625d50d2ea58f9bb815c5d50a6b179e2123e5282c97dc090d99f4162432c7` |
 | 23 | 0023 | `0023_manual_bank_transfer_settlement.sql` | `8d9896000cd14f53f8ef9a74a72e2e9d644e7809ce3096a7486372ca9a1bf75f` |
+| 24 | 0024 | `0024_manual_payment_activity_audit.sql` | `80683828a47b0f856c4589a83316e725154d0b1cc246dbb6a420d5e221ba031f` |

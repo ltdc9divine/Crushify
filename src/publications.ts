@@ -1132,6 +1132,10 @@ async function publish(
     if (!extension || !Number.isSafeInteger(item.byte_size) || item.byte_size < 1) {
       return apiError(requestId, 422, "ASSET_UNAVAILABLE", "A selected image has invalid metadata");
     }
+    const normalizeImage = env.IMAGE_NORMALIZER;
+    if (!normalizeImage) {
+      return apiError(requestId, 503, "IMAGE_PROCESSOR_UNAVAILABLE", "Image processing is unavailable");
+    }
     const derivativeKey = `published/${randomToken(32)}-${extension}`;
     const operationId = crypto.randomUUID();
     const operationToken = randomToken(32);
@@ -1169,7 +1173,7 @@ async function publish(
       return apiError(requestId, 409, "CONFLICT", "Photo consent changed during publish");
     }
     try {
-      await env.STORAGE.createPublishedDerivative(item.object_key, derivativeKey);
+      await env.STORAGE.createPublishedDerivative(item.object_key, derivativeKey, normalizeImage);
     } catch (error) {
       logSafeError("publication.media_creation_failed", "storage", error, { request_id: requestId });
       const failedAt = nowIso();

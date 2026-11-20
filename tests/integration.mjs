@@ -10,6 +10,7 @@ import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { runDatabaseContract } from "./database-contract.mjs";
 import { runPaymentContract } from "./payment-contract.mjs";
 import { createLocalEmailSink } from "./local-email-sink.mjs";
+import { createLocalImageNormalizer } from "./local-image-normalizer.mjs";
 
 const root = await realpath(process.cwd());
 const systemTempRoot = await realpath(tmpdir());
@@ -59,6 +60,7 @@ const origin = `http://127.0.0.1:${port}`;
 const webhookSecret = randomBytes(32).toString("hex");
 const receivingAccount = "0000000000";
 const emailSink = await createLocalEmailSink();
+let localImageNormalizer;
 const workerEnvironmentNames = new Set([
   "APPDATA",
   "CI",
@@ -121,6 +123,8 @@ function startWorker(
     "LOCAL_TEST_MODE:true",
     "--var",
     `LOCAL_TEST_MAIL_SINK_URL:${emailSink.url}`,
+    "--var",
+    `LOCAL_TEST_IMAGE_NORMALIZER_URL:${localImageNormalizer.url}`,
     "--var",
     "LOCAL_TEST_CATALOG_OVERRIDE:true",
   ];
@@ -690,6 +694,7 @@ function makePng() {
   return Buffer.concat([
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
     chunk("IHDR", header),
+    chunk("tEXt", Buffer.from("Comment\0CRUSHIFY_TEST_METADATA")),
     chunk("IDAT", Buffer.from([120, 156, 99, 248, 207, 192, 240, 31, 0, 5, 0, 1, 255])),
     chunk("IEND", Buffer.alloc(0)),
   ]);
@@ -724,6 +729,7 @@ try {
     "crushify-local",
     ...localD1Flags(),
   ], { cwd: root, stdio: "ignore" });
+  localImageNormalizer = await createLocalImageNormalizer();
   startWorker();
   await waitReady();
   const live = await json("/health/live", null);
@@ -868,6 +874,17 @@ try {
   assert.equal(previewData.body.data.headline, syntheticHeadline);
   await runPaymentContract({
     request: paymentContractRequest,
+    resetDesignCreateRateLimit: (email) => {
+      const customerRows = queryLocalD1(
+        `SELECT id FROM customers WHERE email_normalized = '${email.replaceAll("'", "''")}'`,
+      );
+      const customerId = customerRows[0]?.id;
+      if (!customerId) throw new Error("Could not isolate payment design-create rate limit");
+      const keyHash = createHash("sha256")
+        .update(`design-create:${customerId}`)
+        .digest("hex");
+      executeLocalD1(`DELETE FROM auth_rate_limits WHERE key_hash = '${keyHash}'`);
+    },
     async seedPrice(amount) {
       for (const [templateId, schemaVersion] of [
         ["our-universe", 1],
@@ -946,6 +963,7 @@ try {
       );
     },
     owner: first,
+    ownerEmail,
     otherOwner: await signIn(`phase2-payment-other-${crypto.randomUUID()}@example.test`),
     designId: paymentDesign.body.design_id,
     webhookSecret,
@@ -1167,6 +1185,26 @@ try {
         `SELECT COUNT(*) AS count FROM orders WHERE design_id = '${designId}'`,
       );
       return Number(rows[0]?.count ?? 0);
+    },
+    setLegacyRenewalRequestHash(orderId) {
+      const rows = queryLocalD1(
+        `SELECT design_id, renewal_publication_id FROM orders WHERE id = '${orderId}'`,
+      );
+      const order = rows[0];
+      if (!order?.renewal_publication_id) {
+        throw new Error("Expected an order with an implicitly selected renewal publication");
+      }
+      const fingerprint = createHash("sha256").update(JSON.stringify({
+        design_id: order.design_id,
+        storage_plan_id: "1-month",
+        duration_type: "monthly",
+        hosting_months: 1,
+        renewal_publication_id: order.renewal_publication_id,
+        asset_consents: [],
+      })).digest("hex");
+      executeLocalD1(
+        `UPDATE orders SET request_hash = '${fingerprint}' WHERE id = '${orderId}'`,
+      );
     },
     deactivateTemplatePrice() {
       executeLocalD1(
@@ -1730,9 +1768,64 @@ try {
     method: "POST",
     mutating: true,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ design_id: designId, media_type: "image/png", size: 5 * 1024 * 1024 + 1 }),
+    body: JSON.stringify({ design_id: designId, media_type: "image/png", size: 4 * 1024 * 1024 + 1 }),
   });
   assert.equal(tooLargeGrant.response.status, 413);
+
+  const maximumImageBytes = 4 * 1024 * 1024;
+  const oversizedBinaryGrant = await json("/assets/upload-url", first, {
+    method: "POST",
+    mutating: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      design_id: designId,
+      media_type: "image/png",
+      size: maximumImageBytes,
+    }),
+  });
+  assert.equal(oversizedBinaryGrant.response.status, 201,
+    "a maximum-size upload grant is valid before the binary body is sent");
+  const oversizedBinaryUpload = await fetch(origin + oversizedBinaryGrant.body.upload_url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${oversizedBinaryGrant.body.upload_token}`,
+      "Content-Type": "image/png",
+    },
+    body: Buffer.alloc(maximumImageBytes + 1),
+  });
+  const oversizedBinaryBody = await oversizedBinaryUpload.json();
+  assert.equal(oversizedBinaryUpload.status, 413);
+  assert.equal(oversizedBinaryBody.error.code, "PAYLOAD_TOO_LARGE");
+  assert.deepEqual(queryLocalD1(
+    `SELECT asset.status AS asset_status, upload.status AS upload_status,
+            attempt.status AS attempt_status,
+            (SELECT COUNT(*) FROM asset_upload_attempts active_attempt
+             WHERE active_attempt.asset_id = asset.id
+               AND active_attempt.status IN ('UPLOADING','ATTACHED')) AS active_attempts
+     FROM assets asset
+     JOIN asset_upload_sessions upload ON upload.asset_id = asset.id
+     JOIN asset_upload_attempts attempt ON attempt.asset_id = asset.id
+     WHERE asset.id = ${sqlText(oversizedBinaryGrant.body.asset_id)}`,
+  ), [{
+    asset_status: "PENDING",
+    upload_status: "PENDING",
+    attempt_status: "CLEANUP_PENDING",
+    active_attempts: 0,
+  }],
+  "oversized binary does not start or complete an upload attempt");
+  const oversizedAssetRead = await json(
+    `/assets/${oversizedBinaryGrant.body.asset_id}`,
+    first,
+  );
+  assert.equal(oversizedAssetRead.response.status, 404,
+    "oversized binary does not produce a retrievable asset");
+  const oversizedAssetDelete = await json(
+    `/assets/${oversizedBinaryGrant.body.asset_id}`,
+    first,
+    { method: "DELETE", mutating: true },
+  );
+  assert.equal(oversizedAssetDelete.response.status, 200,
+    "the isolated rejected upload reservation is cleaned up");
 
   const badImage = await uploadImage(first, designId, Buffer.from("GIF89a", "ascii"));
   assert.equal(badImage.uploaded.status, 422);
@@ -1763,7 +1856,12 @@ try {
   });
   assert.equal(ownerImage.status, 200);
   assert.equal(ownerImage.headers.get("cache-control"), "private, no-store");
-  assert.deepEqual(Buffer.from(await ownerImage.arrayBuffer()), png);
+  const normalizedImage = Buffer.from(await ownerImage.arrayBuffer());
+  assert.notDeepEqual(normalizedImage, png, "uploaded source is normalized before storage");
+  assert.equal(png.includes(Buffer.from("CRUSHIFY_TEST_METADATA")), true,
+    "source fixture contains removable image metadata");
+  assert.equal(normalizedImage.includes(Buffer.from("CRUSHIFY_TEST_METADATA")), false,
+    "stored source image has its metadata stripped");
 
   const withPhoto = { ...changed, photos: [{ asset_id: goodImage.grant.asset_id, caption: "Kỷ niệm" }] };
   const savedPhoto = await json(`/designs/${designId}`, first, {
@@ -1845,7 +1943,7 @@ try {
   const publishedImage = await fetch(origin + publishedImagePath);
   assert.equal(publishedImage.status, 200);
   assert.equal(publishedImage.headers.get("cache-control"), "private, no-store");
-  assert.deepEqual(Buffer.from(await publishedImage.arrayBuffer()), png);
+  assert.deepEqual(Buffer.from(await publishedImage.arrayBuffer()), normalizedImage);
 
   const firstUnpublish = await json(`/publications/${publicationId}/unpublish`, first, {
     method: "POST",
@@ -2126,6 +2224,23 @@ try {
     request: contractRequest,
     getMagicToken: () => emailSink.waitForMagicToken(),
     label: "Cloudflare D1 + local R2",
+    resetRateLimits: (ownerEmail) => {
+      const customerRows = queryLocalD1(
+        `SELECT id FROM customers WHERE email_normalized = '${ownerEmail.replaceAll("'", "''")}'`,
+      );
+      const customerId = customerRows[0]?.id;
+      if (!customerId) throw new Error("Could not isolate design-create rate limit for test customer");
+      const keyHash = createHash("sha256")
+        .update(`design-create:${customerId}`)
+        .digest("hex");
+      const assetGrantKeyHash = createHash("sha256")
+        .update(`asset-grant:${customerId}`)
+        .digest("hex");
+      executeLocalD1(
+        `DELETE FROM auth_rate_limits
+         WHERE key_hash IN ('${keyHash}', '${assetGrantKeyHash}')`,
+      );
+    },
   });
 
   const assetFailureDesign = await contractRequest("/designs", contract.owner, {
@@ -2327,6 +2442,10 @@ try {
   await waitReady();
   const manualAdmin = await signIn(manualAdminEmail, "198.51.100.11");
   const manualCustomer = await signIn(manualCustomerEmail, "198.51.100.12");
+  const manualAdminCustomer = queryLocalD1(
+    `SELECT id FROM customers WHERE email_normalized = ${sqlText(manualAdminEmail)}`,
+  )[0];
+  assert.ok(manualAdminCustomer?.id, "the manual administrator has a persisted customer identity");
   const manualDesign = await json("/designs", manualAdmin, {
     method: "POST",
     mutating: true,
@@ -2463,6 +2582,49 @@ try {
        (SELECT COUNT(*) FROM publications WHERE order_id = '${manualOrder.body.order_id}') AS publications`,
   ), [{ confirmations: 1, jobs: 1, publications: 1 }],
   "confirmation replay must not duplicate evidence, fulfillment, or publication");
+  assert.deepEqual(queryLocalD1(
+    `SELECT COUNT(*) AS completed_events
+     FROM admin_activity_events
+     WHERE action = 'MANUAL_PAYMENT_CONFIRMATION'
+       AND target_type = 'MANUAL_PAYMENT_CONFIRMATIONS'
+       AND target_id = '${manualOrder.body.order_id}'
+       AND outcome = 'COMPLETED'`,
+  ), [{ completed_events: 1 }],
+  "confirmation replay must not duplicate the completed audit event");
+  const completedAuditEvents = queryLocalD1(
+    `SELECT id, actor_customer_id, request_id, action, outcome,
+            target_type, target_id, created_at
+     FROM admin_activity_events
+     WHERE action = 'MANUAL_PAYMENT_CONFIRMATION'
+       AND target_type = 'MANUAL_PAYMENT_CONFIRMATIONS'
+       AND target_id = ${sqlText(manualOrder.body.order_id)}
+       AND outcome = 'COMPLETED'`,
+  );
+  assert.equal(completedAuditEvents.length, 1);
+  const completedAuditEvent = completedAuditEvents[0];
+  const confirmationRequestId = confirmedManual.response.headers.get("x-request-id");
+  assert.equal(completedAuditEvent.actor_customer_id, manualAdminCustomer.id);
+  assert.equal(completedAuditEvent.request_id, confirmationRequestId);
+  assert.ok(completedAuditEvent.request_id.length > 0);
+  assert.equal(completedAuditEvent.action, "MANUAL_PAYMENT_CONFIRMATION");
+  assert.equal(completedAuditEvent.outcome, "COMPLETED");
+  assert.equal(completedAuditEvent.target_type, "MANUAL_PAYMENT_CONFIRMATIONS");
+  assert.equal(completedAuditEvent.target_id, manualOrder.body.order_id);
+  const auditTimestamp = Date.parse(completedAuditEvent.created_at);
+  assert.ok(Number.isFinite(auditTimestamp));
+  assert.equal(new Date(auditTimestamp).toISOString(), completedAuditEvent.created_at);
+
+  const manualConfirmationRows = queryLocalD1(
+    `SELECT order_id, actor_customer_id, request_id, confirmed_at, created_at
+     FROM manual_payment_confirmations
+     WHERE order_id = ${sqlText(manualOrder.body.order_id)}`,
+  );
+  assert.equal(manualConfirmationRows.length, 1);
+  assert.equal(manualConfirmationRows[0].order_id, manualOrder.body.order_id);
+  assert.equal(manualConfirmationRows[0].actor_customer_id, manualAdminCustomer.id);
+  assert.equal(manualConfirmationRows[0].request_id, confirmationRequestId);
+  assert.ok(Number.isFinite(Date.parse(manualConfirmationRows[0].confirmed_at)));
+  assert.ok(Number.isFinite(Date.parse(manualConfirmationRows[0].created_at)));
 
   const manualWebsites = await json("/publications", manualAdmin);
   const manualWebsite = manualWebsites.body.websites.find(
@@ -2573,12 +2735,16 @@ try {
     try {
       await emailSink.close();
     } finally {
-      await rm(persistDirectory, {
-        recursive: true,
-        force: true,
-        maxRetries: 5,
-        retryDelay: 200,
-      });
+      try {
+        await localImageNormalizer?.close();
+      } finally {
+        await rm(persistDirectory, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 200,
+        });
+      }
     }
   }
 }

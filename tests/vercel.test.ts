@@ -20,6 +20,7 @@ import type { Database, DatabaseStatement } from "../src/database.ts";
 import type { Storage } from "../src/storage.ts";
 import { MemoryStorageAdapter } from "../src/storage/mock.ts";
 import { handleFulfillmentForOrder, recoverPendingFulfillments } from "../src/publications.ts";
+import { normalizeNodeImage } from "../src/platform/node-image-normalizer.ts";
 import {
   createVercelApiHandler,
   resolveVercelDatabaseConfiguration,
@@ -1148,6 +1149,7 @@ describe("Vercel API runtime adapter", () => {
         return connection;
       },
       createMockStorage: () => storage,
+      imageNormalizer: normalizeNodeImage,
       localTestEmailSink: async (message) => {
         const token = message.text.match(/#magic_token=([A-Za-z0-9_-]+)/)?.[1];
         if (token) tokenQueue.push(token);
@@ -1157,14 +1159,39 @@ describe("Vercel API runtime adapter", () => {
     try {
       const migrations = await loadMigrations();
       assert.deepEqual(await applyMigrations(migrationClient, migrations),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       await verifyMigrationSchema(migrationClient, migrations);
       await migrationClient.execute("CREATE TABLE staging_schema_unexpected (id TEXT PRIMARY KEY)");
       await assert.rejects(
         verifyMigrationSchema(migrationClient, migrations),
-        /tables and indexes do not match the applied migrations/,
+        /tables, indexes, views, and triggers do not match the applied migrations/,
       );
       await migrationClient.execute("DROP TABLE staging_schema_unexpected");
+      await verifyMigrationSchema(migrationClient, migrations);
+      await migrationClient.execute("CREATE VIEW staging_schema_unexpected_view AS SELECT 1 AS id");
+      await assert.rejects(
+        verifyMigrationSchema(migrationClient, migrations),
+        /tables, indexes, views, and triggers do not match the applied migrations/,
+      );
+      await migrationClient.execute("DROP VIEW staging_schema_unexpected_view");
+      await verifyMigrationSchema(migrationClient, migrations);
+      await migrationClient.execute(
+        "CREATE TRIGGER staging_schema_unexpected_trigger AFTER INSERT ON customers BEGIN SELECT 1; END",
+      );
+      await assert.rejects(
+        verifyMigrationSchema(migrationClient, migrations),
+        /tables, indexes, views, and triggers do not match the applied migrations/,
+      );
+      await migrationClient.execute("DROP TRIGGER staging_schema_unexpected_trigger");
+      await verifyMigrationSchema(migrationClient, migrations);
+      await migrationClient.execute("DROP TRIGGER custom_design_request_events_immutable_update");
+      await assert.rejects(
+        verifyMigrationSchema(migrationClient, migrations),
+        /tables, indexes, views, and triggers do not match the applied migrations/,
+      );
+      await migrationClient.execute(
+        "CREATE TRIGGER custom_design_request_events_immutable_update BEFORE UPDATE ON custom_design_request_events BEGIN SELECT RAISE(ABORT, 'custom design review events are immutable'); END",
+      );
       await verifyMigrationSchema(migrationClient, migrations);
       const live = await handler(requestWithOrigin("/health/live", "https://crushify.test"));
       assert.equal(live.status, 200);
@@ -1256,6 +1283,9 @@ describe("Vercel API runtime adapter", () => {
             return token;
           },
           label: "Vercel adapter + Turso local file + mock storage",
+          resetRateLimits: async () => {
+            await migrationClient.execute("DELETE FROM auth_rate_limits");
+          },
         });
         await runPaymentContract({
           request: async (path: string, session?: { cookies: string[]; csrf: string }, options = {}) => {
@@ -2008,7 +2038,7 @@ describe("Vercel API runtime adapter", () => {
 
     try {
       assert.deepEqual(await applyMigrations(migrationClient, await loadMigrations()),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       process.env.DATABASE_PROVIDER = "turso";
       process.env.TURSO_DATABASE_URL = databaseUrl;
       process.env.TURSO_AUTH_TOKEN = "";
@@ -2096,6 +2126,9 @@ describe("Vercel API runtime adapter", () => {
 
         await runDatabaseContract({
           request,
+          resetRateLimits: async () => {
+            await migrationClient.execute("DELETE FROM auth_rate_limits");
+          },
           getMagicToken: async () => {
             const token = tokenQueue.shift();
             assert.ok(token, "Vercel local-test email should capture a magic link token");

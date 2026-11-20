@@ -5,12 +5,16 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { createClient, type Client } from "@libsql/client";
 import qrcode from "qrcode-generator";
+import sharp from "sharp";
 import type { Database, DatabaseStatement } from "../src/database.ts";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
 import { applyRateLimit } from "../src/auth.ts";
 import { handleApiRequest } from "../src/index.ts";
-import { reconcileUploadAttemptCleanup } from "../src/assets.ts";
+import { detectImage, reconcileUploadAttemptCleanup } from "../src/assets.ts";
+import { stripImageMetadata } from "../src/image-sanitizer.ts";
+import type { ImageNormalizer, ImageContentType } from "../src/image-normalizer.ts";
+import { normalizeNodeImage } from "../src/platform/node-image-normalizer.ts";
 import { createVercelApiHandler } from "../src/platform/vercel.ts";
 import {
   cleanupAssets,
@@ -21,6 +25,7 @@ import {
 } from "../src/publications.ts";
 import { runScheduledPublicationLifecycle } from "../src/scheduler.ts";
 import type { Storage, StorageObject } from "../src/storage.ts";
+import { MemoryStorageAdapter } from "../src/storage/mock.ts";
 
 const NOW = new Date("2099-01-31T12:00:00.000Z");
 const IMAGE = new Uint8Array([1, 2, 3]);
@@ -29,12 +34,49 @@ const UPLOAD_PNG = new Uint8Array(Buffer.from(
   "base64",
 ));
 
+const testImageNormalizer: ImageNormalizer = async (bytes, contentType) => {
+  const normalized = stripImageMetadata(bytes, contentType);
+  const info = detectImage(normalized);
+  if (!info) throw new TypeError("Test image is invalid");
+  return {
+    bytes: normalized,
+    contentType,
+    width: info.width,
+    height: info.height,
+  };
+};
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((complete) => {
     resolve = complete;
   });
   return { promise, resolve };
+}
+
+async function waitForDerivativeStart(
+  started: Promise<void>,
+  publishing: Promise<Response>,
+  testName: string,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      started,
+      publishing.then((response) =>
+        Promise.reject(new Error(
+          `${testName}: publish returned ${response.status} before beforeDerivative was reached`,
+        ))),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${testName}: beforeDerivative was not reached within 5 seconds`)),
+          5_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 class PausableDatabase implements Database {
@@ -200,13 +242,37 @@ async function createUploadGrant(
   env: Parameters<typeof handleApiRequest>[1],
   session: { token: string; csrf: string },
   designId: string,
+  options: {
+    contentType?: ImageContentType;
+    size?: number;
+    expiresAt?: string;
+    cleanupAt?: string;
+  } = {},
 ) {
+  const contentType = options.contentType ?? "image/png";
   const response = await assetRequest(env, session, "/assets/upload-url", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ design_id: designId, media_type: "image/png", size: UPLOAD_PNG.length }),
+    body: JSON.stringify({
+      design_id: designId,
+      media_type: contentType,
+      size: options.size ?? UPLOAD_PNG.length,
+    }),
   });
   const body = await response.json() as { asset_id: string; upload_url: string; upload_token: string };
+  if (response.status === 201) {
+    const expiresAt = options.expiresAt ?? "2200-01-01T00:00:00.000Z";
+    const cleanupAt = options.cleanupAt ?? "2200-01-01T00:00:00.000Z";
+    await env.DB.prepare(
+      "UPDATE asset_upload_sessions SET expires_at = ? WHERE asset_id = ?",
+    ).bind(expiresAt, body.asset_id).run();
+    await env.DB.prepare(
+      `UPDATE asset_upload_attempts SET lease_expires_at = ?, next_cleanup_at = ?
+       WHERE asset_id = ? AND object_key = (
+         SELECT object_key FROM assets WHERE id = ?
+       )`,
+    ).bind(expiresAt, cleanupAt, body.asset_id, body.asset_id).run();
+  }
   return { response, body };
 }
 
@@ -706,6 +772,13 @@ async function insertUploadAttemptFixture(
   if (!row) assert.fail("Expected upload attempt fixture");
   const id = randomUUID();
   const leaseToken = randomUUID();
+  const existingKey = await client.execute(
+    "SELECT id FROM asset_upload_attempts WHERE object_key = ?",
+    [String(row.object_key)],
+  );
+  const objectKey = existingKey.rows.length === 0
+    ? String(row.object_key)
+    : `private/${randomUUID().replaceAll("-", "")}-png`;
   const now = new Date().toISOString();
   const leaseExpiresAt = options.leaseExpiresAt ?? new Date(Date.now() + 15 * 60_000).toISOString();
   const status = options.status ?? "CLEANUP_PENDING";
@@ -723,11 +796,11 @@ async function insertUploadAttemptFixture(
             next_cleanup_at, created_at, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
-      id, String(row.session_id), assetId, leaseToken, String(row.object_key), status,
+      id, String(row.session_id), assetId, leaseToken, objectKey, status,
       leaseExpiresAt, options.nextCleanupAt ?? now, now, now,
     ],
   });
-  return { id, leaseToken, objectKey: String(row.object_key) };
+  return { id, leaseToken, objectKey };
 }
 
 async function insertDueCleanupAttempt(client: Client, assetId: string) {
@@ -759,10 +832,12 @@ function deletionContext(
   adapter: Database,
   storage: Storage,
   session?: { token: string; csrf: string },
+  imageNormalizer: ImageNormalizer = testImageNormalizer,
 ) {
   const env = {
     DB: adapter,
     STORAGE: storage,
+    IMAGE_NORMALIZER: imageNormalizer,
     APP_ORIGIN: "https://crushify.test",
     ENVIRONMENT: "local",
     LOCAL_TEST_MODE: "true",
@@ -1832,6 +1907,7 @@ describe("publication expiration lifecycle", () => {
       const env = {
         DB: adapter,
         STORAGE: storage.storage,
+        IMAGE_NORMALIZER: testImageNormalizer,
         APP_ORIGIN: "https://crushify.test",
         ENVIRONMENT: "local",
         LOCAL_TEST_MODE: "true",
@@ -2839,6 +2915,7 @@ describe("publication expiration lifecycle", () => {
         APP_ORIGIN: "https://crushify.test",
         ENVIRONMENT: "local",
         LOCAL_TEST_MODE: "true",
+        IMAGE_NORMALIZER: normalizeNodeImage,
       } as Parameters<typeof handleApiRequest>[1];
       const publishing = assetRequest(
         env, session, `/publications/${fixture.publicationId}/publish`, {
@@ -2847,7 +2924,11 @@ describe("publication expiration lifecycle", () => {
           body: JSON.stringify({ expected_lifecycle_revision: 1 }),
         },
       );
-      await createStarted.promise;
+      await waitForDerivativeStart(
+        createStarted.promise,
+        publishing,
+        "retains and reconciles a timed-out derivative creation after consent revocation",
+      );
       const consentRevoked = await assetRequest(
         env, session,
         `/publications/${fixture.publicationId}/assets/${fixture.assetId}/consent`, {
@@ -2979,6 +3060,7 @@ describe("publication expiration lifecycle", () => {
         APP_ORIGIN: "https://crushify.test",
         ENVIRONMENT: "local",
         LOCAL_TEST_MODE: "true",
+        IMAGE_NORMALIZER: normalizeNodeImage,
       } as Parameters<typeof handleApiRequest>[1];
       const publishing = assetRequest(
         env, session, `/publications/${fixture.publicationId}/publish`, {
@@ -2987,7 +3069,11 @@ describe("publication expiration lifecycle", () => {
           body: JSON.stringify({ expected_lifecycle_revision: 1 }),
         },
       );
-      await createStarted.promise;
+      await waitForDerivativeStart(
+        createStarted.promise,
+        publishing,
+        "reconciles a provider success after cleanup has reached manual review",
+      );
 
       const revoked = await assetRequest(
         env, session,
@@ -3137,6 +3223,7 @@ describe("publication expiration lifecycle", () => {
         APP_ORIGIN: "https://crushify.test",
         ENVIRONMENT: "local",
         LOCAL_TEST_MODE: "true",
+        IMAGE_NORMALIZER: normalizeNodeImage,
       } as Parameters<typeof handleApiRequest>[1];
       const publishing = assetRequest(
         env, session, `/publications/${fixture.publicationId}/publish`, {
@@ -3145,7 +3232,11 @@ describe("publication expiration lifecycle", () => {
           body: JSON.stringify({ expected_lifecycle_revision: 1 }),
         },
       );
-      await createStarted.promise;
+      await waitForDerivativeStart(
+        createStarted.promise,
+        publishing,
+        "fences cleanup finalization when provider success arrives during deletion",
+      );
 
       const revoking = assetRequest(
         env, session, `/publications/${fixture.publicationId}/assets/${fixture.assetId}/consent`, {
@@ -4123,7 +4214,7 @@ describe("publication expiration lifecycle", () => {
       )).rows[0]?.status, "READY");
 
       assert.deepEqual(await applyMigrations(client, migrations),
-        [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       assert.deepEqual(await applyMigrations(client, migrations), []);
       assert.deepEqual(
         (await client.execute(
@@ -5166,6 +5257,297 @@ describe("checkout revision snapshot integrity", () => {
 });
 
 describe("upload and design deletion concurrency", () => {
+  it("normalizes JPEG pixels on the direct API upload before storing and completing the asset", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = new MemoryStorageAdapter();
+    let normalizerCalled = false;
+    const imageNormalizer: ImageNormalizer = async (bytes, contentType) => {
+      normalizerCalled = true;
+      return normalizeNodeImage(bytes, contentType);
+    };
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage, session, imageNormalizer);
+      const pixels = Buffer.alloc(6 * 4 * 3, 120);
+      const source = new Uint8Array(await sharp(pixels, {
+        raw: { width: 6, height: 4, channels: 3 },
+      }).jpeg().withMetadata({ orientation: 6 }).toBuffer());
+      const grant = await createUploadGrant(harness.env, session, fixture.designId, {
+        contentType: "image/jpeg",
+        size: source.byteLength,
+      });
+      assert.equal(grant.response.status, 201);
+
+      const uploaded = await assetRequest(
+        harness.env,
+        session,
+        grant.body.upload_url.replace("/api/v1", ""),
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/jpeg",
+          },
+          body: new Blob([source], { type: "image/jpeg" }),
+        },
+      );
+      assert.equal(uploaded.status, 204);
+      assert.equal(normalizerCalled, true);
+
+      const asset = await client.execute(
+        "SELECT object_key, width, height, byte_size FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      );
+      const stored = await storage.get(String(asset.rows[0]?.object_key));
+      assert.ok(stored);
+      assert.equal(Number(asset.rows[0]?.width), 4);
+      assert.equal(Number(asset.rows[0]?.height), 6);
+      const storedBytes = new Uint8Array(await stored.arrayBuffer());
+      assert.equal(Number(asset.rows[0]?.byte_size), storedBytes.byteLength);
+      assert.equal((await sharp(storedBytes).metadata()).orientation, undefined);
+
+      const completed = await assetRequest(
+        harness.env, session, `/assets/${grant.body.asset_id}/complete`, { method: "POST" },
+      );
+      assert.equal(completed.status, 200, await completed.clone().text());
+      assert.equal((await client.execute(
+        "SELECT status FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.status, "READY");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("releases an expired grant reservation only after storage absence is verified and reuses the quota", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    const reservedBytes = UPLOAD_PNG.byteLength;
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      await client.execute(
+        "UPDATE assets SET byte_size = ? WHERE id = ?",
+        [64 * 1024 * 1024 - reservedBytes, fixture.assetId],
+      );
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId, {
+        expiresAt: "2000-01-01T00:00:00.000Z",
+        cleanupAt: "2000-01-01T00:00:00.000Z",
+      });
+      assert.equal(grant.response.status, 201);
+
+      const reservation = await client.execute(
+        "SELECT object_key, status FROM asset_upload_attempts WHERE asset_id = ?",
+        [grant.body.asset_id],
+      );
+      assert.equal(reservation.rows[0]?.status, "CLEANUP_PENDING");
+      assert.equal(await storage.storage.get(String(reservation.rows[0]?.object_key)), null);
+      const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: NOW });
+      assert.equal(cleanup.cleaned, 1);
+      const state = await client.execute({
+        sql: `SELECT asset.status AS asset_status, session.status AS session_status,
+                attempt.status AS attempt_status
+              FROM assets asset
+              JOIN asset_upload_sessions session ON session.asset_id = asset.id
+              JOIN asset_upload_attempts attempt ON attempt.asset_id = asset.id
+              WHERE asset.id = ?`,
+        args: [grant.body.asset_id],
+      });
+      assert.deepEqual(state.rows[0], {
+        asset_status: "DELETED",
+        session_status: "CANCELLED",
+        attempt_status: "CLEANED",
+      });
+      const reused = await createUploadGrant(harness.env, session, fixture.designId);
+      assert.equal(reused.response.status, 201);
+      assert.equal((await reconcileUploadAttemptCleanup(harness.env, { now: NOW })).processed, 0);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("recovers a legacy expired grant without an upload attempt", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage();
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      assert.equal(grant.response.status, 201);
+      await client.execute(
+        "DELETE FROM asset_upload_attempts WHERE asset_id = ?",
+        [grant.body.asset_id],
+      );
+      await client.execute(
+        `UPDATE asset_upload_sessions SET expires_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ?`,
+        [grant.body.asset_id],
+      );
+
+      const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: NOW });
+      assert.equal(cleanup.cleaned, 1);
+      const state = await client.execute({
+        sql: `SELECT asset.status AS asset_status, session.status AS session_status,
+                attempt.status AS attempt_status, attempt.id AS attempt_id
+              FROM assets asset
+              JOIN asset_upload_sessions session ON session.asset_id = asset.id
+              JOIN asset_upload_attempts attempt ON attempt.asset_id = asset.id
+              WHERE asset.id = ?`,
+        args: [grant.body.asset_id],
+      });
+      assert.equal(state.rows[0]?.asset_status, "DELETED");
+      assert.equal(state.rows[0]?.session_status, "CANCELLED");
+      assert.equal(state.rows[0]?.attempt_status, "CLEANED");
+      const sessionId = (await client.execute(
+        "SELECT id FROM asset_upload_sessions WHERE asset_id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.id;
+      assert.equal(state.rows[0]?.attempt_id, `expired-upload-${sessionId}`);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("cleans failed upload attempts before releasing the expired reservation", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createRaceStorage({
+      afterUpload: async () => {
+        throw new Error("Injected provider success followed by a lost response");
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      const upload = await assetRequest(
+        harness.env,
+        session,
+        grant.body.upload_url.replace("/api/v1", ""),
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/png",
+          },
+          body: new Blob([UPLOAD_PNG], { type: "image/png" }),
+        },
+      );
+      assert.equal(upload.status, 503);
+      assert.equal(storage.objects.size, 1);
+
+      await client.execute(
+        "UPDATE asset_upload_sessions SET expires_at = '2000-01-01T00:00:00.000Z' WHERE asset_id = ?",
+        [grant.body.asset_id],
+      );
+      await client.execute(
+        "UPDATE asset_upload_attempts SET next_cleanup_at = '2000-01-01T00:00:00.000Z' WHERE asset_id = ?",
+        [grant.body.asset_id],
+      );
+      const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: NOW });
+      assert.equal(cleanup.cleaned, 2);
+      assert.equal(storage.objects.size, 0);
+      const state = await client.execute(
+        `SELECT status FROM assets WHERE id = ?`,
+        [grant.body.asset_id],
+      );
+      assert.equal(state.rows[0]?.status, "DELETED");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("does not release an expired reservation while a live upload attempt holds its lease", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const uploadStarted = deferred();
+    const releaseUpload = deferred();
+    const storage = createRaceStorage({
+      beforeUpload: async () => {
+        uploadStarted.resolve();
+        await releaseUpload.promise;
+      },
+    });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const session = await createSession(client, fixture.customerId);
+      const harness = deletionContext(adapter, storage.storage, session);
+      const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      await client.execute(
+        `UPDATE asset_upload_attempts SET next_cleanup_at = '2000-01-01T00:00:00.000Z'
+         WHERE asset_id = ? AND object_key = (SELECT object_key FROM assets WHERE id = ?)`,
+        [grant.body.asset_id, grant.body.asset_id],
+      );
+      const upload = assetRequest(
+        harness.env,
+        session,
+        grant.body.upload_url.replace("/api/v1", ""),
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${grant.body.upload_token}`,
+            "Content-Type": "image/png",
+          },
+          body: new Blob([UPLOAD_PNG], { type: "image/png" }),
+        },
+      );
+      await uploadStarted.promise;
+      await client.execute(
+        `UPDATE asset_upload_sessions SET lease_expires_at = '2300-01-01T00:00:00.000Z'
+         WHERE asset_id = ? AND status = 'UPLOADING'`,
+        [grant.body.asset_id],
+      );
+      await client.execute(
+        `UPDATE asset_upload_attempts
+         SET lease_expires_at = '2300-01-01T00:00:00.000Z',
+             next_cleanup_at = '2300-01-01T00:00:00.000Z'
+         WHERE asset_id = ? AND status = 'UPLOADING'`,
+        [grant.body.asset_id],
+      );
+
+      const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: NOW });
+      assert.equal(cleanup.cleaned, 1);
+      assert.equal((await client.execute(
+        "SELECT status FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.status, "PENDING");
+      assert.equal((await client.execute(
+        "SELECT status FROM asset_upload_sessions WHERE asset_id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.status, "UPLOADING");
+
+      releaseUpload.resolve();
+      assert.equal((await upload).status, 204);
+      assert.equal((await assetRequest(
+        harness.env, session, `/assets/${grant.body.asset_id}/complete`, { method: "POST" },
+      )).status, 200);
+      assert.equal((await client.execute(
+        "SELECT status FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.status, "READY");
+    } finally {
+      releaseUpload.resolve();
+      client.close();
+    }
+  });
+
   it("rejects upload grants that exceed the customer's active storage quota", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -5632,6 +6014,10 @@ describe("upload and design deletion concurrency", () => {
       const session = await createSession(client, fixture.customerId);
       const harness = deletionContext(adapter, storage.storage, session);
       const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      const reservationKey = String((await client.execute(
+        "SELECT object_key FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.object_key);
       const firstUpload = assetRequest(
         harness.env, session, grant.body.upload_url.replace("/api/v1", ""), {
           method: "PUT",
@@ -5675,8 +6061,8 @@ describe("upload and design deletion concurrency", () => {
       const currentKey = String(current.rows[0]?.object_key);
       const stale = await client.execute(
         `SELECT id, object_key, next_cleanup_at FROM asset_upload_attempts
-         WHERE asset_id = ? AND status = 'CLEANUP_PENDING'`,
-        [grant.body.asset_id],
+         WHERE asset_id = ? AND status = 'CLEANUP_PENDING' AND object_key <> ?`,
+        [grant.body.asset_id, reservationKey],
       );
       assert.equal(stale.rows.length, 1);
       assert.notEqual(stale.rows[0]?.object_key, currentKey);
@@ -5727,6 +6113,10 @@ describe("upload and design deletion concurrency", () => {
       const session = await createSession(client, fixture.customerId);
       const harness = deletionContext(adapter, storage.storage, session);
       const grant = await createUploadGrant(harness.env, session, fixture.designId);
+      const reservationKey = String((await client.execute(
+        "SELECT object_key FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      )).rows[0]?.object_key);
       const upload = () => assetRequest(
         harness.env, session, grant.body.upload_url.replace("/api/v1", ""), {
           method: "PUT",
@@ -5760,8 +6150,8 @@ describe("upload and design deletion concurrency", () => {
 
       const attempts = await client.execute(
         `SELECT object_key, status FROM asset_upload_attempts
-         WHERE asset_id = ? ORDER BY created_at, id`,
-        [grant.body.asset_id],
+         WHERE asset_id = ? AND object_key <> ? ORDER BY created_at, id`,
+        [grant.body.asset_id, reservationKey],
       );
       assert.equal(attempts.rows.length, 2);
       const staleKey = String(attempts.rows.find((row) => row.status === "CLEANUP_PENDING")?.object_key);
@@ -5830,11 +6220,18 @@ describe("upload and design deletion concurrency", () => {
       );
       assert.equal((await requestUpload()).status, 503);
       const uncertain = await client.execute(
-        `SELECT object_key, next_cleanup_at, status FROM asset_upload_attempts
-         WHERE asset_id = ?`,
+        `SELECT id, object_key, next_cleanup_at, status, last_cleanup_error_code
+         FROM asset_upload_attempts
+         WHERE asset_id = ?
+           AND status = 'CLEANUP_PENDING'
+           AND last_cleanup_error_code = 'UPLOAD_OUTCOME_UNKNOWN'
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
         [grant.body.asset_id],
       );
       assert.equal(uncertain.rows[0]?.status, "CLEANUP_PENDING");
+      assert.ok(uncertain.rows[0]?.id, "The uncertain upload attempt must be identifiable");
+      assert.equal(uncertain.rows[0]?.last_cleanup_error_code, "UPLOAD_OUTCOME_UNKNOWN");
       assert.equal(storage.objects.size, 1);
 
       assert.equal((await requestUpload()).status, 204);
@@ -5915,8 +6312,9 @@ describe("upload and design deletion concurrency", () => {
       );
       assert.equal(firstDelete.status, 503);
       const cleanupTime = await client.execute(
-        "SELECT next_cleanup_at FROM asset_upload_attempts WHERE asset_id = ?",
-        [grant.body.asset_id],
+        `SELECT next_cleanup_at FROM asset_upload_attempts
+         WHERE asset_id = ? AND object_key <> (SELECT object_key FROM assets WHERE id = ?)`,
+        [grant.body.asset_id, grant.body.asset_id],
       );
       const cleanupAt = new Date(String(cleanupTime.rows[0]?.next_cleanup_at));
       cleanupAt.setTime(cleanupAt.getTime() + 1);
@@ -5955,12 +6353,14 @@ describe("upload and design deletion concurrency", () => {
       const abandoned = await createUploadGrant(harness.env, session, fixture.designId);
       const live = await createUploadGrant(harness.env, session, fixture.designId);
       const now = new Date();
-      await insertUploadAttemptFixture(client, abandoned.body.asset_id, {
+      const abandonedAttempt = await insertUploadAttemptFixture(client, abandoned.body.asset_id, {
         status: "UPLOADING",
         leaseExpiresAt: "2000-01-01T00:00:00.000Z",
         nextCleanupAt: "2000-01-01T00:00:00.000Z",
       });
-      await insertUploadAttemptFixture(client, live.body.asset_id, { status: "UPLOADING" });
+      const liveAttempt = await insertUploadAttemptFixture(
+        client, live.body.asset_id, { status: "UPLOADING" },
+      );
 
       const reconciled = await reconcileUploadAttemptCleanup(harness.env, { now });
       assert.deepEqual(reconciled, {
@@ -5976,8 +6376,8 @@ describe("upload and design deletion concurrency", () => {
               FROM asset_upload_attempts attempt
               JOIN asset_upload_sessions session ON session.id = attempt.session_id
               JOIN assets asset ON asset.id = attempt.asset_id
-              WHERE attempt.asset_id = ?`,
-        args: [abandoned.body.asset_id],
+              WHERE attempt.id = ?`,
+        args: [abandonedAttempt.id],
       });
       assert.deepEqual(abandonedState.rows[0], {
         attempt_status: "CLEANED",
@@ -5988,8 +6388,8 @@ describe("upload and design deletion concurrency", () => {
       const liveCleanup = await reconcileUploadAttemptCleanup(harness.env, { now });
       assert.equal(liveCleanup.processed, 0);
       assert.equal((await client.execute(
-        "SELECT status FROM asset_upload_attempts WHERE asset_id = ?",
-        [live.body.asset_id],
+        "SELECT status FROM asset_upload_attempts WHERE id = ?",
+        [liveAttempt.id],
       )).rows[0]?.status, "UPLOADING");
     } finally {
       client.close();
@@ -6021,9 +6421,11 @@ describe("upload and design deletion concurrency", () => {
         harness.env, session, `/assets/${grant.body.asset_id}/complete`, { method: "POST" },
       )).status, 200);
       const attempt = await client.execute(
-        "SELECT object_key FROM asset_upload_attempts WHERE asset_id = ?",
+        `SELECT id, object_key FROM asset_upload_attempts
+         WHERE asset_id = ? AND status = 'ATTACHED'`,
         [grant.body.asset_id],
       );
+      const attemptId = String(attempt.rows[0]?.id);
       const attachedKey = String(attempt.rows[0]?.object_key);
       const currentKey = `private/current-${grant.body.asset_id}.png`;
       await storage.storage.upload(currentKey, UPLOAD_PNG, { contentType: "image/png" });
@@ -6034,8 +6436,8 @@ describe("upload and design deletion concurrency", () => {
       await client.execute(
         `UPDATE asset_upload_attempts
          SET next_cleanup_at = '2000-01-01T00:00:00.000Z'
-         WHERE asset_id = ?`,
-        [grant.body.asset_id],
+         WHERE id = ?`,
+        [attemptId],
       );
 
       const cleanup = await reconcileUploadAttemptCleanup(harness.env, { now: new Date() });
@@ -6150,8 +6552,8 @@ describe("upload and design deletion concurrency", () => {
         `UPDATE asset_upload_attempts
          SET status = 'CLEANUP_PENDING', cleanup_attempts = 7,
              next_cleanup_at = '2000-01-01T00:00:00.000Z'
-         WHERE asset_id = ?`,
-        [grant.body.asset_id],
+         WHERE id = ?`,
+        [attempt.id],
       );
 
       const exhausted = await reconcileUploadAttemptCleanup(harness.env, { now: NOW });
@@ -6159,13 +6561,21 @@ describe("upload and design deletion concurrency", () => {
       assert.equal(exhausted.manualReview, 1);
       const state = await client.execute(
         `SELECT status, reconciliation_state, cleanup_attempts
-         FROM asset_upload_attempts WHERE asset_id = ?`,
-        [grant.body.asset_id],
+         FROM asset_upload_attempts WHERE id = ?`,
+        [attempt.id],
       );
       assert.deepEqual(state.rows[0], {
         status: "CLEANUP_PENDING",
         reconciliation_state: "MANUAL_REVIEW",
         cleanup_attempts: 8,
+      });
+      const retainedReservation = await client.execute(
+        "SELECT status, byte_size FROM assets WHERE id = ?",
+        [grant.body.asset_id],
+      );
+      assert.deepEqual(retainedReservation.rows[0], {
+        status: "PENDING",
+        byte_size: UPLOAD_PNG.byteLength,
       });
       const later = await reconcileUploadAttemptCleanup(harness.env, {
         now: new Date(NOW.getTime() + 30 * 24 * 60 * 60_000),
@@ -6188,7 +6598,7 @@ describe("upload and design deletion concurrency", () => {
       const session = await createSession(client, fixture.customerId);
       const harness = deletionContext(adapter, storage.storage, session);
       const grant = await createUploadGrant(harness.env, session, fixture.designId);
-      await insertUploadAttemptFixture(client, grant.body.asset_id, {
+      const attempt = await insertUploadAttemptFixture(client, grant.body.asset_id, {
         nextCleanupAt: "2000-01-01T00:00:00.000Z",
       });
 
@@ -6202,8 +6612,8 @@ describe("upload and design deletion concurrency", () => {
       };
       assert.equal(result.operations.uploadCleanup.result.cleaned, 1);
       assert.equal((await client.execute(
-        "SELECT status FROM asset_upload_attempts WHERE asset_id = ?",
-        [grant.body.asset_id],
+        "SELECT status FROM asset_upload_attempts WHERE id = ?",
+        [attempt.id],
       )).rows[0]?.status, "CLEANED");
     } finally {
       client.close();
@@ -6260,7 +6670,7 @@ describe("upload and design deletion concurrency", () => {
       }
 
       assert.deepEqual(await applyMigrations(client, migrations),
-        [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       assert.deepEqual(await applyMigrations(client, migrations), []);
 
       for (const fixture of protectedFixtures) {

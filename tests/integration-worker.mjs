@@ -6,12 +6,94 @@ import {
   runSePayApiV2Scan,
   SePayApiV2LeaseError,
 } from "../src/payments/sepay-reconciliation.ts";
+import { ImageNormalizationError } from "../src/image-normalizer.ts";
 import { R2StorageAdapter } from "../src/storage/r2.ts";
 
 const fulfillmentTestPath = "/api/__integration/fulfillment";
 const databaseTestPath = "/api/__integration/database";
 const sePayScanTestPath = "/api/__integration/sepay-scan";
 const sePayLeaseContractPath = "/api/__integration/sepay-lease-contract";
+const imageNormalizerPath = "/__crushify_test_image_normalizer";
+const localImageNormalizerTimeoutMs = 10_000;
+const pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+
+export function localTestImageNormalizer(
+  env,
+  { fetchImpl = fetch, timeoutMs = localImageNormalizerTimeoutMs } = {},
+) {
+  const configuredUrl = env.LOCAL_TEST_IMAGE_NORMALIZER_URL;
+  if (env.ENVIRONMENT !== "local" ||
+      env.LOCAL_TEST_MODE !== "true" ||
+      typeof configuredUrl !== "string") {
+    return undefined;
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error("Local image normalizer timeout must be a positive integer");
+  }
+
+  const endpoint = new URL(configuredUrl);
+  if (endpoint.protocol !== "http:" ||
+      endpoint.hostname !== "127.0.0.1" ||
+      !endpoint.port ||
+      endpoint.pathname !== imageNormalizerPath ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.search ||
+      endpoint.hash) {
+    throw new Error("Local image normalizer URL must use the isolated loopback test endpoint");
+  }
+
+  return async (bytes, contentType) => {
+    const response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": contentType },
+      body: bytes,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      let code;
+      try {
+        code = (await response.json()).code;
+      } catch {
+        throw new Error(`Local image normalizer returned ${response.status}`);
+      }
+      if (code === "IMAGE_TOO_LARGE") {
+        throw new ImageNormalizationError("IMAGE_TOO_LARGE");
+      }
+      if (code === "INVALID_IMAGE") {
+        throw new ImageNormalizationError("INVALID_IMAGE");
+      }
+      throw new Error(`Local image normalizer returned ${response.status}`);
+    }
+
+    const width = Number(response.headers.get("x-image-width"));
+    const height = Number(response.headers.get("x-image-height"));
+    const normalizedContentType = response.headers.get("content-type");
+    if (normalizedContentType !== contentType ||
+        !Number.isSafeInteger(width) || width < 1 ||
+        !Number.isSafeInteger(height) || height < 1) {
+      throw new ImageNormalizationError("INVALID_IMAGE");
+    }
+    const normalizedBytes = new Uint8Array(await response.arrayBuffer());
+    const hasExpectedSignature = contentType === "image/png"
+      ? normalizedBytes.length >= 8 &&
+        normalizedBytes.subarray(0, 8).every((byte, index) =>
+          byte === pngSignature[index])
+      : normalizedBytes.length >= 3 &&
+        normalizedBytes[0] === 0xff &&
+        normalizedBytes[1] === 0xd8 &&
+        normalizedBytes[2] === 0xff;
+    if (!hasExpectedSignature) {
+      throw new ImageNormalizationError("INVALID_IMAGE");
+    }
+    return {
+      bytes: normalizedBytes,
+      contentType,
+      width,
+      height,
+    };
+  };
+}
 
 function sePayTransaction(id, amountIn = 50_000) {
   return {
@@ -432,7 +514,10 @@ export default {
     }
 
     if (url.pathname !== fulfillmentTestPath) {
-      return worker.fetch(request, env, ctx);
+      const imageNormalizer = localTestImageNormalizer(env);
+      return worker.fetch(request, imageNormalizer
+        ? { ...env, IMAGE_NORMALIZER: imageNormalizer }
+        : env, ctx);
     }
 
     if (request.method !== "POST" ||

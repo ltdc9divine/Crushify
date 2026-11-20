@@ -1,10 +1,12 @@
 import type { Database } from "./database.ts";
+import type { ImageNormalizer } from "./image-normalizer.ts";
 import type { Storage } from "./storage.ts";
 
 export interface Env {
   ASSETS?: Fetcher;
   DB: Database;
   STORAGE?: Storage;
+  IMAGE_NORMALIZER?: ImageNormalizer;
   MEDIA?: R2Bucket;
   DATABASE_PROVIDER?: "d1" | "turso";
   STORAGE_PROVIDER?: "r2" | "cloudinary";

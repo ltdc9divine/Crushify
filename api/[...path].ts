@@ -5,9 +5,12 @@ import {
   resolveVercelOrigin,
   VERCEL_UPLOAD_MAX_BYTES,
 } from "../src/platform/vercel.ts";
+import { normalizeNodeImage } from "../src/platform/node-image-normalizer.ts";
 
 const supportedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
-const apiHandler = createVercelApiHandler(process.env);
+const apiHandler = createVercelApiHandler(process.env, {
+  imageNormalizer: normalizeNodeImage,
+});
 
 export const config = {
   api: { bodyParser: false },

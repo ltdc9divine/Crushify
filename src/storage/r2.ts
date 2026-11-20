@@ -1,5 +1,5 @@
 import { MAX_IMAGE_BYTES } from "../http.ts";
-import { stripImageMetadata } from "../image-sanitizer.ts";
+import type { ImageNormalizer } from "../image-normalizer.ts";
 import type { Storage, StorageObject, StorageUploadOptions } from "../storage.ts";
 
 export class R2StorageAdapter implements Storage {
@@ -46,7 +46,14 @@ export class R2StorageAdapter implements Storage {
     return null;
   }
 
-  async createPublishedDerivative(sourceKey: string, derivativeKey: string): Promise<void> {
+  async createPublishedDerivative(
+    sourceKey: string,
+    derivativeKey: string,
+    normalizeImage?: ImageNormalizer,
+  ): Promise<void> {
+    if (typeof normalizeImage !== "function") {
+      throw new Error("Image normalization is required before publishing media");
+    }
     validateStorageKey(sourceKey);
     validatePublishedStorageKey(derivativeKey);
     const source = await this.bucket.get(sourceKey);
@@ -60,10 +67,19 @@ export class R2StorageAdapter implements Storage {
         sourceBytes.byteLength < 1 || sourceBytes.byteLength > MAX_IMAGE_BYTES) {
       throw new Error("Private source asset has an invalid size");
     }
-    const bytes = stripImageMetadata(sourceBytes, contentType);
+    const normalized = await normalizeImage(sourceBytes, contentType);
+    const bytes = normalized.bytes;
+    if (normalized.contentType !== contentType ||
+        bytes.byteLength < 1 || bytes.byteLength > MAX_IMAGE_BYTES) {
+      throw new Error("Normalized published image is invalid");
+    }
     await this.bucket.put(derivativeKey, bytes, {
-      httpMetadata: { contentType, cacheControl: "private, no-store" },
-      customMetadata: { publishedDerivative: "true" },
+      httpMetadata: { contentType: normalized.contentType, cacheControl: "private, no-store" },
+      customMetadata: {
+        publishedDerivative: "true",
+        width: String(normalized.width),
+        height: String(normalized.height),
+      },
     });
   }
 

@@ -27,14 +27,16 @@ type AdminActivityAction =
   | "CUSTOM_DESIGN_REQUEST_INFORMATION"
   | "CUSTOM_DESIGN_REPLY"
   | "FULFILLMENT_RECOVERY"
-  | "PUBLICATION_DERIVATIVE_RECONCILIATION";
+  | "PUBLICATION_DERIVATIVE_RECONCILIATION"
+  | "MANUAL_PAYMENT_CONFIRMATION";
 
 type AdminActivityOutcome = "STARTED" | "COMPLETED" | "FAILED";
 type AdminActivityTarget =
   | "ADMIN_OPERATIONS"
   | "CUSTOM_DESIGN_REQUEST"
   | "FULFILLMENT_JOBS"
-  | "PUBLICATION_DERIVATIVE_OPERATIONS";
+  | "PUBLICATION_DERIVATIVE_OPERATIONS"
+  | "MANUAL_PAYMENT_CONFIRMATIONS";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -488,11 +490,17 @@ async function confirmManualOrderPayment(
   const policy = resolvePaymentEnvironmentPolicy(env);
   if (policy.provider !== "MANUAL_BANK_TRANSFER" ||
       policy.mode !== "manual-bank-transfer" || !policy.fulfillmentEnabled) {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "FAILED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
     return apiError(requestId, 503, "MANUAL_PAYMENTS_DISABLED",
       "Manual bank-transfer confirmation is not enabled for this runtime");
   }
   const parsed = await readJson(request, requestId);
-  if (parsed.response) return parsed.response;
+  if (parsed.response) {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "FAILED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
+    return parsed.response;
+  }
   if (!isRecord(parsed.value) ||
       Object.keys(parsed.value).some((key) =>
         key !== "amount_minor" && key !== "transaction_reference") ||
@@ -503,29 +511,68 @@ async function confirmManualOrderPayment(
         (typeof parsed.value.transaction_reference !== "string" ||
           parsed.value.transaction_reference.trim().length > 128 ||
           /[^\x20-\x7e]/.test(parsed.value.transaction_reference)))) {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "FAILED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
     return apiError(requestId, 422, "VALIDATION_ERROR", "Manual payment confirmation details are invalid");
   }
   const referenceValue = parsed.value.transaction_reference;
   const transactionReference = typeof referenceValue === "string" && referenceValue.trim()
     ? referenceValue.trim()
     : null;
-  const result = await confirmManualPayment(env, {
-    orderId,
-    actorCustomerId: admin.session.customerId,
-    requestId,
-    amountMinor: parsed.value.amount_minor as number,
-    transactionReference,
-  });
+  const priorConfirmation = await env.DB.prepare(
+    "SELECT id FROM manual_payment_confirmations WHERE order_id = ?",
+  ).bind(orderId).first<{ id: string }>();
+  if (!priorConfirmation) {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "STARTED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
+  }
+  let result;
+  try {
+    result = await confirmManualPayment(env, {
+      orderId,
+      actorCustomerId: admin.session.customerId,
+      requestId,
+      amountMinor: parsed.value.amount_minor as number,
+      transactionReference,
+    });
+  } catch (error) {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "FAILED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
+    throw error;
+  }
   if (result.kind === "disabled") {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "FAILED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
     return apiError(requestId, 503, "MANUAL_PAYMENTS_DISABLED",
       "Manual bank-transfer confirmation is not enabled for this runtime");
   }
   if (result.kind === "not_found") {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "FAILED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
     return apiError(requestId, 404, "NOT_FOUND", "Manual payment order not found");
   }
   if (result.kind === "conflict") {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "FAILED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
     return apiError(requestId, 409, "PAYMENT_CONFIRMATION_CONFLICT",
       "Order, amount, reference, or payment status no longer matches");
+  }
+  if (!result.replayed) {
+    await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "COMPLETED",
+      "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
+  } else {
+    const existing = await env.DB.prepare(
+      `SELECT id FROM admin_activity_events
+       WHERE action = 'MANUAL_PAYMENT_CONFIRMATION'
+         AND target_type = 'MANUAL_PAYMENT_CONFIRMATIONS'
+         AND target_id = ?
+         AND outcome = 'COMPLETED'
+       LIMIT 1`,
+    ).bind(orderId).first<{ id: string }>();
+    if (!existing) {
+      await recordAdminActivity(env, admin, requestId, "MANUAL_PAYMENT_CONFIRMATION", "COMPLETED",
+        "MANUAL_PAYMENT_CONFIRMATIONS", orderId);
+    }
   }
   return jsonResponse({
     order_id: orderId,

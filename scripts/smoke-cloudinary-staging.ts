@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { CloudinaryStorageAdapter } from "../src/storage/cloudinary.ts";
+import { normalizeNodeImage } from "../src/platform/node-image-normalizer.ts";
 import { assertCloudinaryStagingConfiguration } from "./staging-config.ts";
 
 const syntheticPng = new Uint8Array(Buffer.from(
@@ -30,7 +31,7 @@ async function main(): Promise<void> {
         !Buffer.from(await privateObject.arrayBuffer()).equals(Buffer.from(syntheticPng))) {
       throw new Error("Cloudinary private read verification failed");
     }
-    await storage.createPublishedDerivative(privateKey, derivativeKey);
+    await storage.createPublishedDerivative(privateKey, derivativeKey, normalizeNodeImage);
     const derivative = await storage.getPublishedDerivative(derivativeKey);
     if (!derivative ||
         derivative.contentType !== "image/png" ||

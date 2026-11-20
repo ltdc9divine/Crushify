@@ -1,4 +1,5 @@
 import { validateUpload } from "./r2.ts";
+import type { ImageNormalizer } from "../image-normalizer.ts";
 import type { Storage, StorageObject, StorageUploadOptions } from "../storage.ts";
 
 export class MemoryStorageAdapter implements Storage {
@@ -36,12 +37,25 @@ export class MemoryStorageAdapter implements Storage {
     return null;
   }
 
-  async createPublishedDerivative(sourceKey: string, derivativeKey: string): Promise<void> {
+  async createPublishedDerivative(
+    sourceKey: string,
+    derivativeKey: string,
+    normalizeImage?: ImageNormalizer,
+  ): Promise<void> {
     const source = this.objects.get(sourceKey);
     if (!source) throw new Error("Private source asset is unavailable");
+    if (source.contentType !== "image/png" && source.contentType !== "image/jpeg") {
+      throw new Error("Private source asset has an unsupported media type");
+    }
+    const normalized = normalizeImage
+      ? await normalizeImage(source.bytes, source.contentType)
+      : {
+          bytes: new Uint8Array(source.bytes),
+          contentType: source.contentType,
+        };
     this.objects.set(derivativeKey, {
-      bytes: new Uint8Array(source.bytes),
-      contentType: source.contentType,
+      bytes: new Uint8Array(normalized.bytes),
+      contentType: normalized.contentType,
     });
   }
 

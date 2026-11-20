@@ -118,25 +118,66 @@ export async function verifyMigrationSchema(
   client: Client,
   migrations: SqlMigration[],
   onStage?: (stage: "build-expected-schema" | "read-schema" | "validate-schema") => void,
-): Promise<void> {
+): Promise<number> {
   onStage?.("build-expected-schema");
   const expected = new Set<string>();
-  const declaration = /CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))/gi;
+  const declaration = /CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|VIEW|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))/gi;
+  const removal = /DROP\s+(TABLE|INDEX|VIEW|TRIGGER)\s+(?:IF\s+EXISTS\s+)?(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))/gi;
+  const rename = /ALTER\s+TABLE\s+(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))\s+RENAME\s+TO\s+(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))/gi;
   for (const migration of migrations) {
-    for (const match of migration.sql.matchAll(declaration)) {
+    const operations: Array<{ index: number; apply: () => void }> = [];
+    for (const match of migration.sql.matchAll(removal)) {
+      const type = match[1].toLowerCase();
       const name = match[2] ?? match[3] ?? match[4] ?? match[5];
-      if (name) expected.add(`${match[1].toLowerCase()}:${name}`);
+      operations.push({
+        index: match.index,
+        apply: () => {
+          if (name) expected.delete(`${type}:${name}`);
+        },
+      });
     }
+    for (const match of migration.sql.matchAll(rename)) {
+      const oldName = match[1] ?? match[2] ?? match[3] ?? match[4];
+      const newName = match[5] ?? match[6] ?? match[7] ?? match[8];
+      operations.push({
+        index: match.index,
+        apply: () => {
+          if (oldName) expected.delete(`table:${oldName}`);
+          if (newName) expected.add(`table:${newName}`);
+        },
+      });
+    }
+    for (const match of migration.sql.matchAll(declaration)) {
+      const type = match[1].toLowerCase();
+      const name = match[2] ?? match[3] ?? match[4] ?? match[5];
+      operations.push({
+        index: match.index,
+        apply: () => {
+          if (name) expected.add(`${type}:${name}`);
+        },
+      });
+    }
+    operations.sort((left, right) => left.index - right.index);
+    for (const operation of operations) operation.apply();
   }
 
   onStage?.("read-schema");
   const result = await client.execute(
     "SELECT type, name FROM sqlite_master " +
-    "WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'",
+    "WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'",
   );
   const actual = new Set(result.rows.map((row) => `${String(row.type)}:${String(row.name)}`));
   onStage?.("validate-schema");
   if (expected.size !== actual.size || [...expected].some((object) => !actual.has(object))) {
-    throw new Error("Database tables and indexes do not match the applied migrations");
+    const missing = [...expected].filter((object) => !actual.has(object)).sort();
+    const unexpected = [...actual].filter((object) => !expected.has(object)).sort();
+    const details = [
+      missing.length ? `missing: ${missing.join(", ")}` : null,
+      unexpected.length ? `unexpected: ${unexpected.join(", ")}` : null,
+    ].filter(Boolean).join("; ");
+    throw new Error(
+      `Database tables, indexes, views, and triggers do not match the applied migrations${details ? ` (${details})` : ""}`,
+    );
   }
+  return actual.size;
 }

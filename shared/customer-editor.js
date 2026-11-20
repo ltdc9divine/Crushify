@@ -75,8 +75,8 @@
     if (!blob) throw new Error("Ảnh dữ liệu không hợp lệ.");
     const mediaType = blob.type.toLowerCase();
     if (!["image/jpeg", "image/png"].includes(mediaType) ||
-        blob.size < 1 || blob.size > 5 * 1024 * 1024) {
-      throw new Error("Ảnh phải là PNG hoặc JPEG hợp lệ.");
+        blob.size < 1 || blob.size > 4 * 1024 * 1024) {
+      throw new Error("Ảnh phải là PNG hoặc JPEG hợp lệ và không vượt quá 4 MB.");
     }
     const grant = await api("/assets/upload-url", {
       method: "POST",
@@ -121,7 +121,9 @@
       </div>
       <p class="crushify-customer-status" role="status" aria-live="polite">Đăng nhập để lưu trên máy chủ.</p>
     `;
-    host.prepend(box);
+    const customerSlot = host.querySelector(".crushify-customer-slot");
+    if (customerSlot) customerSlot.append(box);
+    else host.prepend(box);
     const form = box.querySelector("form");
     const actions = box.querySelector(".crushify-customer-actions");
     const status = box.querySelector(".crushify-customer-status");

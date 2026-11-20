@@ -1,7 +1,7 @@
 import type { ApiErrorBody } from "./types.ts";
 
 export const MAX_JSON_BYTES = 64 * 1024;
-export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 export function jsonResponse(
   body: unknown,

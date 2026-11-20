@@ -37,6 +37,7 @@ export async function runDatabaseContract({
   getMagicToken,
   label,
   beforeAssetDelete,
+  resetRateLimits,
   emailPrefix = "adapter",
 }) {
   async function signIn(email) {
@@ -70,7 +71,8 @@ export async function runDatabaseContract({
     return session;
   }
 
-  const owner = await signIn(`${emailPrefix}-${crypto.randomUUID()}@example.test`);
+  const ownerEmail = `${emailPrefix}-${crypto.randomUUID()}@example.test`;
+  const owner = await signIn(ownerEmail);
   const created = await request("/designs", owner, {
     method: "POST",
     mutating: true,
@@ -109,6 +111,7 @@ export async function runDatabaseContract({
   });
   assert.equal(tooManyMemoriesAssets.response.status, 409, `${label}: reject memories asset 14`);
 
+  await resetRateLimits?.(ownerEmail);
   const tooManyStandardAssets = await request("/designs", owner, {
     method: "POST",
     mutating: true,
@@ -278,7 +281,10 @@ export async function runDatabaseContract({
 
   const ownerAsset = await request(`/assets/${grant.body.asset_id}`, owner);
   assert.equal(ownerAsset.response.status, 200, `${label}: owner reads asset metadata/content`);
-  assert.deepEqual(Buffer.from(await ownerAsset.response.arrayBuffer()), png);
+  const storedPng = Buffer.from(await ownerAsset.response.arrayBuffer());
+  assert.deepEqual(storedPng.subarray(0, 8), png.subarray(0, 8));
+  assert.equal(storedPng.readUInt32BE(16), 1, `${label}: normalized image width`);
+  assert.equal(storedPng.readUInt32BE(20), 1, `${label}: normalized image height`);
   const otherAsset = await request(`/assets/${grant.body.asset_id}`, other);
   assert.equal(otherAsset.response.status, 404, `${label}: asset owner isolation`);
   const previewPrivateAsset = await request(`/assets/${grant.body.asset_id}`, null, {
@@ -340,7 +346,10 @@ export async function runDatabaseContract({
   );
   assert.equal(sharedPreviewAsset.response.status, 200,
     `${label}: shared preview exposes its referenced photo through the capability`);
-  assert.deepEqual(Buffer.from(await sharedPreviewAsset.response.arrayBuffer()), png);
+  const sharedPng = Buffer.from(await sharedPreviewAsset.response.arrayBuffer());
+  assert.deepEqual(sharedPng.subarray(0, 8), png.subarray(0, 8));
+  assert.equal(sharedPng.readUInt32BE(16), 1, `${label}: shared normalized image width`);
+  assert.equal(sharedPng.readUInt32BE(20), 1, `${label}: shared normalized image height`);
 
   const otherDesign = await request("/designs", other, {
     method: "POST",

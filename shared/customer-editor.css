@@ -1,3 +1,8 @@
+.crushify-customer-slot {
+  min-height: 112px;
+  height: 112px;
+}
+
 .crushify-customer-tools {
   margin: 12px 0;
   padding: 14px;
@@ -49,7 +54,7 @@
 }
 
 .crushify-customer-status {
-  min-height: 1.4em;
+  min-height: 38px;
   margin: 8px 0 0;
   font-size: 13px;
 }

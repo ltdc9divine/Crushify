@@ -7,11 +7,20 @@ import test from "node:test";
 const root = process.cwd();
 
 test("Vercel release retains runtime entry points and migration packaging", async () => {
-  const [vercelSource, packageSource, ignoreSource, handoff] = await Promise.all([
+  const [
+    vercelSource,
+    packageSource,
+    ignoreSource,
+    handoff,
+    migrationManifest,
+    databaseSchema,
+  ] = await Promise.all([
     readFile(join(root, "vercel.json"), "utf8"),
     readFile(join(root, "package.json"), "utf8"),
     readFile(join(root, ".vercelignore"), "utf8"),
     readFile(join(root, "docs/FINAL-API-HANDOFF.md"), "utf8"),
+    readFile(join(root, "docs/MIGRATION_MANIFEST.md"), "utf8"),
+    readFile(join(root, "docs/DATABASE_SCHEMA.md"), "utf8"),
   ]);
   const versionedApiSource = await readFile(join(root, "api/v1.ts"), "utf8");
   const vercel = JSON.parse(vercelSource) as {
@@ -23,6 +32,12 @@ test("Vercel release retains runtime entry points and migration packaging", asyn
   assert.equal(vercel.functions?.["api/[...path].ts"]?.includeFiles, "migrations/**");
   assert.equal(vercel.builds, undefined);
   assert.equal(packageJson.scripts?.build, undefined);
+  assert.match(handoff, /The 24 ordered SQL files/);
+  assert.match(handoff, /contiguous from `0001` through `0024`/);
+  assert.match(handoff, /src\/image-normalizer\.ts/);
+  assert.match(handoff, /src\/platform\/node-image-normalizer\.ts/);
+  assert.match(migrationManifest, /ascending order, from 0001 through 0024/);
+  assert.match(databaseSchema, /24 numbered migrations, `0001`–`0024`/);
   assert.match(versionedApiSource, /import handler from "\.\/\[\.\.\.path\]\.ts"/);
   for (const pattern of [
     ".agents",
@@ -65,6 +80,7 @@ test("Vercel release retains runtime entry points and migration packaging", asyn
     "migrations/0021_admin_activity_audit.sql",
     "migrations/0022_custom_design_customer_replies.sql",
     "migrations/0023_manual_bank_transfer_settlement.sql",
+    "migrations/0024_manual_payment_activity_audit.sql",
   ]) {
     await access(join(root, file));
   }
@@ -75,13 +91,24 @@ test("Vercel release retains runtime entry points and migration packaging", asyn
   const manifestRows = [...handoff.matchAll(
     /^\| (\d{4}) \| `migrations\/([^`]+)` \| `([a-f\d]{64})` \|$/gm,
   )];
+  const releaseManifestRows = [...migrationManifest.matchAll(
+    /^\| (\d+) \| (\d{4}) \| `([^`]+)` \| `([a-f\d]{64})` \|$/gm,
+  )];
   assert.equal(manifestRows.length, migrations.length);
+  assert.equal(releaseManifestRows.length, migrations.length);
   for (const [index, migration] of migrations.entries()) {
     const row = manifestRows[index];
+    const releaseRow = releaseManifestRows[index];
     assert.ok(row);
+    assert.ok(releaseRow);
     assert.equal(row[1], migration.slice(0, 4));
     assert.equal(row[2], migration);
+    assert.equal(releaseRow[1], String(index + 1));
+    assert.equal(releaseRow[2], migration.slice(0, 4));
+    assert.equal(releaseRow[3], migration);
     const contents = await readFile(join(root, "migrations", migration));
-    assert.equal(row[3], createHash("sha256").update(contents).digest("hex"));
+    const checksum = createHash("sha256").update(contents).digest("hex");
+    assert.equal(row[3], checksum);
+    assert.equal(releaseRow[4], checksum);
   }
 });

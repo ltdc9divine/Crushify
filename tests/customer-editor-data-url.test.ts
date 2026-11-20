@@ -42,9 +42,16 @@ describe("customer editor data URL images", () => {
     assert.throws(() => parse("data:image/jpeg;base64,%%%"), /Ảnh dữ liệu/);
   });
 
-  it("rejects data URLs larger than the 5 MiB upload limit", async () => {
+  it("rejects data URLs larger than the 4 MiB upload limit", async () => {
     const parse = await loadDataImageParser();
-    const oversized = Buffer.alloc(5 * 1024 * 1024 + 1).toString("base64");
-    assert.throws(() => parse(`data:image/jpeg;base64,${oversized}`), /vượt quá 5 MB/);
+    const oversized = Buffer.alloc(4 * 1024 * 1024 + 1).toString("base64");
+    assert.throws(() => parse(`data:image/jpeg;base64,${oversized}`), /vượt quá 4 MB/);
+  });
+
+  it("accepts an exact 4 MiB data image and rejects the next byte", async () => {
+    const parse = await loadDataImageParser();
+    const exact = Buffer.alloc(4 * 1024 * 1024).toString("base64");
+    const blob = parse(`data:image/jpeg;base64,${exact}`);
+    assert.equal(blob.size, 4 * 1024 * 1024);
   });
 });

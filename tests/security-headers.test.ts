@@ -168,23 +168,19 @@ describe("static security headers and CSP", () => {
       "sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu";
     for (const file of ["templates/our-universe/index.html", "templates/love-letter/index.html"]) {
       const html = await readFile(new URL(file, root), "utf8");
-      const tag = [...html.matchAll(/<script\b([^>]*)>/gi)]
-        .map((match) => match[1])
-        .find((attributes) =>
-          attributes.includes("https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js")
-        );
-      assert.ok(tag, `Missing pinned Three.js tag in ${file}`);
-      assert.ok(tag.includes(`integrity="${threeR128Integrity}"`), `Missing SRI in ${file}`);
-      assert.match(tag, /\bcrossorigin="anonymous"/i);
-      assert.match(tag, /\breferrerpolicy="no-referrer"/i);
+      assert.ok(html.includes("https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"),
+        `Missing primary Three.js URL in ${file}`);
+      assert.ok(html.includes(`THREE_INTEGRITY='${threeR128Integrity}'`),
+        `Missing primary/fallback SRI mapping in ${file}`);
+      assert.match(html, /s\.integrity=integrity;s\.crossOrigin='anonymous';s\.referrerPolicy='no-referrer'/);
     }
 
     for (const file of ["templates/our-universe/index.html", "templates/love-letter/index.html"]) {
       const source = await readFile(new URL(file, root), "utf8");
       assert.ok(source.includes(
-        `const THREE_FALLBACK_URL='https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',THREE_INTEGRITY='${threeR128Integrity}'`,
+        `THREE_FALLBACK_URL='https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',THREE_INTEGRITY='${threeR128Integrity}'`,
       ), `Missing fallback SRI mapping in ${file}`);
-      assert.match(source, /s\.integrity=THREE_INTEGRITY;s\.crossOrigin='anonymous';s\.referrerPolicy='no-referrer'/);
+      assert.match(source, /s\.integrity=integrity;s\.crossOrigin='anonymous';s\.referrerPolicy='no-referrer'/);
     }
 
     for (const file of ["templates/our-memories/our-memories.js", "templates/say-yes/say-yes.js"]) {

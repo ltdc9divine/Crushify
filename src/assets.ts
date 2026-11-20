@@ -2,7 +2,7 @@ import { applyRateLimit, requireCsrf, requireSession } from "./auth.ts";
 import { logSafeError } from "./logging.ts";
 import { apiError, MAX_IMAGE_BYTES, nowIso, randomToken, readBoundedBody, readJson, safeId, sha256, jsonResponse } from "./http.ts";
 import { serveAsset } from "./designs.ts";
-import { stripImageMetadata } from "./image-sanitizer.ts";
+import { ImageNormalizationError } from "./image-normalizer.ts";
 import type { Env } from "./types.ts";
 import { assetReferences, type TemplateData } from "./template-registry.ts";
 
@@ -119,6 +119,9 @@ async function createUpload(
   if (size < 1 || size > maxBytes) {
     return apiError(requestId, 413, "PAYLOAD_TOO_LARGE", `Image must be ${Math.floor(maxBytes / (1024 * 1024))} MB or smaller`);
   }
+  if (!env.IMAGE_NORMALIZER) {
+    return apiError(requestId, 503, "IMAGE_PROCESSOR_UNAVAILABLE", "Image processing is unavailable");
+  }
   const design = await env.DB.prepare(
     "SELECT id, template_id FROM designs WHERE id = ? AND customer_id = ? AND status = 'DRAFT'",
   ).bind(designId, required.session!.customerId).first<{ id: string; template_id: string }>();
@@ -142,10 +145,15 @@ async function createUpload(
 
   const id = safeId();
   const uploadSessionId = safeId();
+  const reservationAttemptId = safeId();
+  const reservationLeaseToken = randomToken(32);
   const key = `private/${randomToken(32)}-${mediaType === "image/png" ? "png" : "jpg"}`;
   const token = randomToken();
   const now = nowIso();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  const reservationCleanupAt = new Date(
+    Date.parse(expiresAt) + UPLOAD_CLEANUP_DELAY_MS,
+  ).toISOString();
   const inserted = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO assets
@@ -196,6 +204,20 @@ async function createUpload(
       id, required.session!.customerId, designId, designId, required.session!.customerId,
     ),
     env.DB.prepare(
+      `INSERT INTO asset_upload_attempts (
+         id, session_id, asset_id, lease_token, object_key, status,
+         lease_expires_at, next_cleanup_at, created_at, updated_at
+       )
+       SELECT ?, ?, ?, ?, ?, 'CLEANUP_PENDING', ?, ?, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM asset_upload_sessions
+         WHERE id = ? AND asset_id = ? AND status = 'PENDING'
+       )`,
+    ).bind(
+      reservationAttemptId, uploadSessionId, id, reservationLeaseToken, key,
+      expiresAt, reservationCleanupAt, now, now, uploadSessionId, id,
+    ),
+    env.DB.prepare(
       `DELETE FROM assets
        WHERE id = ? AND status = 'PENDING'
          AND NOT EXISTS (
@@ -203,7 +225,8 @@ async function createUpload(
          )`,
     ).bind(id, id),
   ]);
-  if (inserted[0]?.meta.changes !== 1 || inserted[1]?.meta.changes !== 1) {
+  if (inserted[0]?.meta.changes !== 1 || inserted[1]?.meta.changes !== 1 ||
+      inserted[2]?.meta.changes !== 1) {
     if (inserted[0]?.meta.changes !== 1) {
       const currentUsage = await env.DB.prepare(
         "SELECT COALESCE(SUM(byte_size), 0) AS bytes FROM assets WHERE customer_id = ? AND status <> 'DELETED'",
@@ -241,6 +264,10 @@ async function uploadContent(
   assetId: string,
 ): Promise<Response> {
   if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
+  const normalizeImage = env.IMAGE_NORMALIZER;
+  if (!normalizeImage) {
+    return apiError(requestId, 503, "IMAGE_PROCESSOR_UNAVAILABLE", "Image processing is unavailable");
+  }
   const token = bearerToken(request);
   if (!token) return apiError(requestId, 401, "UNAUTHENTICATED", "Valid upload capability required");
   const session = await env.DB.prepare(
@@ -307,17 +334,37 @@ async function uploadContent(
   if (!info || info.contentType !== session.media_type || info.contentType !== headerType) {
     return apiError(requestId, 422, "UPLOAD_REJECTED", "Only valid PNG and JPEG images are accepted");
   }
-  let sanitizedBytes: Uint8Array;
+  let normalizedImage: Awaited<ReturnType<typeof normalizeImage>>;
   try {
-    sanitizedBytes = stripImageMetadata(bytes, info.contentType);
+    normalizedImage = await normalizeImage(bytes, info.contentType);
   } catch (error) {
-    if (!(error instanceof TypeError)) throw error;
-    return apiError(requestId, 422, "UPLOAD_REJECTED", "Image metadata could not be sanitized");
+    if (!(error instanceof ImageNormalizationError)) throw error;
+    const tooLarge = error.code === "IMAGE_TOO_LARGE";
+    return apiError(
+      requestId,
+      tooLarge ? 413 : 422,
+      tooLarge ? "PAYLOAD_TOO_LARGE" : "UPLOAD_REJECTED",
+      tooLarge ? "Normalized image exceeds the upload size limit" : "Image could not be normalized",
+    );
   }
-  const sanitizedInfo = detectImage(sanitizedBytes);
-  if (!sanitizedInfo || sanitizedInfo.contentType !== info.contentType ||
-      sanitizedInfo.width !== info.width || sanitizedInfo.height !== info.height) {
-    return apiError(requestId, 422, "UPLOAD_REJECTED", "Image metadata could not be sanitized");
+  if (normalizedImage.bytes.byteLength > uploadMaxBytes(env)) {
+    return apiError(requestId, 413, "PAYLOAD_TOO_LARGE",
+      "Normalized image exceeds the upload size limit");
+  }
+  const normalizedInfo = detectImage(normalizedImage.bytes);
+  if (!normalizedInfo || normalizedImage.contentType !== info.contentType ||
+      normalizedInfo.contentType !== normalizedImage.contentType ||
+      normalizedInfo.width !== normalizedImage.width ||
+      normalizedInfo.height !== normalizedImage.height) {
+    return apiError(requestId, 422, "UPLOAD_REJECTED", "Image could not be normalized");
+  }
+  const currentUsage = await env.DB.prepare(
+    `SELECT COALESCE(SUM(byte_size), 0) AS bytes FROM assets
+     WHERE customer_id = ? AND id <> ? AND status <> 'DELETED'`,
+  ).bind(session.customer_id, assetId).first<{ bytes: number }>();
+  if ((currentUsage?.bytes ?? 0) + normalizedImage.bytes.byteLength > MAX_CUSTOMER_UPLOAD_BYTES) {
+    return apiError(requestId, 413, "CUSTOMER_STORAGE_QUOTA",
+      "Your saved images exceed the 64 MiB account limit");
   }
 
   const now = nowIso();
@@ -385,13 +432,13 @@ async function uploadContent(
       "This upload was cancelled because its design changed or was deleted.");
   }
 
-  const digest = await sha256(sanitizedBytes);
+  const digest = await sha256(normalizedImage.bytes);
   try {
-    await env.STORAGE.upload(attemptObjectKey, sanitizedBytes, {
-      contentType: sanitizedInfo.contentType,
+    await env.STORAGE.upload(attemptObjectKey, normalizedImage.bytes, {
+      contentType: normalizedImage.contentType,
       sha256: digest,
-      width: sanitizedInfo.width,
-      height: sanitizedInfo.height,
+      width: normalizedImage.width,
+      height: normalizedImage.height,
     });
     const finalizedAt = nowIso();
     const finalized = await env.DB.batch([
@@ -418,12 +465,19 @@ async function uploadContent(
              SELECT 1 FROM asset_upload_attempts
              WHERE id = ? AND asset_id = assets.id AND lease_token = ?
                AND object_key = ? AND status = 'UPLOADING'
-           )`,
+           )
+           AND (
+             SELECT COALESCE(SUM(other.byte_size), 0)
+             FROM assets other
+             WHERE other.customer_id = assets.customer_id
+               AND other.id <> assets.id AND other.status <> 'DELETED'
+           ) + ? <= ?`,
       ).bind(
-        attemptObjectKey, digest, sanitizedInfo.width, sanitizedInfo.height,
-        sanitizedBytes.byteLength, finalizedAt,
+        attemptObjectKey, digest, normalizedImage.width, normalizedImage.height,
+        normalizedImage.bytes.byteLength, finalizedAt,
         assetId, session.customer_id, session.customer_id,
         leaseToken, finalizedAt, attemptId, leaseToken, attemptObjectKey,
+        normalizedImage.bytes.byteLength, MAX_CUSTOMER_UPLOAD_BYTES,
       ),
       env.DB.prepare(
         `UPDATE asset_upload_sessions
@@ -512,6 +566,9 @@ async function completeUpload(
   assetId: string,
 ): Promise<Response> {
   if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
+  if (!env.IMAGE_NORMALIZER) {
+    return apiError(requestId, 503, "IMAGE_PROCESSOR_UNAVAILABLE", "Image processing is unavailable");
+  }
   const required = await requireSession(request, env, requestId);
   if (required.response) return required.response;
   const csrf = await requireCsrf(request, env, required.session!, requestId);
@@ -648,6 +705,24 @@ export async function reconcileUploadAttemptCleanup(
   }
   const timestamp = now.toISOString();
   const leaseExpiresAt = new Date(now.getTime() + 5 * 60_000).toISOString();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO asset_upload_attempts (
+       id, session_id, asset_id, lease_token, object_key, status,
+       lease_expires_at, next_cleanup_at, created_at, updated_at
+     )
+     SELECT 'expired-upload-' || session.id, session.id, asset.id,
+       'expired-upload-' || session.id, asset.object_key, 'CLEANUP_PENDING',
+       session.expires_at, ?, ?, ?
+     FROM asset_upload_sessions session
+     JOIN assets asset ON asset.id = session.asset_id
+     WHERE session.status = 'PENDING' AND session.expires_at <= ?
+       AND asset.status IN ('PENDING','REJECTED')
+       AND NOT EXISTS (
+         SELECT 1 FROM asset_upload_attempts attempt
+         WHERE attempt.session_id = session.id
+       )
+     ORDER BY session.expires_at, session.id LIMIT ?`,
+  ).bind(timestamp, timestamp, timestamp, timestamp, limit).run();
   const due = await env.DB.prepare(
     `SELECT attempt.id, attempt.asset_id, attempt.object_key, attempt.status,
             attempt.cleanup_attempts, attempt.lease_token
@@ -796,18 +871,65 @@ export async function reconcileUploadAttemptCleanup(
         throw new Error("Storage object remains after cleanup");
       }
       const verifiedAt = timestamp;
-      const verified = await env.DB.prepare(
+      const verified = await env.DB.batch([
+        env.DB.prepare(
         `UPDATE asset_upload_attempts
          SET status = 'CLEANED', cleanup_lease_token = NULL,
            cleanup_lease_expires_at = NULL, last_verified_at = ?,
            next_cleanup_at = ?, last_cleanup_error_code = NULL, updated_at = ?
          WHERE id = ? AND status = 'CLEANUP_PENDING' AND cleanup_lease_token = ?`,
-      ).bind(
-        verifiedAt,
-        new Date(Date.parse(verifiedAt) + UPLOAD_ORPHAN_RECHECK_MS).toISOString(),
-        verifiedAt, attempt.id, cleanupToken,
-      ).run();
-      if (verified.meta.changes !== 1) {
+        ).bind(
+          verifiedAt,
+          new Date(Date.parse(verifiedAt) + UPLOAD_ORPHAN_RECHECK_MS).toISOString(),
+          verifiedAt, attempt.id, cleanupToken,
+        ),
+        env.DB.prepare(
+          `UPDATE asset_upload_sessions
+           SET status = 'CANCELLED', lease_expires_at = NULL,
+             lease_token = NULL, used_at = COALESCE(used_at, ?)
+           WHERE asset_id = ? AND expires_at <= ?
+             AND (status = 'PENDING' OR (status = 'COMPLETE' AND EXISTS (
+               SELECT 1 FROM assets
+               WHERE id = asset_upload_sessions.asset_id AND status = 'REJECTED'
+             )))
+             AND EXISTS (
+               SELECT 1 FROM asset_upload_attempts
+               WHERE id = ? AND status = 'CLEANED' AND last_verified_at = ?
+             )`,
+        ).bind(verifiedAt, attempt.asset_id, verifiedAt, attempt.id, verifiedAt),
+        env.DB.prepare(
+          `UPDATE assets SET status = 'DELETED', deleted_at = ?, updated_at = ?
+           WHERE id = ? AND status IN ('PENDING','REJECTED')
+             AND EXISTS (
+               SELECT 1 FROM asset_upload_sessions
+               WHERE asset_id = assets.id AND status = 'CANCELLED'
+                 AND expires_at <= ?
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM asset_upload_attempts
+               WHERE asset_id = assets.id
+                 AND (status <> 'CLEANED' OR reconciliation_state <> 'ACTIVE'
+                   OR last_verified_at IS NULL)
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM design_asset_refs WHERE asset_id = assets.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM order_asset_refs ref JOIN orders o ON o.id = ref.order_id
+               WHERE ref.asset_id = assets.id
+                 AND o.status IN ('DRAFT','AWAITING_PAYMENT','PAID','FULFILLING','REFUND_PENDING')
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM publication_assets ref
+               JOIN publications p ON p.id = ref.publication_id
+               WHERE ref.asset_id = assets.id AND ref.revoked_at IS NULL
+                 AND (p.status IN ('PUBLISHED','UNPUBLISHED') OR
+                   (p.status IN ('EXPIRED','REVOKED')
+                     AND p.retention_delete_after_at > ?))
+             )`,
+        ).bind(verifiedAt, verifiedAt, attempt.asset_id, verifiedAt, verifiedAt),
+      ]);
+      if (verified[0]?.meta.changes !== 1) {
         throw new Error("Upload cleanup ownership changed before completion");
       }
       cleaned++;

@@ -31,7 +31,7 @@ describe("Turso/libSQL migrations", () => {
     try {
       const migrations = await loadMigrations();
       assert.deepEqual(await applyMigrations(client, migrations),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       assert.deepEqual(await applyMigrations(client, migrations), []);
 
       const ledger = await client.execute(
@@ -61,6 +61,7 @@ describe("Turso/libSQL migrations", () => {
         [21, "admin_activity_audit"],
         [22, "custom_design_customer_replies"],
         [23, "manual_bank_transfer_settlement"],
+        [24, "manual_payment_activity_audit"],
       ]);
 
       const foreignKeys = await client.execute("PRAGMA foreign_keys");
@@ -189,10 +190,84 @@ describe("Turso/libSQL migrations", () => {
         missing: null,
         created_at: "2026-11-04T00:00:00.000Z",
       });
+
       assert.throws(
         () => database.prepare("SELECT ?").bind(undefined as never),
         /cannot be undefined/,
       );
+    } finally {
+      client.close();
+    }
+  });
+
+  it("extends the immutable activity audit for manual payments without rewriting prior ledger entries", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    try {
+      const migrations = await loadMigrations();
+      assert.deepEqual(
+        await applyMigrations(client, migrations.filter((migration) => migration.version <= 23)),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+      );
+      const timestamp = new Date().toISOString();
+      await client.execute({
+        sql: `INSERT INTO customers (
+          id, email, email_normalized, status, created_at, updated_at
+        ) VALUES (?, ?, ?, 'ACTIVE', ?, ?)`,
+        args: ["audit-migration-customer", "audit@example.test",
+          "audit@example.test", timestamp, timestamp],
+      });
+      await client.execute({
+        sql: `INSERT INTO admin_activity_events (
+          id, actor_customer_id, request_id, action, outcome, target_type, target_id, created_at
+        ) VALUES (?, ?, ?, 'OPERATIONS_VIEWED', 'COMPLETED', 'ADMIN_OPERATIONS', NULL, ?)`,
+        args: ["audit-migration-existing", "audit-migration-customer",
+          "audit-migration-request", timestamp],
+      });
+
+      assert.deepEqual(await applyMigrations(client, migrations), [24]);
+      assert.deepEqual((await client.execute(
+        `SELECT id, actor_customer_id, request_id, action, outcome,
+                target_type, target_id, created_at
+         FROM admin_activity_events`,
+      )).rows, [{
+        id: "audit-migration-existing",
+        actor_customer_id: "audit-migration-customer",
+        request_id: "audit-migration-request",
+        action: "OPERATIONS_VIEWED",
+        outcome: "COMPLETED",
+        target_type: "ADMIN_OPERATIONS",
+        target_id: null,
+        created_at: timestamp,
+      }]);
+      await client.execute({
+        sql: `INSERT INTO admin_activity_events (
+          id, actor_customer_id, request_id, action, outcome, target_type, target_id, created_at
+        ) VALUES (?, ?, ?, 'MANUAL_PAYMENT_CONFIRMATION', 'FAILED',
+          'MANUAL_PAYMENT_CONFIRMATIONS', ?, ?)`,
+        args: ["audit-migration-manual", "audit-migration-customer",
+          "manual-confirmation-request", "manual-order", timestamp],
+      });
+      assert.deepEqual((await client.execute(
+        `SELECT id, actor_customer_id, request_id, action, outcome,
+                target_type, target_id, created_at
+         FROM admin_activity_events WHERE id = 'audit-migration-manual'`,
+      )).rows, [{
+        id: "audit-migration-manual",
+        actor_customer_id: "audit-migration-customer",
+        request_id: "manual-confirmation-request",
+        action: "MANUAL_PAYMENT_CONFIRMATION",
+        outcome: "FAILED",
+        target_type: "MANUAL_PAYMENT_CONFIRMATIONS",
+        target_id: "manual-order",
+        created_at: timestamp,
+      }]);
+      await assert.rejects(client.execute(
+        "UPDATE admin_activity_events SET outcome = 'COMPLETED' WHERE id = 'audit-migration-manual'",
+      ));
+      await assert.rejects(client.execute(
+        "DELETE FROM admin_activity_events WHERE id = 'audit-migration-manual'",
+      ));
+      assert.equal((await client.execute("PRAGMA foreign_key_check")).rows.length, 0);
     } finally {
       client.close();
     }
@@ -347,7 +422,7 @@ describe("Turso/libSQL migrations", () => {
       assert.ok(!before.rows.some((row) => row.name === "reconciliation_state"));
 
       assert.deepEqual(await applyMigrations(client, migrations),
-        [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       const after = await client.execute("PRAGMA table_info('asset_upload_attempts')");
       assert.ok(after.rows.some((row) => row.name === "reconciliation_state"));
       const indexes = await client.execute("PRAGMA index_list('asset_upload_attempts')");
@@ -388,7 +463,7 @@ describe("Turso/libSQL migrations", () => {
 
       assert.deepEqual(await applyMigrations(
         client, migrations,
-      ), [14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+      ), [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       assert.deepEqual((await client.execute(
         `SELECT id, provider_create_succeeded_at, next_cleanup_at
          FROM publication_derivative_operations ORDER BY id`,
@@ -493,7 +568,7 @@ describe("Turso/libSQL migrations", () => {
         }
       }
 
-      assert.deepEqual(await applyMigrations(client, migrations), [15, 16, 17, 18, 19, 20, 21, 22, 23]);
+      assert.deepEqual(await applyMigrations(client, migrations), [15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       const evidence = await client.execute(
         `SELECT payment_id, evidence_source, source_transaction_id, amount_minor,
                 currency, verified_at, status
@@ -648,7 +723,7 @@ describe("Turso/libSQL migrations", () => {
       ]);
 
       assert.deepEqual(await applyMigrations(client, migrations),
-        [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       const attempts = await client.execute(
         "SELECT reconciliation_state FROM asset_upload_attempts ORDER BY session_id",
       );
@@ -702,7 +777,7 @@ describe("Turso/libSQL migrations", () => {
       });
 
       assert.deepEqual(await applyMigrations(client, migrations),
-        [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       const preserved = await client.execute(
         `SELECT status, attempts, last_error_code, started_at, completed_at,
                 next_attempt_at, lease_token, lease_expires_at, last_failure_at

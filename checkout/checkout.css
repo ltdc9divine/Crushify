@@ -172,6 +172,43 @@ h1 {
   background: rgba(255, 157, 201, 0.2);
 }
 
+.secondary-action {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin-top: 12px;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 157, 201, 0.36);
+  border-radius: 12px;
+  background: rgba(255, 157, 201, 0.08);
+  color: #ffadd1;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.secondary-action:hover,
+.secondary-action:focus-visible {
+  background: rgba(255, 157, 201, 0.18);
+}
+
+.secondary-action:focus-visible {
+  outline: 2px solid #ffadd1;
+  outline-offset: 3px;
+}
+
+.secondary-action:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.new-intent-note {
+  margin: 14px 0 0;
+  color: #c5acbd;
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
 .copy-feedback {
   min-height: 1.4em;
   margin: 12px 0 0;

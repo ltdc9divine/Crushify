@@ -100,13 +100,15 @@ npm run test:integration
 
 The integration test source uses local D1 and Wrangler's local R2 emulation. Its disposable database migrations run before the Worker starts, avoiding concurrent SQLite initialization. The Vercel Node adapter has local test coverage against an isolated Turso file database and in-memory storage; this does not verify a hosted Vercel deployment. Remote migrations, provider settings, account bindings/secrets, and staging deployment status are **NOT VERIFIED** here. Do not use production customer data.
 
-To apply the existing numbered SQLite migrations to a **new or verified empty** Turso database, set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the server environment and run:
+For local Vercel development, `npm run db:migrate:turso` applies the existing numbered SQLite migrations to a local file database through `scripts/migrate-turso.ts`. Set `TURSO_DATABASE_URL` to a `file:` URL and do not provide a remote auth token:
 
 ```powershell
 npm run db:migrate:turso
 ```
 
-The migration command checks applied migration checksums and foreign keys, runs each migration transactionally, and refuses databases containing application tables without a migration ledger. It does not connect automatically or migrate existing D1 data. See [docs/HOSTING_MIGRATION.md](docs/HOSTING_MIGRATION.md) for the staged migration status and safeguards.
+The local migration command checks applied migration checksums and foreign keys, runs each migration transactionally, and refuses databases containing application tables without a migration ledger. It does not connect to a remote Turso database or migrate existing D1 data.
+
+For the separately approved Preview/Turso staging target, use `npm run db:preflight:turso:staging` for read-only verification or `npm run db:migrate:turso:staging` for the guarded write command. Both require the staging-specific environment confirmations documented in [docs/VERCEL_STAGING.md](docs/VERCEL_STAGING.md). Neither command has been run against a remote database for this release. See [docs/HOSTING_MIGRATION.md](docs/HOSTING_MIGRATION.md) for migration safeguards.
 
 All five templates are connected in source to server-backed drafts, private previews, and checkout navigation; templates with photo editors also use private media APIs. The approved standard catalog is defined in `src/product-catalog.ts`: 59,000 VND including the first hosting month, 10,000 VND per additional month, or 199,000 VND Lifetime. Local tests use synthetic data. Preview checkout is an explicit opt-in requiring isolated resources and SePay Test-mode configuration; no such configuration, provider transaction, or deployed Preview journey is verified here. Production checkout and webhook settlement are **NOT ENABLED**. The custom-project portal/admin workflow and customer-facing refund/support terms are not implemented or approved. See [docs/SEPAY_SETUP.md](docs/SEPAY_SETUP.md) and [docs/INTEGRATION-STATUS.md](docs/INTEGRATION-STATUS.md).
 

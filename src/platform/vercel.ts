@@ -3,6 +3,7 @@ import { handleApiRequest } from "../index.ts";
 import { connectDatabaseFromEnvironment } from "../database/provider.ts";
 import type { Database } from "../database.ts";
 import type { Storage } from "../storage.ts";
+import type { ImageNormalizer } from "../image-normalizer.ts";
 import { CloudinaryStorageAdapter } from "../storage/cloudinary.ts";
 import {
   CloudinaryConfigurationError,
@@ -117,6 +118,7 @@ export interface VercelRuntimeDependencies {
   connectDatabase?: (environment: VercelEnvironment) => Promise<DatabaseConnection>;
   createCloudinaryStorage?: (environment: VercelEnvironment) => Storage;
   createMockStorage?: () => Storage;
+  imageNormalizer?: ImageNormalizer;
   localTestEmailSink?: (message: import("../auth.ts").EmailMessage) => Promise<void>;
   previewTestEmailSink?: (message: import("../auth.ts").EmailMessage) => Promise<void>;
   sepayFetch?: typeof fetch;
@@ -954,6 +956,7 @@ export function createVercelApiHandler(
         const result = await runScheduledPublicationLifecycle({
           DB: connection.database,
           STORAGE: storage,
+          IMAGE_NORMALIZER: dependencies.imageNormalizer,
           ENVIRONMENT: "staging",
           DATA_RETENTION_DAYS: environment.DATA_RETENTION_DAYS,
         }, { limit: 10 });
@@ -1118,6 +1121,7 @@ export function createVercelApiHandler(
     const appEnv: Env = {
       DB: connection.database,
       STORAGE: storage,
+      IMAGE_NORMALIZER: dependencies.imageNormalizer,
       DATABASE_PROVIDER: "turso",
       STORAGE_PROVIDER: environment.STORAGE_PROVIDER === "cloudinary" ? "cloudinary" : undefined,
       CLOUDINARY_CLOUD_NAME: cloudinary?.cloudName,

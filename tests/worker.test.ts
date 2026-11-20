@@ -4,6 +4,7 @@ import { handleApiRequest } from "../src/index.ts";
 import { createEmailService, type EmailMessage } from "../src/auth.ts";
 import { validateUniverseDesign } from "../src/universe.ts";
 import { detectImage } from "../src/assets.ts";
+import { sha256 } from "../src/http.ts";
 import worker from "../src/index.ts";
 import { PUBLICATION_SHELL_CSP } from "../src/security-headers.ts";
 import { createStorageFromEnvironment } from "../src/storage/provider.ts";
@@ -185,6 +186,107 @@ describe("legacy Worker storage isolation", () => {
 });
 
 describe("API foundation", () => {
+  it("requires authentication before revealing unavailable image processing", async () => {
+    let databaseAccessed = false;
+    const env = {
+      DB: {
+        prepare() {
+          databaseAccessed = true;
+          throw new Error("Image mutation must fail before database access");
+        },
+        async batch() {
+          databaseAccessed = true;
+          throw new Error("Image mutation must fail before database access");
+        },
+      },
+      STORAGE: {} as never,
+      ENVIRONMENT: "production",
+      APP_ORIGIN: "https://crushify.test",
+    } as never;
+    const response = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/assets/upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          design_id: "00000000-0000-4000-8000-000000000001",
+          media_type: "image/png",
+          size: 1,
+        }),
+      }),
+      env,
+    );
+    assert.equal(response.status, 401);
+    assert.equal((await response.json() as { error: { code: string } }).error.code,
+      "UNAUTHENTICATED");
+    assert.equal(databaseAccessed, false);
+  });
+
+  it("fails closed for authenticated uploads when no image processor is available", async () => {
+    const sessionToken = "synthetic-worker-session-token";
+    const csrfToken = "synthetic-worker-csrf-token";
+    const sessionTokenHash = await sha256(sessionToken);
+    const csrfTokenHash = await sha256(csrfToken);
+    let designLookupReached = false;
+    const env = {
+      DB: {
+        prepare(query: string) {
+          return {
+            bind(...values: unknown[]) {
+              return {
+                async first() {
+                  if (query.includes("FROM customer_sessions s")) {
+                    assert.equal(values[0], sessionTokenHash);
+                    return {
+                      id: "synthetic-session-id",
+                      customer_id: "synthetic-customer-id",
+                      csrf_token_hash: csrfTokenHash,
+                      email_normalized: "worker-upload@example.test",
+                    };
+                  }
+                  if (query.includes("SELECT request_count FROM auth_rate_limits")) {
+                    return { request_count: 1 };
+                  }
+                  if (query.includes("FROM designs")) designLookupReached = true;
+                  throw new Error("Unexpected database query in missing-processor test");
+                },
+                async run() {
+                  return { success: true, meta: { changes: 1 } };
+                },
+              };
+            },
+          };
+        },
+        async batch() {
+          throw new Error("Missing-processor upload must not write database batches");
+        },
+      },
+      STORAGE: {} as never,
+      ENVIRONMENT: "production",
+      APP_ORIGIN: "https://crushify.test",
+    } as never;
+    const response = await handleApiRequest(
+      new Request("https://crushify.test/api/v1/assets/upload-url", {
+        method: "POST",
+        headers: {
+          Cookie: `crushify_session=${sessionToken}; crushify_csrf=${csrfToken}`,
+          Origin: "https://crushify.test",
+          "X-CSRF-Token": csrfToken,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          design_id: "00000000-0000-4000-8000-000000000001",
+          media_type: "image/png",
+          size: 1,
+        }),
+      }),
+      env,
+    );
+    assert.equal(response.status, 503);
+    assert.equal((await response.json() as { error: { code: string } }).error.code,
+      "IMAGE_PROCESSOR_UNAVAILABLE");
+    assert.equal(designLookupReached, false);
+  });
+
   it("uses the configured Resend adapter only in Production and disables mail in Preview", async () => {
     const originalFetch = globalThis.fetch;
     let capturedRequest: { url: string; authorization: string | null; body: Record<string, unknown> } | null = null;

@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-xSIUsFtqn+8xk7a0BGh8OjdsZSYHRUL4jYE9m+XaHnI='; style-src 'self' https://fonts.googleapis.com 'sha256-DiqkVsyLiSy7U7a+C908KfaI9uepcP6H90F/l0e3VII='; style-src-attr 'unsafe-hashes' 'sha256-ksGPa9rBx3qdJd85P0QDyQNATrJagvS5YtLUpHxWuto='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-wBzrZL6xc5JkBsOTCVIp7z7/pLdbQeOORVLpylTXI04='; style-src 'self' https://fonts.googleapis.com 'sha256-DiqkVsyLiSy7U7a+C908KfaI9uepcP6H90F/l0e3VII='; style-src-attr 'unsafe-hashes' 'sha256-ksGPa9rBx3qdJd85P0QDyQNATrJagvS5YtLUpHxWuto='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'" />
 <meta name="referrer" content="no-referrer">
 <title>Crushify · Vũ trụ của chúng mình</title>
 <link rel="stylesheet" href="/shared/publication-bootstrap.css">
 <link rel="stylesheet" href="/shared/customer-editor.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Playfair+Display:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box}
@@ -81,7 +83,6 @@ button:hover,.btn:hover{border-color:var(--a)}button.on{border-color:var(--a);ba
 </main></div>
 <div id="lb" hidden><figure><img alt=""><figcaption></figcaption></figure></div>
 <script src="/shared/publication-bootstrap.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 ;(async()=>{const publicationData=await window.loadCrushifyPublication('our-universe');if(publicationData===false)return;
 const $=s=>document.querySelector(s),clamp=(v,a,b)=>Math.min(b,Math.max(a,v)),lerp=(a,b,t)=>a+(b-a)*t,rnd=(a,b)=>a+Math.random()*(b-a),ease=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
@@ -137,10 +138,10 @@ function buildEditor(){const ed=$('#ed');ed.textContent='';
 sect('01 — Tên của hai người');[['Tên của bạn','sender'],['Tên người ấy','receiver'],['Biệt danh','nickname']].forEach(a=>field(ed,...a));
 sect('02 — Câu chuyện của chúng mình');[['Tiêu đề chính','headline'],['Tiêu đề phụ','subheadline'],['Lời nhắn','mainMessage','ta'],['Ngày bắt đầu','startDate','date']].forEach(a=>field(ed,...a));
 sect('03 — Kỷ niệm');D.memories.forEach((m,i)=>{field(ed,`Tiêu đề kỷ niệm ${i+1}`,`memories.${i}.title`);field(ed,`Mô tả kỷ niệm ${i+1}`,`memories.${i}.description`,'ta')});
-sect('04 — Ảnh (tối đa 6, PNG/JPEG đến 5 MB)');const pl=document.createElement('div');pl.id='plist';const lb=document.createElement('button');lb.id='pick-photos';lb.type='button';lb.className='btn';lb.textContent='＋ Tải ảnh lên';const up=document.createElement('input');up.type='file';up.accept='image/png,image/jpeg';up.multiple=true;up.hidden=true;up.onchange=async e=>{for(const file of [...e.target.files])await addPhoto(file);e.target.value=''};lb.onclick=()=>up.click();ed.append(pl,lb,up);
+sect('04 — Ảnh (tối đa 6, PNG/JPEG đến 4 MB)');const pl=document.createElement('div');pl.id='plist';const lb=document.createElement('button');lb.id='pick-photos';lb.type='button';lb.className='btn';lb.textContent='＋ Tải ảnh lên';const up=document.createElement('input');up.type='file';up.accept='image/png,image/jpeg';up.multiple=true;up.hidden=true;up.onchange=async e=>{for(const file of [...e.target.files])await addPhoto(file);e.target.value=''};lb.onclick=()=>up.click();ed.append(pl,lb,up);
 sect('05 — Chủ đề vũ trụ');const th=document.createElement('div');th.className='row';th.id='ths';Object.entries(TH).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.onclick=()=>setTheme(k);th.append(b)});ed.append(th);
 sect('06 — Hiệu ứng chuyển động');const an=document.createElement('div');an.className='row';an.id='ans';Object.entries(AN).forEach(([k,t])=>{const b=document.createElement('button');b.dataset.k=k;b.textContent=t.n;b.onclick=()=>setAnim(k);an.append(b)});ed.append(an);renderPhotos()}
-async function addPhoto(file){if(!['image/png','image/jpeg'].includes(file.type)){toast('Chỉ hỗ trợ ảnh PNG hoặc JPEG');return}if(file.size>5*1024*1024){toast('Ảnh phải nhỏ hơn 5 MB');return}if(D.photos.length>=6){toast('Bạn chỉ có thể thêm tối đa 6 ảnh');return}setApiStatus('Đang tải ảnh lên…','loading');let assetId=null;try{const bitmap=await createImageBitmap(file),scale=Math.min(1,768/Math.max(bitmap.width,bitmap.height)),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();const blob=await new Promise((resolve,reject)=>canvas.toBlob(value=>value?resolve(value):reject(new Error('Không xử lý được ảnh')),'image/jpeg',.88));const grant=await apiJson('/assets/upload-url',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({design_id:designId,media_type:'image/jpeg',size:blob.size})},true);assetId=grant.asset_id;const uploaded=await fetch(grant.upload_url,{method:'PUT',headers:{Authorization:'Bearer '+grant.upload_token,'Content-Type':'image/jpeg'},body:blob,credentials:'same-origin'});if(!uploaded.ok)throw new Error('Tải ảnh lên thất bại');await apiJson('/assets/'+encodeURIComponent(assetId)+'/complete',{method:'POST'},true);for(let i=PH.length-1;i>=0;i--)if(PH[i].def)PH.splice(i,1);PH.push({c:canvas,cap:'',def:false,assetId});D.photos.push({asset_id:assetId,caption:''});photosChanged();if(!await saveDesign())throw new Error('Ảnh chưa được gắn vào bản thiết kế đã lưu');setApiStatus('Tải ảnh hoàn tất · đã lưu','saved')}catch(error){if(assetId){try{await apiJson('/assets/'+encodeURIComponent(assetId),{method:'DELETE'},true)}catch(cleanupError){console.error('Could not clean up failed photo upload',cleanupError)}}if(assetId){const index=PH.findIndex(photo=>photo.assetId===assetId);if(index>=0)PH.splice(index,1);D.photos=D.photos.filter(photo=>photo.asset_id!==assetId);photosChanged()}setApiStatus('Tải ảnh thất bại: '+error.message,'error');toast('Không tải/lưu được ảnh. Vui lòng thử lại.')} }
+async function addPhoto(file){if(!['image/png','image/jpeg'].includes(file.type)){toast('Chỉ hỗ trợ ảnh PNG hoặc JPEG');return}if(file.size>4*1024*1024){toast('Ảnh phải nhỏ hơn hoặc bằng 4 MB');return}if(D.photos.length>=6){toast('Bạn chỉ có thể thêm tối đa 6 ảnh');return}setApiStatus('Đang tải ảnh lên…','loading');let assetId=null;try{const bitmap=await createImageBitmap(file),scale=Math.min(1,768/Math.max(bitmap.width,bitmap.height)),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();const blob=await new Promise((resolve,reject)=>canvas.toBlob(value=>value?resolve(value):reject(new Error('Không xử lý được ảnh')),'image/jpeg',.88));const grant=await apiJson('/assets/upload-url',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({design_id:designId,media_type:'image/jpeg',size:blob.size})},true);assetId=grant.asset_id;const uploaded=await fetch(grant.upload_url,{method:'PUT',headers:{Authorization:'Bearer '+grant.upload_token,'Content-Type':'image/jpeg'},body:blob,credentials:'same-origin'});if(!uploaded.ok)throw new Error('Tải ảnh lên thất bại');await apiJson('/assets/'+encodeURIComponent(assetId)+'/complete',{method:'POST'},true);for(let i=PH.length-1;i>=0;i--)if(PH[i].def)PH.splice(i,1);PH.push({c:canvas,cap:'',def:false,assetId});D.photos.push({asset_id:assetId,caption:''});photosChanged();if(!await saveDesign())throw new Error('Ảnh chưa được gắn vào bản thiết kế đã lưu');setApiStatus('Tải ảnh hoàn tất · đã lưu','saved')}catch(error){if(assetId){try{await apiJson('/assets/'+encodeURIComponent(assetId),{method:'DELETE'},true)}catch(cleanupError){console.error('Could not clean up failed photo upload',cleanupError)}}if(assetId){const index=PH.findIndex(photo=>photo.assetId===assetId);if(index>=0)PH.splice(index,1);D.photos=D.photos.filter(photo=>photo.asset_id!==assetId);photosChanged()}setApiStatus('Tải ảnh thất bại: '+error.message,'error');toast('Không tải/lưu được ảnh. Vui lòng thử lại.')} }
 function renderPhotos(){const box=$('#plist');if(!box)return;box.textContent='';PH.forEach((p,i)=>{const r=document.createElement('div'),im=new Image(),cap=document.createElement('input');r.className='ph';im.alt='';im.src=p.c.toDataURL('image/jpeg',.4);cap.value=p.cap;cap.placeholder='Chú thích ảnh';cap.setAttribute('aria-label',`Chú thích ảnh ${i+1}`);cap.maxLength=120;cap.oninput=()=>{p.cap=cap.value;api.pol(i);syncPhotoData();scheduleSave()};
 const mb=(action,t,label,f,disabled=false)=>{const b=document.createElement('button');b.type='button';b.textContent=t;b.dataset.action=action;b.setAttribute('aria-label',label);b.disabled=disabled;b.onclick=f;return b};
 r.append(im,cap,mb('up','↑',`Di chuyển ảnh ${i+1} lên`,()=>mv(i,-1),i===0),mb('down','↓',`Di chuyển ảnh ${i+1} xuống`,()=>mv(i,1),i===PH.length-1),mb('delete','✕',`Xóa ảnh ${i+1}`,()=>removePhoto(i)));box.append(r)})}
@@ -177,10 +178,53 @@ for(let i=0;i<1800;i++){const u=Math.random()*6.283,r=Math.sqrt(Math.random());h
 let a=0;(function f(){requestAnimationFrame(f);const w=c.width=c.clientWidth,h=c.height=c.clientHeight;g.fillStyle='#05050b';g.fillRect(0,0,w,h);g.globalCompositeOperation='lighter';
 st.forEach(s=>{g.fillStyle=`rgba(255,255,255,${.35+.35*Math.sin(a*2+s[3])})`;g.fillRect(s[0]*w,s[1]*h,s[2],s[2])});a+=.01;const ca=Math.cos(a),sa=Math.sin(a),sc=Math.min(w,h)/38,cx=w*(w>820?.64:.5),cy=h*.46;
 g.fillStyle='rgba(240,77,178,.75)';hp.forEach(p=>{const x=p[0]*ca-p[2]*sa,z=p[0]*sa+p[2]*ca,k=1+z*.02;g.fillRect(cx+x*sc*k,cy+p[1]*sc*k,2,2)});g.globalCompositeOperation='source-over'})()}
-const THREE_FALLBACK_URL='https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',THREE_INTEGRITY='sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu';function ld(u){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=u;if(u===THREE_FALLBACK_URL){s.integrity=THREE_INTEGRITY;s.crossOrigin='anonymous';s.referrerPolicy='no-referrer'}s.onload=ok;s.onerror=no;document.head.appendChild(s)})}
-(async()=>{await initializeApi();if(!revision&&!previewToken){setTheme(D.theme);setAnim(D.animation);renderText()}if(Q.has('d')&&!Q.has('design'))history.replaceState(null,'',location.pathname);
-if(!window.THREE){try{await ld('https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js')}catch(e){}}
-try{if(!window.THREE)throw new Error('Không tải được Three.js.');initGL()}catch(e){console.error(e);fb2d(e.message||'WebGL không khả dụng.')}})();
+const THREE_PRIMARY_URL='https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',THREE_FALLBACK_URL='https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',THREE_INTEGRITY='sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu';
+function loadThreeScript(url,integrity){
+const existing=[...document.scripts].find(s=>s.src===url);
+if(existing){
+if(existing.dataset.threeState==='loaded'&&window.THREE)return Promise.resolve(window.THREE);
+if(existing.dataset.threeState==='failed'||existing.dataset.threeState==='loaded')return Promise.reject(new Error('Three.js load failed'));
+const completed=performance.getEntriesByName(url).some(entry=>entry.initiatorType==='script');
+if(completed)return Promise.reject(new Error('Three.js load failed'));
+return new Promise((resolve,reject)=>{
+let settled=false;
+const finishLoad=()=>{if(settled)return;settled=true;clearTimeout(timeout);resolve()};
+const finishError=()=>{if(settled)return;settled=true;clearTimeout(timeout);reject(new Error('Three.js load failed'))};
+existing.addEventListener('load',finishLoad,{once:true});
+existing.addEventListener('error',finishError,{once:true});
+const timeout=setTimeout(()=>finishError(),10000);
+});
+}
+return new Promise((resolve,reject)=>{const s=document.createElement('script');s.src=url;s.async=true;s.integrity=integrity;s.crossOrigin='anonymous';s.referrerPolicy='no-referrer';s.dataset.threeState='loading';s.onload=()=>{s.dataset.threeState='loaded';resolve()};s.onerror=()=>{s.dataset.threeState='failed';reject(new Error('Three.js load failed'))};document.head.append(s)});
+}
+let threeLoaderPromise=null;
+function loadCrushifyThree(){
+if(threeLoaderPromise)return threeLoaderPromise;
+if(window.THREE){threeLoaderPromise=Promise.resolve(window.THREE);return threeLoaderPromise}
+threeLoaderPromise=(async()=>{
+try{await loadThreeScript(THREE_PRIMARY_URL,THREE_INTEGRITY)}catch(error){}
+if(window.THREE)return window.THREE;
+try{await loadThreeScript(THREE_FALLBACK_URL,THREE_INTEGRITY)}catch(error){}
+if(window.THREE)return window.THREE;
+throw new Error('Không tải được Three.js.');
+})();
+return threeLoaderPromise;
+}
+window.loadCrushifyThree=loadCrushifyThree;
+let universeBootPromise=null,universeInitStarted=false;
+function bootUniverse(){
+if(universeBootPromise)return universeBootPromise;
+universeBootPromise=(async()=>{
+const threePromise=loadCrushifyThree();
+await initializeApi();
+if(!revision&&!previewToken){setTheme(D.theme);setAnim(D.animation);renderText()}
+if(Q.has('d')&&!Q.has('design'))history.replaceState(null,'',location.pathname);
+try{await threePromise;if(!window.THREE)throw new Error('Không tải được Three.js.');if(universeInitStarted)return;universeInitStarted=true;initGL()}
+catch(error){fb2d(error.message||'WebGL không khả dụng.')}
+})();
+return universeBootPromise;
+}
+void bootUniverse();
 
 function initGL(){
 const cv=$('#cv'),stage=$('#stage');let R;try{R=new THREE.WebGLRenderer({canvas:cv,antialias:!mob,powerPreference:'high-performance'})}catch(e){}

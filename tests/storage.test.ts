@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import sharp from "sharp";
 import type { StorageUploadOptions } from "../src/storage.ts";
 import { CloudinaryStorageAdapter } from "../src/storage/cloudinary.ts";
+import { normalizeNodeImage } from "../src/platform/node-image-normalizer.ts";
 import { createStorageFromEnvironment } from "../src/storage/provider.ts";
 import { R2StorageAdapter } from "../src/storage/r2.ts";
 
@@ -106,7 +108,7 @@ describe("CloudinaryStorageAdapter", () => {
     await assert.rejects(adapter.privateAssetUrl(key, currentSecond + 301), /expiry/);
     await assert.rejects(adapter.upload("private/client-controlled.png", bytes, options), /server-generated/);
     await assert.rejects(
-      adapter.upload(key, new Uint8Array(5 * 1024 * 1024 + 1), options),
+      adapter.upload(key, new Uint8Array(4 * 1024 * 1024 + 1), options),
       /size/,
     );
     await assert.rejects(
@@ -208,7 +210,12 @@ describe("CloudinaryStorageAdapter", () => {
       },
     });
 
-    await adapter.createPublishedDerivative(key, derivativeKey);
+    await adapter.createPublishedDerivative(key, derivativeKey, async (image, contentType) => ({
+      bytes: image,
+      contentType,
+      width: 1,
+      height: 1,
+    }));
     const derivativeUpload = requests.find((request) => request.url.endsWith("/image/upload"));
     assert.ok(derivativeUpload);
     assert.equal(derivativeUpload.method, "POST");
@@ -379,5 +386,57 @@ describe("storage provider selection and R2 adapter", () => {
     await adapter.delete(key);
     assert.equal(await adapter.get(key), null);
     assert.equal(await adapter.get(legacyKey), null);
+  });
+
+  it("fails closed for R2 derivatives without a processor and normalizes before storing", async () => {
+    const values = new Map<string, { bytes: Uint8Array; contentType: string }>();
+    let getCount = 0;
+    const bucket = {
+      async put(objectKey: string, value: Uint8Array, options?: { httpMetadata?: { contentType?: string } }) {
+        values.set(objectKey, {
+          bytes: new Uint8Array(value),
+          contentType: options?.httpMetadata?.contentType ?? "",
+        });
+        return null;
+      },
+      async get(objectKey: string) {
+        getCount++;
+        const value = values.get(objectKey);
+        if (!value) return null;
+        const bytes = value.bytes;
+        return {
+          size: bytes.byteLength,
+          httpMetadata: { contentType: value.contentType },
+          body: new Response(bytes).body,
+          arrayBuffer: async () => bytes.slice().buffer,
+        };
+      },
+      async delete(objectKey: string) {
+        values.delete(objectKey);
+      },
+    } as unknown as R2Bucket;
+    const adapter = new R2StorageAdapter(bucket);
+    const sourceKey = `private/${"e".repeat(43)}-jpg`;
+    const derivativeKey = `published/${"f".repeat(43)}-jpg`;
+    const pixels = Buffer.alloc(6 * 4 * 3, 120);
+    const source = new Uint8Array(await sharp(pixels, {
+      raw: { width: 6, height: 4, channels: 3 },
+    }).jpeg().withMetadata({ orientation: 6 }).toBuffer());
+    values.set(sourceKey, { bytes: source, contentType: "image/jpeg" });
+
+    await assert.rejects(
+      adapter.createPublishedDerivative(sourceKey, derivativeKey),
+      /normalization is required/i,
+    );
+    assert.equal(getCount, 0);
+
+    await adapter.createPublishedDerivative(sourceKey, derivativeKey, normalizeNodeImage);
+    const derivative = values.get(derivativeKey);
+    assert.ok(derivative);
+    assert.equal(derivative.contentType, "image/jpeg");
+    const metadata = await sharp(derivative.bytes).metadata();
+    assert.equal(metadata.width, 4);
+    assert.equal(metadata.height, 6);
+    assert.equal(metadata.orientation, undefined);
   });
 });

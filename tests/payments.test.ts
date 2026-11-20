@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
-import { recoverPendingSePayWebhookEvents } from "../src/payments.ts";
+import {
+  encodeOrderCursor,
+  parseOrderCursor,
+  recoverPendingSePayWebhookEvents,
+} from "../src/payments.ts";
 import {
   createOrderReference,
   createPaymentReference,
@@ -17,6 +21,28 @@ import { handleFulfillmentForOrder, recoverPendingFulfillments } from "../src/pu
 import type { Database } from "../src/database.ts";
 
 describe("SePay local-only payment safeguards", () => {
+  it("validates order cursors and rejects malformed cursor structures", () => {
+    const createdAt = "2026-11-19T12:00:00.000Z";
+    const id = "11111111-1111-4111-8111-111111111111";
+    const cursor = encodeOrderCursor(createdAt, id);
+    assert.deepEqual(parseOrderCursor(cursor), { createdAt, id });
+
+    for (const malformed of [
+      null,
+      "",
+      "missing-separator",
+      "|missing-timestamp",
+      "2026-11-19T12:00:00.000Z|",
+      "2026-11-19T12:00:00.000Z|not-a-uuid",
+      "2026-99-19T12:00:00.000Z|" + id,
+      "%" + "|",
+      "100%" + "|",
+      "%ZZ" + "|" + id,
+    ]) {
+      assert.equal(parseOrderCursor(malformed), null);
+    }
+  });
+
   it("verifies the raw-body HMAC and rejects tampering or stale timestamps", async () => {
     const secret = "test-only-random-secret";
     const timestamp = Math.floor(Date.now() / 1000);

@@ -1,3 +1,8 @@
+import {
+  createCheckoutIntentStore,
+  prepareCheckoutOrderRequest,
+} from "./checkout-intent.js";
+
 const notice = document.querySelector("#notice");
 const checkoutPanel = document.querySelector("#checkout-panel");
 const checkoutForm = document.querySelector("#checkout-form");
@@ -14,13 +19,49 @@ const copyFeedback = document.querySelector("#copy-feedback");
 const params = new URLSearchParams(location.search);
 const designId = params.get("design_id");
 const initialOrderId = params.get("order_id");
-const orderStorageKey = designId ? `crushify-order:${designId}` : "";
+const newIntentRoute = params.get("new_order") === "1";
 let csrfToken = "";
 let currentOrder;
 let pollTimer;
 let expiryTimer;
 let design;
 let catalog;
+let currentDesignId = designId;
+let checkoutIntentStore;
+let checkoutFormInitialized = false;
+let checkoutFieldsChanged = false;
+let orderSubmissionInProgress = false;
+let disabledCheckoutControls = null;
+let checkoutAccountKey = "";
+let activeCheckoutIntentId = null;
+let checkoutLoadGeneration = 0;
+let intentCreationInProgress = false;
+
+function orderStorageKeyFor(id) {
+  return `crushify-order:${id}`;
+}
+
+async function deriveAccountKey(email) {
+  if (typeof email !== "string" || email.length === 0) {
+    throw new Error("Không thể xác minh tài khoản đặt hàng.");
+  }
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(email.trim().toLowerCase()));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function updateCheckoutUrl({ designId: targetDesignId, orderId, newOrder = false }) {
+  const url = new URL(location.href);
+  url.searchParams.delete("design_id");
+  url.searchParams.delete("order_id");
+  url.searchParams.delete("new_order");
+  if (orderId) {
+    url.searchParams.set("order_id", orderId);
+  } else if (targetDesignId) {
+    url.searchParams.set("design_id", targetDesignId);
+    if (newOrder) url.searchParams.set("new_order", "1");
+  }
+  history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
 
 const statusLabels = {
   AWAITING_PAYMENT: "Đang chờ xác nhận thanh toán",
@@ -66,6 +107,7 @@ function formatAmount(amount, currency = "VND") {
 function addConsentOptions(data) {
   const fieldset = document.querySelector("#asset-consents");
   const assets = new Set();
+  fieldset.querySelectorAll("label").forEach((label) => label.remove());
   const visit = (value, key = "") => {
     if (Array.isArray(value)) {
       value.forEach((entry) => visit(entry));
@@ -149,7 +191,8 @@ function updatePrice() {
     ? formatAmount(total)
     : "Chưa thể tính";
   const confirmed = document.querySelector("#terms-confirm").checked;
-  document.querySelector("#submit-order").disabled = !checkoutEnabled || !confirmed;
+  document.querySelector("#submit-order").disabled =
+    orderSubmissionInProgress || !checkoutEnabled || !confirmed;
   if (!estimateValid) {
     durationNote.textContent = monthly
       ? "Nhập số tháng hosting là số nguyên dương để xem giá."
@@ -167,6 +210,21 @@ function updatePrice() {
   }
 }
 
+function setCheckoutFormBusy(busy) {
+  if (busy) {
+    disabledCheckoutControls = [...checkoutForm.querySelectorAll("input, select, button")]
+      .map((control) => ({ control, disabled: control.disabled }));
+    for (const { control } of disabledCheckoutControls) control.disabled = true;
+    checkoutForm.setAttribute("aria-busy", "true");
+    return;
+  }
+  for (const { control, disabled } of disabledCheckoutControls || []) {
+    control.disabled = disabled;
+  }
+  disabledCheckoutControls = null;
+  checkoutForm.removeAttribute("aria-busy");
+}
+
 function showCatalog(catalogData) {
   catalog = catalogData;
   const product = catalog.products.find((item) => item.id === design.template_id && item.available);
@@ -181,7 +239,7 @@ function showCatalog(catalogData) {
     `/templates/${encodeURIComponent(product.id)}/index.html`,
     location.origin,
   );
-  editUrl.searchParams.set("design", designId);
+  editUrl.searchParams.set("design", design.design_id);
   editDesignLink.href = `${editUrl.pathname}${editUrl.search}`;
   addConsentOptions(design.data);
   checkoutPanel.hidden = false;
@@ -209,8 +267,10 @@ async function loadPublicationUrl(order) {
 
 function showOrder(order) {
   currentOrder = order;
+  currentDesignId = order.design_id || currentDesignId;
   checkoutPanel.hidden = true;
   orderPanel.hidden = false;
+  document.querySelector("#new-order").hidden = !currentDesignId;
   document.querySelector("#order-reference").textContent = order.order_reference || "—";
   document.querySelector("#order-total").textContent = formatAmount(order.total_minor, order.currency);
   document.querySelector("#order-status").textContent = statusLabels[order.status] || "Đang cập nhật";
@@ -282,6 +342,12 @@ function showOrder(order) {
       order.status === "CANCELLED" || order.status === "REFUNDED" ||
       order.status === "FAILED" || order.status === "MANUAL_REVIEW") {
     stopPolling();
+    if (checkoutIntentStore && checkoutIntentStore.archive) {
+      void checkoutIntentStore.list().then((intents) => {
+        const matching = intents.find((intent) => intent.serverOrderId === order.order_id);
+        if (matching) void checkoutIntentStore.archive(matching.intentId);
+      }).catch(() => {});
+    }
     showNotice(statusLabels[order.status] || "Đơn hàng đã được cập nhật.", "success");
   } else {
     showNotice(statusLabels[order.status] || "Đang cập nhật trạng thái đơn hàng.");
@@ -352,6 +418,7 @@ async function startTracking(orderId) {
 
 async function createOrder(event) {
   event.preventDefault();
+  if (orderSubmissionInProgress) return;
   const submit = document.querySelector("#submit-order");
   const policy = catalog?.pricing_policy;
   const monthly = durationTypeSelect.value === "monthly";
@@ -362,25 +429,42 @@ async function createOrder(event) {
     return;
   }
   if (!document.querySelector("#terms-confirm").checked) return;
+  orderSubmissionInProgress = true;
+  setCheckoutFormBusy(true);
   submit.disabled = true;
   submit.textContent = "Đang tạo đơn…";
   try {
-    const idempotencyKey = `checkout-${crypto.randomUUID()}`;
-    const order = await api("/orders", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": idempotencyKey,
-      },
-      body: JSON.stringify({
-        design_id: designId,
+    const prepared = await prepareCheckoutOrderRequest(
+      checkoutIntentStore,
+      {
+        design_id: currentDesignId,
         duration_type: monthly ? "monthly" : "lifetime",
         hosting_months: monthly ? months : null,
         asset_consents: selectedConsents(),
-      }),
-    });
-    if (orderStorageKey) sessionStorage.setItem(orderStorageKey, order.order_id);
+      },
+      design,
+      {
+        allowPayloadChange: checkoutFieldsChanged,
+        activeIntentId: activeCheckoutIntentId,
+      },
+    );
+    checkoutFieldsChanged = false;
+    const order = await api("/orders", prepared.requestOptions);
+    let remembered = true;
+    try {
+      await checkoutIntentStore.associate(prepared.intentId, order.order_id);
+      sessionStorage.setItem(orderStorageKeyFor(order.design_id || currentDesignId), order.order_id);
+    } catch {
+      remembered = false;
+    }
+    updateCheckoutUrl({ orderId: order.order_id });
     showOrder(order);
+    if (!remembered) {
+      showNotice(
+        "Đơn đã được tạo nhưng trình duyệt không lưu được mã theo dõi. Hãy giữ lại mã đơn đang hiển thị.",
+        "error",
+      );
+    }
     window.clearInterval(pollTimer);
     window.clearInterval(expiryTimer);
     pollTimer = window.setInterval(() => {
@@ -389,11 +473,186 @@ async function createOrder(event) {
     expiryTimer = window.setInterval(updateCountdown, 1000);
   } catch (error) {
     showNotice(error instanceof Error ? error.message : "Không thể tạo đơn hàng.", "error");
-    submit.disabled = false;
   } finally {
+    orderSubmissionInProgress = false;
     submit.textContent = "Tạo đơn hàng";
+    setCheckoutFormBusy(false);
+    if (!checkoutPanel.hidden) updatePrice();
   }
 }
+
+function bindCheckoutForm() {
+  if (checkoutFormInitialized) return;
+  checkoutForm.addEventListener("submit", createOrder);
+  const markOrderFieldsChanged = () => {
+    checkoutFieldsChanged = true;
+    updatePrice();
+  };
+  durationTypeSelect.addEventListener("change", markOrderFieldsChanged);
+  hostingMonthsInput.addEventListener("input", markOrderFieldsChanged);
+  document.querySelector("#asset-consents").addEventListener("change", (event) => {
+    if (event.target instanceof HTMLInputElement && event.target.type === "checkbox") {
+      checkoutFieldsChanged = true;
+    }
+  });
+  document.querySelector("#terms-confirm").addEventListener("change", updatePrice);
+  document.querySelector("#new-order-intent").addEventListener("click", startNewIntent);
+  checkoutFormInitialized = true;
+}
+
+function checkoutPayload() {
+  const monthly = durationTypeSelect.value === "monthly";
+  const months = Number(hostingMonthsInput.value);
+  return {
+    design_id: currentDesignId,
+    duration_type: monthly ? "monthly" : "lifetime",
+    hosting_months: monthly ? months : null,
+    asset_consents: selectedConsents(),
+  };
+}
+
+function createIntentStoreForDesign(id) {
+  return createCheckoutIntentStore({
+    storageKey: `crushify-checkout-intent:v1:${checkoutAccountKey}:${id}`,
+    accountKey: checkoutAccountKey,
+    designId: id,
+  });
+}
+
+async function recoverServerOrders(targetDesignId) {
+  const unresolvedStatuses = new Set(["AWAITING_PAYMENT", "MANUAL_REVIEW"]);
+  const matching = [];
+  let cursor = null;
+  let pageNumber = 0;
+  for (; pageNumber < 100; pageNumber++) {
+    const path = cursor
+      ? `/orders?limit=50&cursor=${encodeURIComponent(cursor)}`
+      : "/orders?limit=50";
+    let result;
+    try {
+      result = await api(path);
+    } catch (error) {
+      return { incomplete: true, reason: "PAGE_REQUEST_FAILED", error };
+    }
+    matching.push(...(result.orders || []).filter((order) =>
+      order.design_id === targetDesignId &&
+      unresolvedStatuses.has(order.status)));
+    if (!result.next_cursor) break;
+    if (result.next_cursor === cursor) {
+      return { incomplete: true, reason: "INVALID_CURSOR_PROGRESS" };
+    }
+    cursor = result.next_cursor;
+    if (pageNumber === 99) {
+      return { incomplete: true, reason: "SAFETY_CAP_REACHED" };
+    }
+  }
+  if (matching.length === 0) return null;
+  if (matching.length === 1) return matching[0];
+  return matching;
+}
+
+function showRecoveryOptions(orders) {
+  const panel = document.querySelector("#recovery-panel");
+  const list = document.querySelector("#recovery-options");
+  panel.hidden = false;
+  list.replaceChildren();
+  for (const order of orders) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-action";
+    button.dataset.orderId = order.order_id;
+    button.textContent = `${order.order_reference || "Đơn hàng"} · ${statusLabels[order.status] || order.status}`;
+    button.addEventListener("click", () => {
+      panel.hidden = true;
+      updateCheckoutUrl({ orderId: order.order_id });
+      void startTracking(order.order_id);
+    });
+    list.append(button);
+  }
+  const separate = document.querySelector("#recovery-new-order");
+  separate.onclick = () => {
+    panel.hidden = true;
+    void loadCheckoutForDesign(designId, { forceNewIntent: true });
+  };
+  showNotice("Tìm thấy đơn chưa hoàn tất trên tài khoản. Hãy chọn đơn cần theo dõi hoặc bắt đầu đơn riêng có chủ đích.");
+}
+
+async function loadCheckoutForDesign(targetDesignId, { forceNewIntent = false } = {}) {
+  const loadGeneration = ++checkoutLoadGeneration;
+  activeCheckoutIntentId = null;
+  const [savedDesign, products] = await Promise.all([
+    api(`/designs/${encodeURIComponent(targetDesignId)}`),
+    api("/catalog"),
+  ]);
+  if (loadGeneration !== checkoutLoadGeneration) return;
+  if (savedDesign.design_id !== targetDesignId) {
+    throw new Error("Không thể xác minh thiết kế cho đơn hàng mới.");
+  }
+  design = savedDesign;
+  catalog = products;
+  currentDesignId = targetDesignId;
+  checkoutIntentStore = createIntentStoreForDesign(targetDesignId);
+  showCatalog(products);
+  bindCheckoutForm();
+  checkoutPanel.hidden = false;
+  orderPanel.hidden = true;
+
+  if (forceNewIntent) {
+    const activeIntent = await checkoutIntentStore.prepare(
+      checkoutPayload(),
+      design,
+      { forceNew: true },
+    );
+    if (loadGeneration !== checkoutLoadGeneration) return;
+    activeCheckoutIntentId = activeIntent.intentId;
+    checkoutFieldsChanged = false;
+    updateCheckoutUrl({ designId: targetDesignId, newOrder: true });
+    showNotice(
+      "Đã bắt đầu một đơn riêng. Đơn trước không bị hủy; hãy tiếp tục chỉ khi bạn thực sự muốn tạo thêm đơn.",
+    );
+    document.querySelector("#summary-title").focus();
+  } else {
+    showNotice("Bản nháp đã được lưu. Xem lại giá và lựa chọn hosting trước khi tiếp tục.");
+  }
+}
+
+async function startNewIntent() {
+  if (!checkoutIntentStore || orderSubmissionInProgress || intentCreationInProgress) return;
+  intentCreationInProgress = true;
+  try {
+    const activeIntent = await checkoutIntentStore.prepare(
+      checkoutPayload(),
+      design,
+      { forceNew: true },
+    );
+    activeCheckoutIntentId = activeIntent.intentId;
+    checkoutFieldsChanged = false;
+    updateCheckoutUrl({ designId: currentDesignId, newOrder: true });
+    showNotice(
+      "Đã bắt đầu một đơn riêng. Nếu lần gửi trước có thể đã tạo đơn, hãy kiểm tra đơn cũ trước khi tiếp tục.",
+    );
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : "Không thể bắt đầu đơn mới.", "error");
+  } finally {
+    intentCreationInProgress = false;
+  }
+}
+
+async function startNewOrder() {
+  const button = document.querySelector("#new-order");
+  const targetDesignId = currentOrder?.design_id;
+  if (!targetDesignId || orderSubmissionInProgress) return;
+  button.disabled = true;
+  try {
+    await loadCheckoutForDesign(targetDesignId, { forceNewIntent: true });
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : "Không thể tải thiết kế.", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.querySelector("#new-order").addEventListener("click", startNewOrder);
 
 async function startCheckout() {
   if (!designId && !initialOrderId) {
@@ -404,31 +663,66 @@ async function startCheckout() {
     const account = await api("/customers/me");
     csrfToken = account.csrf_token || "";
     if (!csrfToken) throw new Error("Phiên đăng nhập chưa sẵn sàng.");
+    const nextAccountKey = await deriveAccountKey(account.email);
+    if (nextAccountKey !== checkoutAccountKey) {
+      checkoutLoadGeneration++;
+      activeCheckoutIntentId = null;
+      checkoutIntentStore = null;
+    }
+    checkoutAccountKey = nextAccountKey;
     if (initialOrderId) {
       await startTracking(initialOrderId);
       return;
     }
-    const savedOrderId = sessionStorage.getItem(orderStorageKey);
+    const savedOrderId = newIntentRoute ? null : sessionStorage.getItem(orderStorageKeyFor(designId));
     if (savedOrderId) {
       try {
         await startTracking(savedOrderId);
         return;
-      } catch {
-        sessionStorage.removeItem(orderStorageKey);
+      } catch (error) {
+        updateCheckoutUrl({ designId, newOrder: true });
+        await loadCheckoutForDesign(designId);
+        showNotice(
+          `Không thể xác nhận đơn đã lưu; mã theo dõi vẫn được giữ lại. Hãy thử lại với lựa chọn cũ hoặc bắt đầu đơn riêng. ${error instanceof Error ? error.message : ""}`,
+          "error",
+        );
+        return;
       }
     }
-    const [savedDesign, products] = await Promise.all([
-      api(`/designs/${encodeURIComponent(designId)}`),
-      api("/catalog"),
-    ]);
-    design = savedDesign;
-    catalog = products;
-    showCatalog(products);
-    checkoutForm.addEventListener("submit", createOrder);
-    durationTypeSelect.addEventListener("change", updatePrice);
-    hostingMonthsInput.addEventListener("input", updatePrice);
-    document.querySelector("#terms-confirm").addEventListener("change", updatePrice);
-    showNotice("Bản nháp đã được lưu. Xem lại giá và lựa chọn hosting trước khi tiếp tục.");
+    const recovered = newIntentRoute ? null : await recoverServerOrders(designId);
+    if (recovered) {
+      if (recovered.incomplete) {
+        const button = document.querySelector("#submit-order");
+        if (button) button.disabled = true;
+        checkoutPanel.hidden = true;
+        orderPanel.hidden = true;
+        const panel = document.querySelector("#recovery-panel");
+        const list = document.querySelector("#recovery-options");
+        const retryButton = document.querySelector("#recovery-new-order");
+        panel.hidden = false;
+        list.replaceChildren();
+        if (retryButton) {
+          retryButton.hidden = false;
+          retryButton.textContent = "Thử khôi phục lại";
+          retryButton.onclick = () => {
+            void startCheckout();
+          };
+        }
+        showNotice(
+          "Không thể xác minh toàn bộ đơn hàng chưa hoàn tất. Không tạo đơn mới cho đến khi có thể thử lại.",
+          "error",
+        );
+        return;
+      }
+      if (Array.isArray(recovered)) {
+        showRecoveryOptions(recovered);
+      } else {
+        updateCheckoutUrl({ orderId: recovered.order_id });
+        await startTracking(recovered.order_id);
+      }
+      return;
+    }
+    await loadCheckoutForDesign(designId);
   } catch (error) {
     showNotice(error instanceof Error ? error.message : "Không thể tải thông tin đặt hàng.", "error");
   }

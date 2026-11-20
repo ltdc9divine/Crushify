@@ -1,5 +1,5 @@
 import { MAX_IMAGE_BYTES } from "../http.ts";
-import { stripImageMetadata } from "../image-sanitizer.ts";
+import type { ImageNormalizer } from "../image-normalizer.ts";
 import { StorageError, type Storage, type StorageObject, type StorageUploadOptions } from "../storage.ts";
 import { validatePublishedStorageKey, validateStorageKey, validateUpload } from "./r2.ts";
 
@@ -146,7 +146,14 @@ export class CloudinaryStorageAdapter implements Storage {
     }
   }
 
-  async createPublishedDerivative(sourceKey: string, derivativeKey: string): Promise<void> {
+  async createPublishedDerivative(
+    sourceKey: string,
+    derivativeKey: string,
+    normalizeImage?: ImageNormalizer,
+  ): Promise<void> {
+    if (typeof normalizeImage !== "function") {
+      throw new StorageError("Image normalization is required before publishing media");
+    }
     validateStorageKey(sourceKey);
     validatePublishedStorageKey(derivativeKey);
     const source = await this.get(sourceKey);
@@ -158,7 +165,12 @@ export class CloudinaryStorageAdapter implements Storage {
         sourceBytes.byteLength < 1 || sourceBytes.byteLength > MAX_IMAGE_BYTES) {
       throw new StorageError("Private source asset has an invalid size");
     }
-    const bytes = stripImageMetadata(sourceBytes, source.contentType);
+    const normalized = await normalizeImage(sourceBytes, source.contentType);
+    const bytes = normalized.bytes;
+    if (normalized.contentType !== source.contentType ||
+        bytes.byteLength < 1 || bytes.byteLength > MAX_IMAGE_BYTES) {
+      throw new StorageError("Normalized published image is invalid");
+    }
     const timestamp = Math.floor(this.now() / 1000);
     const parameters = {
       overwrite: "true",
@@ -170,7 +182,7 @@ export class CloudinaryStorageAdapter implements Storage {
     const form = new FormData();
     const uploadBytes = new Uint8Array(bytes.byteLength);
     uploadBytes.set(bytes);
-    form.set("file", new Blob([uploadBytes.buffer], { type: source.contentType }), "published-derivative");
+    form.set("file", new Blob([uploadBytes.buffer], { type: normalized.contentType }), "published-derivative");
     for (const [key, value] of Object.entries(parameters)) form.set(key, value);
     form.set("api_key", this.apiKey);
     form.set("signature", await cloudinarySignature(parameters, this.apiSecret));

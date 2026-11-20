@@ -15,6 +15,10 @@ import {
   createStagingOperationDiagnostic,
   StagingOperationTrace,
 } from "./staging-diagnostics.ts";
+import {
+  createPreflightFailureReport,
+  createPreflightSuccessReport,
+} from "./staging-preflight-report.ts";
 
 async function loadMigrations(): Promise<SqlMigration[]> {
   const directory = join(process.cwd(), "migrations");
@@ -36,7 +40,12 @@ async function verifyMigrationState(
   client: ReturnType<typeof createClient>,
   migrations: SqlMigration[],
   trace: StagingOperationTrace,
-): Promise<number[]> {
+): Promise<{
+  ledgerExists: boolean;
+  appliedVersions: number[];
+  foreignKeyCheckExecuted: boolean;
+  foreignKeyViolationCount: number | null;
+}> {
   const ledger = await trace.run("read-migration-ledger", () => client.execute(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
   ));
@@ -48,7 +57,12 @@ async function verifyMigrationState(
     if (tables.rows.length !== 0) {
       throw new Error("Staging database has tables without a migration ledger; refusing to alter it");
     }
-    return [];
+    return {
+      ledgerExists: false,
+      appliedVersions: [],
+      foreignKeyCheckExecuted: false,
+      foreignKeyViolationCount: null,
+    };
   }
 
   const records = await trace.run("read-migration-records", () => client.execute(
@@ -75,7 +89,12 @@ async function verifyMigrationState(
   if (violations.rows.length > 0) {
     throw new Error(`Staging database has ${violations.rows.length} foreign-key violation(s)`);
   }
-  return appliedVersions;
+  return {
+    ledgerExists: true,
+    appliedVersions,
+    foreignKeyCheckExecuted: true,
+    foreignKeyViolationCount: violations.rows.length,
+  };
 }
 
 const trace = new StagingOperationTrace();
@@ -101,36 +120,40 @@ async function main(): Promise<void> {
     ...target,
     intMode: "number",
   }));
+  let preflightReport: ReturnType<typeof createPreflightSuccessReport> | undefined;
   try {
-    const applied = await verifyMigrationState(client, migrations, trace);
-    await verifyMigrationSchema(
+    const migrationState = await verifyMigrationState(client, migrations, trace);
+    const checkedObjectCount = await verifyMigrationSchema(
       client,
-      migrations.slice(0, applied.length),
+      migrations.slice(0, migrationState.appliedVersions.length),
       (stage) => trace.setStage(stage),
     );
     if (mode === "--preflight") {
       trace.setStage("report-preflight");
-      console.info(
-        `Staging target confirmed: ${new URL(target.url).hostname}; ` +
-        `applied migrations ${applied.length ? applied.join(", ") : "none"}; ` +
-        `${migrations.length - applied.length} pending`,
+      preflightReport = createPreflightSuccessReport({
+        migrations,
+        ledgerExists: migrationState.ledgerExists,
+        appliedCount: migrationState.appliedVersions.length,
+        foreignKeyCheckExecuted: migrationState.foreignKeyCheckExecuted,
+        foreignKeyViolationCount: migrationState.foreignKeyViolationCount,
+        schemaCheckedObjectCount: checkedObjectCount,
+      });
+    } else {
+      trace.setStage("apply-migrations");
+      const newlyApplied = await applyMigrations(client, migrations);
+      const appliedAfterMigration = await verifyMigrationState(client, migrations, trace);
+      await verifyMigrationSchema(
+        client,
+        migrations.slice(0, appliedAfterMigration.appliedVersions.length),
+        (stage) => trace.setStage(stage),
       );
-      return;
+      trace.setStage("report-migration-result");
+      console.info(
+        newlyApplied.length
+          ? `Applied staging Turso migrations: ${newlyApplied.join(", ")}`
+          : "Staging Turso database is up to date",
+      );
     }
-    trace.setStage("apply-migrations");
-    const newlyApplied = await applyMigrations(client, migrations);
-    const appliedAfterMigration = await verifyMigrationState(client, migrations, trace);
-    await verifyMigrationSchema(
-      client,
-      migrations.slice(0, appliedAfterMigration.length),
-      (stage) => trace.setStage(stage),
-    );
-    trace.setStage("report-migration-result");
-    console.info(
-      newlyApplied.length
-        ? `Applied staging Turso migrations: ${newlyApplied.join(", ")}`
-        : "Staging Turso database is up to date",
-    );
   } finally {
     try {
       client.close();
@@ -139,9 +162,18 @@ async function main(): Promise<void> {
       throw error;
     }
   }
+  if (preflightReport) {
+    process.stdout.write(`${JSON.stringify(preflightReport)}\n`);
+  }
 }
 
 main().catch((error: unknown) => {
+  if (process.argv[2] === "--preflight") {
+    const report = createPreflightFailureReport(trace.stage, error);
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    process.exitCode = 1;
+    return;
+  }
   const diagnostic = createStagingOperationDiagnostic(trace.stage, error);
   const message = error instanceof StagingConfigurationError
     ? error.message

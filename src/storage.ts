@@ -1,3 +1,5 @@
+import type { ImageNormalizer } from "./image-normalizer.ts";
+
 export interface StorageObject {
   size: number;
   contentType: string;
@@ -17,7 +19,11 @@ export interface Storage {
   get(objectKey: string): Promise<StorageObject | null>;
   delete(objectKey: string): Promise<void>;
   privateAssetUrl(objectKey: string, expiresAt: number): Promise<string | null>;
-  createPublishedDerivative(sourceKey: string, derivativeKey: string): Promise<void>;
+  createPublishedDerivative(
+    sourceKey: string,
+    derivativeKey: string,
+    normalizeImage?: ImageNormalizer,
+  ): Promise<void>;
   getPublishedDerivative(derivativeKey: string): Promise<StorageObject | null>;
   deletePublishedDerivative(derivativeKey: string): Promise<void>;
 }

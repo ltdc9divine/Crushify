@@ -324,6 +324,29 @@ function validIdempotencyKey(value: string | null): value is string {
   return Boolean(value && value.length <= 128 && /^[A-Za-z0-9._:-]{16,128}$/.test(value));
 }
 
+export function parseOrderCursor(cursor: string | null): { createdAt: string; id: string } | null {
+  if (typeof cursor !== "string" || cursor.length === 0 || cursor.length > 512) return null;
+  const separator = cursor.lastIndexOf("|");
+  if (separator <= 0 || separator === cursor.length - 1) return null;
+  const encodedCreatedAt = cursor.slice(0, separator);
+  const id = cursor.slice(separator + 1);
+  let createdAt: string;
+  try {
+    createdAt = decodeURIComponent(encodedCreatedAt);
+  } catch {
+    return null;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(createdAt)) return null;
+  const timestamp = Date.parse(createdAt);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== createdAt) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) return null;
+  return { createdAt, id };
+}
+
+export function encodeOrderCursor(createdAt: string, id: string): string {
+  return `${encodeURIComponent(createdAt)}|${id}`;
+}
+
 async function createOrder(
   request: Request,
   env: Env,
@@ -403,6 +426,44 @@ async function createOrder(
     return apiError(requestId, 400, "VALIDATION_ERROR", "Image consent must not contain duplicates");
   }
   const ownerId = required.session!.customerId;
+  const requestFingerprintInput = {
+    design_id: body.design_id,
+    storage_plan_id: requestedPlan.id,
+    duration_type: term.type,
+    hosting_months: term.type === "monthly" ? term.months : null,
+    renewal_publication_id: body.renewal_publication_id ?? null,
+    asset_consents: [...consentIds].sort(),
+  };
+  const fingerprint = await sha256(JSON.stringify(requestFingerprintInput));
+  const matchesStoredRequestHash = async (stored: {
+    request_hash: string | null;
+    renewal_publication_id: string | null;
+  }): Promise<boolean> => {
+    if (stored.request_hash === fingerprint) return true;
+    if (body.renewal_publication_id !== undefined || !stored.renewal_publication_id) return false;
+    const legacyFingerprint = await sha256(JSON.stringify({
+      ...requestFingerprintInput,
+      renewal_publication_id: stored.renewal_publication_id,
+    }));
+    return stored.request_hash === legacyFingerprint;
+  };
+  const prior = await env.DB.prepare(
+    `SELECT id, request_hash, renewal_publication_id FROM orders
+     WHERE customer_id = ? AND idempotency_key = ?`,
+  ).bind(ownerId, idempotencyKey).first<{
+    id: string;
+    request_hash: string | null;
+    renewal_publication_id: string | null;
+  }>();
+  if (prior) {
+    if (!await matchesStoredRequestHash(prior)) {
+      return apiError(requestId, 409, "IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used for another request");
+    }
+    const row = await loadOrder(env, ownerId, prior.id);
+    if (!row) return apiError(requestId, 409, "ORDER_UNAVAILABLE", "The prior order is unavailable");
+    return jsonResponse(responseOrder(row, env), 200, requestId);
+  }
+
   const renewalRequestedAt = nowIso();
   const renewal = body.renewal_publication_id
     ? await env.DB.prepare(
@@ -467,27 +528,6 @@ async function createOrder(
         "Hosting duration exceeds the supported calendar range");
     }
   }
-  const fingerprint = await sha256(JSON.stringify({
-    design_id: body.design_id,
-    storage_plan_id: requestedPlan.id,
-    duration_type: term.type,
-    hosting_months: term.type === "monthly" ? term.months : null,
-    renewal_publication_id: renewalPublicationId,
-    asset_consents: [...consentIds].sort(),
-  }));
-  const prior = await env.DB.prepare(
-    `SELECT id, request_hash FROM orders
-     WHERE customer_id = ? AND idempotency_key = ?`,
-  ).bind(ownerId, idempotencyKey).first<{ id: string; request_hash: string | null }>();
-  if (prior) {
-    if (prior.request_hash !== fingerprint) {
-      return apiError(requestId, 409, "IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used for another request");
-    }
-    const row = await loadOrder(env, ownerId, prior.id);
-    if (!row) return apiError(requestId, 409, "ORDER_UNAVAILABLE", "The prior order is unavailable");
-    return jsonResponse(responseOrder(row, env), 200, requestId);
-  }
-
   if (requestedPlan.id.startsWith("custom-") && term.type === "monthly") {
     const ownedDesign = await env.DB.prepare(
       `SELECT template_id FROM designs
@@ -837,10 +877,15 @@ async function createOrder(
   } catch (error) {
     if (!(error instanceof DatabaseError) || error.code !== "CONSTRAINT") throw error;
     const raced = await env.DB.prepare(
-      "SELECT id, request_hash FROM orders WHERE customer_id = ? AND idempotency_key = ?",
-    ).bind(ownerId, idempotencyKey).first<{ id: string; request_hash: string | null }>();
+      `SELECT id, request_hash, renewal_publication_id FROM orders
+       WHERE customer_id = ? AND idempotency_key = ?`,
+    ).bind(ownerId, idempotencyKey).first<{
+      id: string;
+      request_hash: string | null;
+      renewal_publication_id: string | null;
+    }>();
     if (!raced) throw error;
-    if (raced.request_hash !== fingerprint) {
+    if (!await matchesStoredRequestHash(raced)) {
       return apiError(requestId, 409, "IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used for another request");
     }
     const row = await loadOrder(env, ownerId, raced.id);
@@ -861,17 +906,52 @@ async function listOrders(
   if (unavailable) return unavailable;
   const required = await requireSession(request, env, requestId);
   if (required.response) return required.response;
-  const rows = await env.DB.prepare(
-    `SELECT o.id FROM orders o
-     WHERE o.customer_id = ? AND o.order_type = 'SELF_SERVICE'
-     ORDER BY o.created_at DESC LIMIT 50`,
-  ).bind(required.session!.customerId).all<{ id: string }>();
+  const url = new URL(request.url);
+  const limitValue = url.searchParams.get("limit");
+  const cursorValue = url.searchParams.get("cursor");
+  let limit = 50;
+  if (limitValue !== null) {
+    if (!/^([1-9]|[1-4][0-9]|50)$/.test(limitValue)) {
+      return apiError(requestId, 400, "VALIDATION_ERROR", "Limit must be between 1 and 50");
+    }
+    limit = Number(limitValue);
+  }
+  let beforeCreatedAt: string | null = null;
+  let beforeId: string | null = null;
+  if (cursorValue !== null) {
+    const cursor = parseOrderCursor(cursorValue);
+    if (!cursor) {
+      return apiError(requestId, 400, "VALIDATION_ERROR", "Invalid order cursor");
+    }
+    beforeCreatedAt = cursor.createdAt;
+    beforeId = cursor.id;
+  }
+  const query = beforeCreatedAt && beforeId
+    ? `SELECT o.id, o.created_at FROM orders o
+       WHERE o.customer_id = ? AND o.order_type = 'SELF_SERVICE'
+         AND (o.created_at < ? OR (o.created_at = ? AND o.id < ?))
+       ORDER BY o.created_at DESC, o.id DESC LIMIT ?`
+    : `SELECT o.id, o.created_at FROM orders o
+       WHERE o.customer_id = ? AND o.order_type = 'SELF_SERVICE'
+       ORDER BY o.created_at DESC, o.id DESC LIMIT ?`;
+  const statement = env.DB.prepare(query);
+  const page = beforeCreatedAt && beforeId
+    ? await statement.bind(required.session!.customerId, beforeCreatedAt, beforeCreatedAt, beforeId, limit + 1)
+        .all<{ id: string; created_at: string }>()
+    : await statement.bind(required.session!.customerId, limit + 1)
+        .all<{ id: string; created_at: string }>();
+  const pageRows = page.results.slice(0, limit);
+  const hasNext = page.results.length > limit;
+  const nextRow = hasNext ? pageRows.at(-1) : null;
+  const nextCursor = nextRow
+    ? encodeOrderCursor(nextRow.created_at, nextRow.id)
+    : null;
   const orders = [];
-  for (const row of rows.results) {
+  for (const row of pageRows) {
     const order = await loadOrder(env, required.session!.customerId, row.id);
     if (order) orders.push(responseOrder(await expireOrderIfNeeded(env, required.session!.customerId, order), env));
   }
-  return jsonResponse({ orders }, 200, requestId);
+  return jsonResponse({ orders, limit, next_cursor: nextCursor }, 200, requestId);
 }
 
 async function listStoragePlans(env: Env, requestId: string): Promise<Response> {

@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { createClient } from "@libsql/client";
 import { describe, it } from "node:test";
 import { handleApiRequest } from "../src/index.ts";
+import { normalizeNodeImage } from "../src/platform/node-image-normalizer.ts";
 import { applyMigrations, type SqlMigration } from "../src/database/migrations.ts";
 import { TursoDatabaseAdapter } from "../src/database/turso.ts";
 import { connectDatabaseFromEnvironment } from "../src/database/provider.ts";
@@ -79,7 +80,7 @@ describe("shared API database contract on local Turso/libSQL", () => {
 
     try {
       assert.deepEqual(await applyMigrations(client, await loadMigrations()),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
       const { database, close } = await connectDatabaseFromEnvironment(
         { DATABASE_PROVIDER: "turso", TURSO_DATABASE_URL: pathToFileURL(databasePath).href },
       );
@@ -88,6 +89,7 @@ describe("shared API database contract on local Turso/libSQL", () => {
       const env = {
         DB: database,
         STORAGE: media.storage,
+        IMAGE_NORMALIZER: normalizeNodeImage,
         ENVIRONMENT: "local",
         LOCAL_TEST_MODE: "true",
         LOCAL_TEST_EMAIL_SINK: async (message: { text: string }) => {
@@ -144,6 +146,9 @@ describe("shared API database contract on local Turso/libSQL", () => {
         },
         label: "Turso local file + fake R2",
         beforeAssetDelete: async () => media.failNextDelete(),
+        resetRateLimits: async () => {
+          await database.prepare("DELETE FROM auth_rate_limits").run();
+        },
       });
 
       const integrity = await database.prepare("PRAGMA foreign_key_check").all();

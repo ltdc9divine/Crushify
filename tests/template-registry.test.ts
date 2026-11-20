@@ -334,7 +334,7 @@ describe("publication template registry", () => {
     const sayYes = readFileSync(new URL("../templates/say-yes/say-yes.js", import.meta.url), "utf8");
 
     for (const source of [loveLetter, memories, sayYes]) {
-      assert.match(source, /f\.size>5\*1024\*1024/);
+      assert.match(source, /f\.size>4\*1024\*1024/);
       assert.match(source, /image\/png','image\/jpeg/);
       assert.match(source, /available<=0/);
     }

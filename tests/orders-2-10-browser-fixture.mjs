@@ -33,6 +33,19 @@ function safeLogs() {
   return logs.replace(/magic_token=[A-Za-z0-9_-]+/g, "magic_token=[redacted]");
 }
 
+function d1Json(sql) {
+  const output = execFileSync(process.execPath, [
+    wrangler,
+    "d1", "execute", "crushify-local", "--local",
+    "--config", wranglerConfig,
+    "--persist-to", persistDirectory,
+    "--json", "--command", sql,
+  ], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const parsed = JSON.parse(output);
+  const result = Array.isArray(parsed) ? parsed[0] : parsed;
+  return result?.results?.[0] ?? result?.result?.[0]?.results?.[0] ?? {};
+}
+
 function startWorker() {
   worker = spawn(process.execPath, [
     wrangler,
@@ -138,7 +151,7 @@ try {
   startWorker();
   await waitReady();
   await prepareSyntheticLogin();
-  controlServer.on("request", (request, response) => {
+  controlServer.on("request", async (request, response) => {
     if (request.method === "POST" && request.url === "/cleanup") {
       response.writeHead(200, { "Content-Type": "text/plain" });
       response.end("cleaning");
@@ -147,6 +160,69 @@ try {
     }
 
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (request.method === "GET" && url.pathname === "/login") {
+      const email = url.searchParams.get("email");
+      if (!email) {
+        response.writeHead(400).end();
+        return;
+      }
+      const cursor = emailSink.current();
+      const requested = await fetch(`${origin}/api/v1/customers/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      if (requested.status !== 202) {
+        response.writeHead(500).end(JSON.stringify({ status: requested.status }));
+        return;
+      }
+      try {
+        const token = await emailSink.waitForMagicToken(cursor);
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ token }));
+      } catch (error) {
+        response.writeHead(500).end(JSON.stringify({
+          error: error instanceof Error ? error.message : "Login fixture failed",
+        }));
+      }
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/db-counts") {
+      const designId = url.searchParams.get("design_id") ?? "";
+      const orderId = url.searchParams.get("order_id") ?? "";
+      const customerEmail = url.searchParams.get("customer_email") ?? "";
+      if (!designId || !orderId) {
+        response.writeHead(400).end();
+        return;
+      }
+      const customer = customerEmail
+        ? d1Json(`SELECT id FROM customers WHERE email_normalized = '${customerEmail.replaceAll("'", "''")}'`)
+        : {};
+      const customerScope = customer.id
+        ? ` AND customer_id = '${customer.id}'`
+        : "";
+      const orderCount = d1Json(
+        `SELECT COUNT(*) AS count FROM orders
+         WHERE design_id = '${designId.replaceAll("'", "''")}'${customerScope}`,
+      );
+      const paymentCount = d1Json(
+        `SELECT COUNT(*) AS count FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         WHERE p.order_id = '${orderId.replaceAll("'", "''")}'${customerScope.replace("customer_id", "o.customer_id")}`,
+      );
+      const matchingCount = d1Json(
+        `SELECT COUNT(*) AS count FROM orders o
+         WHERE o.design_id = '${designId.replaceAll("'", "''")}'
+           AND o.id = '${orderId.replaceAll("'", "''")}'${customerScope.replace("customer_id", "o.customer_id")}`,
+      );
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        ordersForDesign: Number(orderCount.count ?? 0),
+        paymentsForOrder: Number(paymentCount.count ?? 0),
+        matchingOrder: Number(matchingCount.count ?? 0),
+      }));
+      return;
+    }
     if (request.method !== "GET" || url.pathname !== "/open" ||
         !templates.has(url.searchParams.get("template") ?? "")) {
       response.writeHead(404);

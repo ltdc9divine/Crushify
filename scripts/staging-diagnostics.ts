@@ -125,10 +125,14 @@ function safeCode(value: unknown): string | undefined {
   }
   try {
     const code = (value as { code?: unknown }).code;
-    return typeof code === "string" && safeErrorCodes.has(code) ? code : undefined;
+    return isSafeStagingOperationErrorCode(code) ? code : undefined;
   } catch {
     return undefined;
   }
+}
+
+export function isSafeStagingOperationErrorCode(value: unknown): value is string {
+  return typeof value === "string" && safeErrorCodes.has(value);
 }
 
 function errorCause(value: object): unknown {

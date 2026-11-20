@@ -14,14 +14,14 @@ The Vercel payload includes the following runtime files and recursive static tre
 |---|---|
 | Vercel and runtime configuration | `vercel.json`, `package.json`, `package-lock.json`, `tsconfig.json` |
 | API entry points | `api/v1.ts`, `api/[...path].ts`, `api/cron/publication-lifecycle.ts` |
-| Server runtime | `src/admin.ts`, `src/assets.ts`, `src/auth.ts`, `src/custom-design.ts`, `src/database.ts`, `src/designs.ts`, `src/http.ts`, `src/index.ts`, `src/logging.ts`, `src/payments.ts`, `src/product-catalog.ts`, `src/publications.ts`, `src/scheduler.ts`, `src/security-headers.ts`, `src/storage-plans.ts`, `src/storage.ts`, `src/template-registry.ts`, `src/types.ts`, `src/universe.ts` |
+| Server runtime | `src/admin.ts`, `src/assets.ts`, `src/auth.ts`, `src/custom-design.ts`, `src/database.ts`, `src/designs.ts`, `src/http.ts`, `src/image-normalizer.ts`, `src/index.ts`, `src/logging.ts`, `src/payments.ts`, `src/product-catalog.ts`, `src/publications.ts`, `src/scheduler.ts`, `src/security-headers.ts`, `src/storage-plans.ts`, `src/storage.ts`, `src/template-registry.ts`, `src/types.ts`, `src/universe.ts` |
 | Database runtime | `src/database/d1.ts`, `src/database/migrations.ts`, `src/database/provider.ts`, `src/database/turso.ts` |
 | Payment runtime | `src/payments/evidence.ts`, `src/payments/policy.ts`, `src/payments/provider.ts`, `src/payments/sepay-api-v2.ts`, `src/payments/sepay-reconciliation-policy.ts`, `src/payments/sepay-reconciliation.ts`, `src/payments/sepay.ts` |
-| Platform and storage runtime | `src/platform/environment.ts`, `src/platform/vercel.ts`, `src/storage/cloudinary-policy.ts`, `src/storage/cloudinary.ts`, `src/storage/mock.ts`, `src/storage/provider.ts`, `src/storage/r2.ts` |
+| Platform and storage runtime | `src/platform/environment.ts`, `src/platform/node-image-normalizer.ts`, `src/platform/vercel.ts`, `src/storage/cloudinary-policy.ts`, `src/storage/cloudinary.ts`, `src/storage/mock.ts`, `src/storage/provider.ts`, `src/storage/r2.ts` |
 | Homepage and customer pages | `index.html`, `css/style.css`, `js/main.js`, `js/particle-heart.js`, `admin/index.html`, `admin/admin.css`, `admin/admin.js`, `account/websites/index.html`, `account/websites/websites.css`, `account/websites/websites.js`, `checkout/index.html`, `checkout/checkout.css`, `checkout/checkout.js`, `custom-design/index.html`, `custom-design/custom-design.css`, `custom-design/custom-design.js` |
 | Editor, publication, and shared runtime | `shared/customer-editor-data-url.js`, `shared/customer-editor.css`, `shared/customer-editor.js`, `shared/publication-bootstrap.css`, `shared/publication-bootstrap.js`, `p/index.html`, `p/publication.css`, `p/publication.js` |
 | Template static pages and assets | All files recursively under `templates/our-universe/`, `templates/love-letter/`, `templates/our-memories/`, `templates/say-yes/`, and `templates/distance-means-nothing/` |
-| Database release | The 22 ordered SQL files listed with SHA-256 checksums below. The API function's `includeFiles` setting must continue to include `migrations/**`. |
+| Database release | The 24 ordered SQL files listed with SHA-256 checksums below. The API function's `includeFiles` setting must continue to include `migrations/**`. |
 
 `.vercelignore` excludes local environment files and variable samples, `.agents/`, session state, docs, tests, scripts, local databases, logs, test output, Wrangler-only configuration, and unrelated Markdown. It does not exclude the API, source, migration, or static runtime trees. Review this ignore list whenever adding a runtime asset or changing Vercel's build process.
 
@@ -29,7 +29,7 @@ No separate production build is required by the current architecture: the static
 
 ## Migration release sequence
 
-Apply migrations only to a separately approved, isolated Preview database after verifying its identity and authorization. The current checked-in sequence is contiguous from `0001` through `0022`. SHA-256 values below are for the current local files; the migration loader compares names and checksums and applies them in numerical order. Do not edit an applied migration or infer remote ledger state from these local hashes.
+Apply migrations only to a separately approved, isolated Preview database after verifying its identity and authorization. The current checked-in sequence is contiguous from `0001` through `0024`. SHA-256 values below are for the current local files; the migration loader compares names and checksums and applies them in numerical order. Do not edit an applied migration or infer remote ledger state from these local hashes.
 
 | Version | File | SHA-256 |
 |---:|---|---|
@@ -56,6 +56,7 @@ Apply migrations only to a separately approved, isolated Preview database after 
 | 0021 | `migrations/0021_admin_activity_audit.sql` | `a68311d13e6532628ece129c409b9d771c2e617a8a831b0f0f9b5a7244b0fe5e` |
 | 0022 | `migrations/0022_custom_design_customer_replies.sql` | `1d8625d50d2ea58f9bb815c5d50a6b179e2123e5282c97dc090d99f4162432c7` |
 | 0023 | `migrations/0023_manual_bank_transfer_settlement.sql` | `8d9896000cd14f53f8ef9a74a72e2e9d644e7809ce3096a7486372ca9a1bf75f` |
+| 0024 | `migrations/0024_manual_payment_activity_audit.sql` | `80683828a47b0f856c4589a83316e725154d0b1cc246dbb6a420d5e221ba031f` |
 
 The staging-specific Turso preflight and migration commands are `npm run db:preflight:turso:staging` and `npm run db:migrate:turso:staging`. They are remote operations and were not run. Use them only after a separate owner approval, target-hostname verification, isolated database confirmation, backup/recovery review, and inspection of the remote migration ledger.
 
@@ -73,6 +74,7 @@ Placeholders below are labels, not valid credentials. Configure server-side valu
 | `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | URL / secret | Must not be set | `<PRODUCTION_DATABASE_URL>` / `<PRODUCTION_DATABASE_TOKEN>` |
 | `STORAGE_PROVIDER` | Normal config | `cloudinary` | `cloudinary` only when approved for use |
 | `CLOUDINARY_STAGING_CLOUD_NAME` / `CLOUDINARY_STAGING_API_KEY` / `CLOUDINARY_STAGING_API_SECRET` | Name / ID / secret | `<PREVIEW_CLOUD>` / `<PREVIEW_KEY>` / `<PREVIEW_SECRET>`; isolated account | Must not be set |
+| `CLOUDINARY_PRODUCTION_CLOUD_NAME` | Name / non-secret comparison value | `<PRODUCTION_CLOUD_NAME>`; must differ from Preview cloud name; account ownership must be verified independently | Must not be set |
 | `CLOUDINARY_CLOUD_NAME` / `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET` | Name / ID / secret | Must not be set | `<PRODUCTION_CLOUD>` / `<PRODUCTION_KEY>` / `<PRODUCTION_SECRET>` |
 | `PREVIEW_EMAIL_SINK` | Feature flag | `discard` to disable Preview delivery; unset for dedicated Preview Resend | Must not be set |
 | `PREVIEW_MAIL_PROVIDER` / `PREVIEW_MAIL_API_KEY` / `PREVIEW_MAIL_FROM_EMAIL` | Config / secret / sender | `resend` / `<PREVIEW_RESEND_KEY>` / `<VERIFIED_PREVIEW_SENDER>`; Preview-only, separate account/key | Must not be set |

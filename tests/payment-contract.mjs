@@ -21,6 +21,7 @@ export async function runPaymentContract({
   request,
   seedPrice,
   owner,
+  ownerEmail,
   designId,
   webhookSecret,
   receivingAccount,
@@ -53,6 +54,7 @@ export async function runPaymentContract({
   restoreOrderPricingSnapshot,
   setPaymentCurrency,
   restorePaymentCurrency,
+  setLegacyRenewalRequestHash,
   failPublicationCreation,
   restorePublicationCreation,
   inspectFulfillmentJob,
@@ -66,6 +68,7 @@ export async function runPaymentContract({
   inspectPublicationIdentity,
   allTemplates = false,
   testStandardPricing = false,
+  resetDesignCreateRateLimit,
   expectedMode = "sepay-test",
   label,
 }) {
@@ -109,6 +112,11 @@ export async function runPaymentContract({
       }),
     },
   );
+  const assertSingleOrderPayment = async (orderId, message) => {
+    if (!inspectOrderArtifacts) return;
+    const artifacts = await inspectOrderArtifacts(orderId);
+    assert.equal(artifacts.payments, 1, `${label}: ${message}`);
+  };
   const unpriced = await createRequest(`unpriced-${randomUUID()}`);
   assert.equal(unpriced.response.status, 422, `${label}: empty catalog cannot create an order`);
   assert.equal(unpriced.body.error.code, "PRICE_UNAVAILABLE");
@@ -177,8 +185,16 @@ export async function runPaymentContract({
   assert.equal(forgedPayment.response.status, 400,
     `${label}: customer-supplied payment claims are rejected`);
 
+  const ordersBeforeCreate = countOrdersForDesign
+    ? await countOrdersForDesign(designId)
+    : null;
   const created = await createRequest();
   assert.equal(created.response.status, 201, `${label}: create test order`);
+  if (countOrdersForDesign) {
+    assert.equal(await countOrdersForDesign(designId), ordersBeforeCreate + 1,
+      `${label}: initial request creates exactly one order`);
+  }
+  await assertSingleOrderPayment(created.body.order_id, "new order creates exactly one payment");
   assert.equal(created.body.total_minor, TEST_TOTAL_VND, `${label}: server-side price snapshot`);
   if (inspectOrderPricingSnapshot) {
     await inspectOrderPricingSnapshot(created.body.order_id);
@@ -187,6 +203,31 @@ export async function runPaymentContract({
   assert.equal(created.body.status, "AWAITING_PAYMENT");
   assert.equal(created.body.payment.status, "PENDING");
   assert.equal(created.body.payment.provider, "SEPAY");
+  const lostResponseKey = `lost-response-${randomUUID()}`;
+  const lostResponseOrdersBefore = countOrdersForDesign
+    ? await countOrdersForDesign(designId)
+    : null;
+  const lostResponseCreate = await createRequest(lostResponseKey);
+  assert.equal(lostResponseCreate.response.status, 201,
+    `${label}: lost-response checkout commits an order`);
+  const serverOrderList = await request("/orders", owner);
+  assert.equal(serverOrderList.response.status, 200,
+    `${label}: authenticated customer can list recovery orders`);
+  const recovered = serverOrderList.body.orders.find((order) =>
+    order.order_id === lostResponseCreate.body.order_id);
+  assert.ok(recovered,
+    `${label}: server order list returns the original committed order`);
+  assert.equal(recovered.status, "AWAITING_PAYMENT");
+  const lostResponseReplay = await createRequest(lostResponseKey);
+  assert.equal(lostResponseReplay.response.status, 200,
+    `${label}: replay after local state loss reuses the original order`);
+  assert.equal(lostResponseReplay.body.order_id, lostResponseCreate.body.order_id);
+  if (countOrdersForDesign) {
+    assert.equal(await countOrdersForDesign(designId), lostResponseOrdersBefore + 1,
+      `${label}: lost-response recovery does not create a duplicate order`);
+  }
+  await assertSingleOrderPayment(lostResponseCreate.body.order_id,
+    "lost-response recovery creates no duplicate payment");
   const previewCapability = await request(`/designs/${designId}/preview`, owner, {
     method: "POST",
     mutating: true,
@@ -372,11 +413,10 @@ export async function runPaymentContract({
     assert.equal(modifiedPrice.response.status, 400, `${label}: client cannot supply a total`);
   }
 
-  const retried = await createRequest();
-  assert.equal(retried.response.status, 200, `${label}: idempotent retry`);
-  assert.equal(retried.body.order_id, created.body.order_id);
-
   const concurrentKey = `concurrent-${randomUUID()}`;
+  const ordersBeforeConcurrent = countOrdersForDesign
+    ? await countOrdersForDesign(designId)
+    : null;
   const concurrentOrders = await Promise.all([
     createRequest(concurrentKey),
     createRequest(concurrentKey),
@@ -384,6 +424,12 @@ export async function runPaymentContract({
   assert.ok(concurrentOrders.every((item) => item.response.status === 200 || item.response.status === 201),
     `${label}: concurrent order retries succeed idempotently`);
   assert.equal(concurrentOrders[0].body.order_id, concurrentOrders[1].body.order_id);
+  if (countOrdersForDesign) {
+    assert.equal(await countOrdersForDesign(designId), ordersBeforeConcurrent + 1,
+      `${label}: concurrent retries create one order`);
+  }
+  await assertSingleOrderPayment(concurrentOrders[0].body.order_id,
+    "concurrent same-key retries create one payment");
 
   const otherDesign = await request("/designs", owner, {
     method: "POST",
@@ -392,8 +438,15 @@ export async function runPaymentContract({
     body: JSON.stringify({ template_id: "our-universe", schema_version: 1 }),
   });
   assert.equal(otherDesign.response.status, 201);
+  const ordersBeforeConflict = countOrdersForDesign
+    ? await countOrdersForDesign(designId)
+    : null;
   const conflictingKey = await createRequest(idempotencyKey, otherDesign.body.design_id);
   assert.equal(conflictingKey.response.status, 409, `${label}: idempotency key binds request payload`);
+  if (countOrdersForDesign) {
+    assert.equal(await countOrdersForDesign(designId), ordersBeforeConflict,
+      `${label}: same key with a different payload creates no order`);
+  }
 
   const anonymousStatus = await request(`/orders/${created.body.order_id}/status`);
   assert.equal(anonymousStatus.response.status, 401, `${label}: order status requires authentication`);
@@ -513,6 +566,22 @@ export async function runPaymentContract({
   assert.equal(paid.body.status, "FULFILLED", `${label}: verified payment and publication complete fulfillment`);
   assert.equal(paid.body.fulfillment_status, "COMPLETED");
   assert.equal(paid.body.payment.status, "SUCCEEDED");
+  const ordersBeforeReplay = countOrdersForDesign
+    ? await countOrdersForDesign(designId)
+    : null;
+  const retried = await createRequest(idempotencyKey);
+  assert.equal(retried.response.status, 200, `${label}: terminal idempotent retry succeeds`);
+  assert.equal(retried.body.order_id, created.body.order_id);
+  assert.equal(retried.body.status, "FULFILLED",
+    `${label}: terminal replay preserves fulfilled status`);
+  assert.equal(retried.body.payment.status, "SUCCEEDED",
+    `${label}: terminal replay preserves payment state`);
+  if (countOrdersForDesign) {
+    assert.equal(await countOrdersForDesign(designId), ordersBeforeReplay,
+      `${label}: terminal replay creates no order`);
+  }
+  await assertSingleOrderPayment(created.body.order_id,
+    "terminal replay preserves the single payment");
   const replay = await request("/payments/sepay/webhook", null, {
     method: "POST",
     headers: validHeaders,
@@ -1135,7 +1204,29 @@ export async function runPaymentContract({
     assert.equal(evidenceOwnerBeforeCollision.length, 1,
       `${label}: source transaction has exactly one evidence owner before collision`);
   }
-  const duplicateOrder = await createRequest(`same-transaction-${randomUUID()}`);
+  const ordersBeforeIndependentPurchase = countOrdersForDesign
+    ? await countOrdersForDesign(designId)
+    : null;
+  const duplicateOrderKey = `same-transaction-${randomUUID()}`;
+  const duplicateOrder = await createRequest(duplicateOrderKey);
+  assert.equal(duplicateOrder.response.status, 201,
+    `${label}: a distinct key starts an intentional repeat purchase`);
+  assert.notEqual(duplicateOrder.body.order_id, created.body.order_id);
+  if (countOrdersForDesign) {
+    assert.equal(await countOrdersForDesign(designId), ordersBeforeIndependentPurchase + 1,
+      `${label}: a distinct key creates one independent order`);
+  }
+  await assertSingleOrderPayment(duplicateOrder.body.order_id,
+    "independent purchase creates exactly one payment");
+  if (setLegacyRenewalRequestHash) {
+    await setLegacyRenewalRequestHash(duplicateOrder.body.order_id);
+    const legacyReplay = await createRequest(duplicateOrderKey);
+    assert.equal(legacyReplay.response.status, 200,
+      `${label}: legacy implicit-renewal hash remains replayable`);
+    assert.equal(legacyReplay.body.order_id, duplicateOrder.body.order_id);
+    await assertSingleOrderPayment(duplicateOrder.body.order_id,
+      "legacy implicit-renewal replay creates no payment");
+  }
   const duplicateTransactionPayload = JSON.stringify({
     id: collidingTransactionId,
     accountNumber: receivingAccount,
@@ -1166,11 +1257,26 @@ export async function runPaymentContract({
       `${label}: the second order never owns the existing transaction evidence`);
   }
 
-  const expiredOrder = await createRequest(`expired-${randomUUID()}`);
+  const expiredKey = `expired-${randomUUID()}`;
+  const expiredOrder = await createRequest(expiredKey);
   assert.equal(expiredOrder.response.status, 201);
   if (expireOrder) await expireOrder(expiredOrder.body.order_id);
   const expiredStatus = await request(`/orders/${expiredOrder.body.order_id}/status`, owner);
   assert.equal(expiredStatus.body.status, "EXPIRED", `${label}: pending order expires server-side`);
+  const ordersBeforeExpiredReplay = countOrdersForDesign
+    ? await countOrdersForDesign(designId)
+    : null;
+  const expiredReplay = await createRequest(expiredKey);
+  assert.equal(expiredReplay.response.status, 200);
+  assert.equal(expiredReplay.body.order_id, expiredOrder.body.order_id);
+  assert.equal(expiredReplay.body.status, "EXPIRED",
+    `${label}: replay preserves expired status`);
+  if (countOrdersForDesign) {
+    assert.equal(await countOrdersForDesign(designId), ordersBeforeExpiredReplay,
+      `${label}: expired replay creates no order`);
+  }
+  await assertSingleOrderPayment(expiredOrder.body.order_id,
+    "expired replay preserves the single payment");
   const latePayload = JSON.stringify({
     id: Number(`${Date.now()}`.slice(-8)) + 4,
     accountNumber: receivingAccount,
@@ -1189,7 +1295,8 @@ export async function runPaymentContract({
     `${label}: late transfer is reviewed, not paid`);
 
   if (cancelOrder) {
-    const cancelledOrder = await createRequest(`cancelled-${randomUUID()}`);
+    const cancelledKey = `cancelled-${randomUUID()}`;
+    const cancelledOrder = await createRequest(cancelledKey);
     await cancelOrder(cancelledOrder.body.order_id);
     const cancelledPayload = JSON.stringify({
       id: Number(`${Date.now()}`.slice(-8)) + 9,
@@ -1207,6 +1314,20 @@ export async function runPaymentContract({
     const cancelledStatus = await request(`/orders/${cancelledOrder.body.order_id}/status`, owner);
     assert.equal(cancelledStatus.body.status, expectedMode === "mock" ? "CANCELLED" : "MANUAL_REVIEW",
       `${label}: a late transfer cannot pay a cancelled order`);
+    const ordersBeforeCancelledReplay = countOrdersForDesign
+      ? await countOrdersForDesign(designId)
+      : null;
+    const cancelledReplay = await createRequest(cancelledKey);
+    assert.equal(cancelledReplay.response.status, 200);
+    assert.equal(cancelledReplay.body.order_id, cancelledOrder.body.order_id);
+    assert.equal(cancelledReplay.body.status, expectedMode === "mock" ? "CANCELLED" : "MANUAL_REVIEW",
+      `${label}: replay preserves cancelled or review status`);
+    if (countOrdersForDesign) {
+      assert.equal(await countOrdersForDesign(designId), ordersBeforeCancelledReplay,
+        `${label}: cancelled replay creates no order`);
+    }
+    await assertSingleOrderPayment(cancelledOrder.body.order_id,
+      "cancelled replay preserves the single payment");
     if (assertRecoveryIgnoresOrder) {
       await assertRecoveryIgnoresOrder(cancelledOrder.body.order_id);
     }
@@ -1223,6 +1344,7 @@ export async function runPaymentContract({
       ["webhook-outcome", "webhook outcome update"],
       ["fulfillment-job", "fulfillment job insertion"],
     ]) {
+      if (resetDesignCreateRateLimit) await resetDesignCreateRateLimit(ownerEmail);
       const rollbackDesign = await request("/designs", owner, {
         method: "POST",
         mutating: true,

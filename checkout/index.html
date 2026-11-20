@@ -8,7 +8,7 @@
   <link rel="icon" href="data:,">
   <title>Đặt hàng | Crushify</title>
   <link rel="stylesheet" href="./checkout.css">
-  <script src="./checkout.js" defer></script>
+  <script type="module" src="./checkout.js"></script>
 </head>
 <body>
   <main class="checkout-shell">
@@ -19,9 +19,15 @@
       <p class="intro">Chọn thời hạn để xem ước tính từ danh mục giá hiện hành. Máy chủ sẽ tính lại tổng tiền trước khi tạo đơn.</p>
 
       <div id="notice" class="notice" role="status" aria-live="polite">Đang kiểm tra phiên đăng nhập…</div>
+      <section id="recovery-panel" class="order-panel" hidden aria-label="Khôi phục đơn hàng chưa hoàn tất">
+        <h2>Đơn chưa hoàn tất</h2>
+        <p class="new-intent-note">Chọn một đơn đang chờ thanh toán hoặc kiểm tra. Không gửi thanh toán mới cho đơn này trừ khi thông tin chuyển khoản hiện tại hiển thị yêu cầu.</p>
+        <div id="recovery-options"></div>
+        <button id="recovery-new-order" class="secondary-action" type="button">Bắt đầu đơn riêng có chủ đích</button>
+      </section>
 
       <section id="checkout-panel" class="checkout-panel" hidden aria-labelledby="summary-title">
-        <h2 id="summary-title">Tóm tắt món quà</h2>
+        <h2 id="summary-title" tabindex="-1">Tóm tắt món quà</h2>
         <dl class="order-details">
           <div><dt>Mẫu</dt><dd id="design-template">—</dd></div>
           <div><dt>Giá mẫu gồm tháng đầu</dt><dd id="base-price">—</dd></div>
@@ -55,6 +61,10 @@
           </label>
           <p class="policy-note">Chỉ thanh toán khi màn hình đơn hàng hiển thị thông tin nhận tiền. Thanh toán Production hiện chưa được bật.</p>
           <button id="submit-order" class="submit-order" type="submit" disabled>Tạo đơn hàng</button>
+          <p class="new-intent-note">
+            Nếu lần gửi trước chưa được xác nhận, hãy giữ nguyên lựa chọn để thử lại. Chỉ bắt đầu đơn riêng nếu bạn thực sự muốn có thêm đơn; đơn trước không bị hủy.
+          </p>
+          <button id="new-order-intent" class="secondary-action" type="button">Bắt đầu một đơn riêng</button>
         </form>
       </section>
 
@@ -67,6 +77,10 @@
           <div><dt>Xử lý đơn</dt><dd id="fulfillment-status">—</dd></div>
         </dl>
         <p id="tracking-help" class="tracking-help" hidden></p>
+        <p class="new-intent-note">
+          Đơn hàng mới là một đơn riêng và không thay thế hoặc hủy đơn này.
+        </p>
+        <button id="new-order" class="secondary-action" type="button" hidden>Tạo đơn riêng cho thiết kế này</button>
         <a id="publication-link" class="publication-link" hidden></a>
         <div id="qr-panel" class="qr-panel" hidden>
           <p id="payment-method" class="payment-method"></p>
