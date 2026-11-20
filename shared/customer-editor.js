@@ -341,6 +341,8 @@
       throw new TypeError("Invalid customer editor adapter");
     }
     if (showRecipientUnavailable()) return;
+    if (window.CRUSHIFY_GUEST_PREVIEW === true ||
+        new URLSearchParams(location.search).get("guest") === "1") return;
     createTools(adapter);
   };
 })();

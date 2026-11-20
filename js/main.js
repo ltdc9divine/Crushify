@@ -106,11 +106,11 @@
   void loadCatalogPricing();
 
   const templates = {
-    universe: { title: 'Vũ trụ của chúng mình', description: 'Một vũ trụ nhỏ chỉ có hai người. Gửi lời thương qua những vì sao và một trái tim đang phát sáng.', symbol: '♥', theme: 'universe', href: 'templates/our-universe/index.html' },
-    letter: { title: 'Lá thư tình', description: 'Một chiếc phong thư mở ra những lời bạn vẫn muốn nói. Nhẹ nhàng, riêng tư và thật nhiều cảm xúc.', symbol: '✉', theme: 'letter', href: 'templates/love-letter/index.html' },
-    memories: { title: 'Kỷ niệm đôi mình', description: 'Lưu những bức ảnh, ngày đặc biệt và khoảnh khắc nhỏ thành một cuốn album của hai người.', symbol: '♡', theme: 'memories', href: 'templates/our-memories/index.html' },
-    sayyes: { title: 'Hãy nói đồng ý!', description: 'Một lời hỏi dễ thương với những lựa chọn tương tác, dành cho một bất ngờ không thể đoán trước.', symbol: '♥', theme: 'sayyes', href: 'templates/say-yes/index.html' },
-    distance: { title: 'Xa mặt không cách lòng', description: 'Một món quà dành cho những trái tim ở xa nhưng vẫn hướng về cùng một nơi.', symbol: '☾', theme: 'distance', href: 'templates/distance-means-nothing/index.html' }
+    universe: { title: 'Vũ trụ của chúng mình', description: 'Một vũ trụ nhỏ chỉ có hai người. Gửi lời thương qua những vì sao và một trái tim đang phát sáng.', symbol: '♥', theme: 'universe', href: 'templates/our-universe/index.html', guestHref: 'templates/our-universe/index.html?guest=1' },
+    letter: { title: 'Lá thư tình', description: 'Một chiếc phong thư mở ra những lời bạn vẫn muốn nói. Nhẹ nhàng, riêng tư và thật nhiều cảm xúc.', symbol: '✉', theme: 'letter', href: 'templates/love-letter/index.html', guestHref: 'templates/love-letter/index.html?guest=1' },
+    memories: { title: 'Kỷ niệm đôi mình', description: 'Lưu những bức ảnh, ngày đặc biệt và khoảnh khắc nhỏ thành một cuốn album của hai người.', symbol: '♡', theme: 'memories', href: 'templates/our-memories/index.html', guestHref: 'templates/our-memories/index.html?guest=1' },
+    sayyes: { title: 'Hãy nói đồng ý!', description: 'Một lời hỏi dễ thương với những lựa chọn tương tác, dành cho một bất ngờ không thể đoán trước.', symbol: '♥', theme: 'sayyes', href: 'templates/say-yes/index.html', guestHref: 'templates/say-yes/index.html?guest=1' },
+    distance: { title: 'Xa mặt không cách lòng', description: 'Một món quà dành cho những trái tim ở xa nhưng vẫn hướng về cùng một nơi.', symbol: '☾', theme: 'distance', href: 'templates/distance-means-nothing/index.html', guestHref: 'templates/distance-means-nothing/index.html?guest=1' }
   };
   const modal = document.getElementById('previewModal');
   const modalTitle = document.getElementById('modalTitle');
@@ -132,6 +132,16 @@
     button.setAttribute('aria-label', `Xem trước ${item.title}`);
     button.textContent = 'Xem trước';
     details.append(button);
+
+    const guestLink = document.createElement('a');
+    guestLink.className = 'template-order-link template-guest-link';
+    guestLink.href = item.guestHref;
+    guestLink.append('Thử mẫu ');
+    const arrow = document.createElement('span');
+    arrow.setAttribute('aria-hidden', 'true');
+    arrow.textContent = '↗';
+    guestLink.append(arrow);
+    details.append(guestLink);
   });
   document.querySelectorAll('.preview-btn').forEach(button => button.addEventListener('click', () => {
     const item = templates[button.dataset.template];
@@ -144,8 +154,8 @@
     symbol.setAttribute('aria-hidden', 'true');
     symbol.textContent = item.symbol;
     modalVisual.replaceChildren(symbol);
-    modalChoose.href = item.href;
-    modalChoose.firstChild.textContent = 'Mở mẫu quà ';
+    modalChoose.href = item.guestHref;
+    modalChoose.firstChild.textContent = 'Thử mẫu ';
     if (!modal.open) modal.showModal();
   }));
   modal?.querySelectorAll('[data-close-modal]').forEach(button => button.addEventListener('click', closeModal));

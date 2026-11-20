@@ -1,11 +1,25 @@
 import {CITIES,THEMES,blank,validTz,distanceKm,clockInfo,diffLabel,countdown,daysTogether} from './core.js';
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
+const guestPreview=window.CRUSHIFY_GUEST_PREVIEW===true||new URLSearchParams(location.search).get('guest')==='1';
+const demoData=()=>Object.assign(blank(),{
+ sender:{name:'Minh',city:'Hà Nội',timezone:'Asia/Ho_Chi_Minh',lat:21.0285,lon:105.8542},
+ receiver:{name:'Linh',city:'Tokyo',timezone:'Asia/Tokyo',lat:35.6762,lon:139.6503},
+ anniversary:'2024-02-14',
+ nextMeeting:{date:'2026-12-01',time:'18:30',timezone:'Asia/Ho_Chi_Minh'},
+ headline:'Xa mặt không cách lòng',
+ message:'Dẫu cách nhau muôn trùng, chúng mình vẫn cùng nhìn về một bầu trời.',
+ theme:'blue-aurora',
+ animation:'dreamy',
+ distance:{mode:'coordinates',distanceKm:null},
+ messages:[{emoji:'💌',title:'Mở khi nhớ nhau',body:'Dù cách xa, anh vẫn luôn ở bên em.'}],
+ memories:[{title:'Ngày mình gặp nhau',body:'Một khoảnh khắc nhỏ mở đầu cho hành trình của đôi mình.'}],
+});
 let S=blank(),scene=null,glOK=false;
 const get=(o,p)=>p.split('.').reduce((a,k)=>a?.[k],o),set=(o,p,v)=>{const k=p.split('.'),l=k.pop();k.reduce((a,x)=>a[x],o)[l]=v};
 const merge=d=>{const b=blank();for(const k in b){if(d?.[k]===undefined)continue;b[k]=b[k]&&typeof b[k]==='object'&&!Array.isArray(b[k])?{...b[k],...d[k]}:d[k]}return b};
 const publicationData=window.CRUSHIFY_PUBLICATION_DATA;
 const recipient=Boolean(publicationData);
-S=merge(publicationData);
+S=guestPreview?demoData():merge(publicationData);
 const th=()=>THEMES[S.theme]||THEMES['midnight-distance'];
 // ---------- editor ----------
 const tzs=Intl.supportedValuesOf?Intl.supportedValuesOf('timeZone'):['UTC'];
