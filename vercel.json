@@ -1,4 +1,5 @@
 {
+  "installCommand": "npm ci --include=dev",
   "functions": {
     "api/[...path].ts": {
       "includeFiles": "migrations/**"
