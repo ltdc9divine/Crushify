@@ -223,6 +223,30 @@ describe("guest template preview", () => {
     assert.match(universe, /window\.CRUSHIFY_GUEST_PREVIEW===true\|\|Q\.get\('guest'\)==='1'\)initializeGuestPreview\(\)/);
   });
 
+  it("keeps guest demo edits and photo previews client-side without order or payment requests", () => {
+    const sources = templatePages.map(([, path]) => read(path));
+    const universe = read("../templates/our-universe/index.html");
+    const guestPhotoFunction = /async function addGuestPhoto\(file\)\{([^\n]*)\}/.exec(universe)?.[1];
+
+    assert.ok(guestPhotoFunction, "Our Universe guest photo handler is missing");
+    assert.doesNotMatch(guestPhotoFunction, /\b(?:fetch|apiFetch|apiJson|upload)\s*\(/);
+    assert.match(guestPhotoFunction, /URL\.createObjectURL\(file\)/);
+    assert.match(guestPhotoFunction, /drawImage/);
+    assert.match(universe, /if\(window\.CRUSHIFY_GUEST_PREVIEW===true\|\|Q\.get\('guest'\)==='1'\)addPhoto=addGuestPhoto/);
+
+    for (const source of [
+      read("../templates/love-letter/index.html"),
+      read("../templates/our-memories/our-memories.js"),
+      read("../templates/say-yes/say-yes.js"),
+    ]) {
+      assert.match(source, /URL\.createObjectURL\(/);
+      assert.match(source, /URL\.revokeObjectURL\(/);
+      assert.match(source, /toDataURL\(/);
+    }
+
+    assert.doesNotMatch(sources.join("\n"), /\/api\/v1\/(?:orders|payments|checkout)\b/);
+  });
+
   it("resets the affected guest editors and scenes without changing authenticated hydration", () => {
     const loveLetter = read("../templates/love-letter/index.html");
     const proposal = read("../templates/say-yes/say-yes.js");
@@ -299,8 +323,11 @@ describe("guest template preview", () => {
     assert.equal(read("../js/main.js").includes("loadCrushifyCatalogPricing"), true);
   });
 
-  it("keeps canonical template names and descriptions present on homepage cards", () => {
+  it("routes card viewing interactions and modal actions to Guest Preview", () => {
     const home = read("../index.html");
+    const main = read("../js/main.js");
+    const styles = read("../css/style.css");
+    const cardElements = [...home.matchAll(/<article class="template-card"[^>]*data-href="([^"]+)"[^>]*>([\s\S]*?)<\/article>/g)];
     const expectedCards = [
       ["our-universe", "Vũ trụ của chúng mình", "Một vũ trụ nhỏ chỉ có hai người."],
       ["love-letter", "Lá thư tình", "Mở phong thư, mở cả lòng mình."],
@@ -309,12 +336,35 @@ describe("guest template preview", () => {
       ["distance-means-nothing", "Xa mặt không cách lòng", "Dành cho hai người dưới cùng một bầu trời."],
     ];
 
+    assert.equal(cardElements.length, expectedCards.length);
     for (const [id, title, description] of expectedCards) {
-      const card = new RegExp(`<article class="template-card"[^>]*data-href="templates/${id}/index\\.html">([\\s\\S]*?)</article>`).exec(home)?.[1];
+      const guestHref = `templates/${id}/index.html?guest=1`;
+      const card = cardElements.find(([, href]) => href === guestHref)?.[2];
       assert.ok(card, `homepage card is missing for ${id}`);
-      assert.ok(card.includes(`<h3><a class="template-card-link"`), `${id} title link is missing`);
+      assert.ok(card.includes(`<h3><a class="template-card-link" href="${guestHref}">`), `${id} title link is not a guest link`);
       assert.ok(card.includes(`>${title}</a></h3>`), `${id} title is not canonical`);
       assert.ok(card.includes(`<p>${description}</p>`), `${id} description is not canonical`);
+
+      const anchors = [...card.matchAll(/<a\b([^>]*)href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)];
+      const customizeLink = anchors.find(([, attributes]) => attributes.includes("template-order-link"));
+      assert.ok(customizeLink, `${id} authenticated customize link is missing`);
+      assert.equal(customizeLink[2], `templates/${id}/index.html`);
+      assert.equal(customizeLink[3].replace(/<[^>]*>/g, "").trim(), "Đăng nhập để tùy chỉnh ↗");
+
+      const previewLinks = anchors.filter(([, attributes]) => !attributes.includes("template-order-link"));
+      assert.ok(previewLinks.length >= 2, `${id} needs title and card preview links`);
+      assert.ok(previewLinks.every(([, , href]) => href === guestHref), `${id} has a preview link to the authenticated editor`);
     }
+
+    for (const [id] of expectedCards) {
+      assert.ok(main.includes(`guestHref: 'templates/${id}/index.html?guest=1'`), `${id} guestHref is incorrect`);
+    }
+    assert.match(main, /template\.guestHref === card\.dataset\.href/);
+    assert.match(main, /guestLink\.href = item\.guestHref/);
+    assert.match(main, /modalChoose\.href = item\.guestHref/);
+    assert.match(main, /window\.location\.assign\(card\.dataset\.href\)/);
+    assert.match(styles, /\.template-card-link::after\{content:"";position:absolute;inset:0\}/);
+    assert.match(styles, /\.template-order-link,\.round-arrow,\.template-preview\{position:relative;z-index:1\}/);
+    assert.match(home, /href="templates\/our-universe\/index\.html\?guest=1" id="modalChoose"/);
   });
 });
