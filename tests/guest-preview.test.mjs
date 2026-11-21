@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { describe, it } from "node:test";
+import { publicProductCatalog } from "../src/product-catalog.ts";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
@@ -37,10 +38,12 @@ describe("guest template preview", () => {
       search: "?guest=1&design=private-id&publication=private-slug",
       hash: "#private-token",
       replace(url) { this.replacedWith = url; },
+      reload() { this.reloaded = true; },
     };
     const context = {
       URLSearchParams,
-      window: { addEventListener() {} },
+      Event,
+      window: { addEventListener() {}, dispatchEvent(event) { this.resetEvent = event; return true; } },
       location,
       history: { replaceState(_state, _title, url) { this.replacedWith = url; } },
       document: {
@@ -67,7 +70,7 @@ describe("guest template preview", () => {
     assert.equal(elements[1].attributes["aria-live"], "polite");
     assert.equal(elements[2].children[0].type, "button");
     elements[2].children[0].listeners.click();
-    assert.equal(location.replacedWith, "/templates/love-letter/index.html?guest=1");
+    assert.equal(location.reloaded, true);
   });
 
   it("does not activate guest mode without the explicit flag", () => {
@@ -84,6 +87,53 @@ describe("guest template preview", () => {
 
     assert.equal(context.window.CRUSHIFY_GUEST_PREVIEW, false);
     assert.equal(body.children.length, 0);
+  });
+
+  it("uses the current template's guest reset handler before falling back to a page reload", () => {
+    const body = fakeElement();
+    const elements = [];
+    const location = {
+      pathname: "/templates/love-letter/index.html",
+      search: "?guest=1",
+      hash: "",
+      replace(url) { this.replacedWith = url; },
+      reload() { this.reloaded = true; },
+    };
+    let resetHandler;
+    const context = {
+      URLSearchParams,
+      Event,
+      window: {
+        addEventListener(type, callback) {
+          if (type === "crushify:guest-reset") resetHandler = callback;
+        },
+        dispatchEvent(event) {
+          this.resetEvent = event;
+          resetHandler?.(event);
+          return !event.defaultPrevented;
+        },
+      },
+      location,
+      history: { replaceState() {} },
+      document: {
+        body,
+        documentElement: { style: { setProperty() {} } },
+        createElement() {
+          const element = fakeElement();
+          elements.push(element);
+          return element;
+        },
+        querySelectorAll() { return []; },
+      },
+    };
+    vm.runInNewContext(read("../shared/guest-preview.js"), context);
+    resetHandler = (event) => event.preventDefault();
+
+    elements[2].children[0].listeners.click();
+
+    assert.equal(location.replacedWith, undefined);
+    assert.equal(context.window.resetEvent.type, "crushify:guest-reset");
+    assert.equal(context.window.resetEvent.cancelable, true);
   });
 
   it("skips publication API calls for explicit guest sessions", async () => {
@@ -171,5 +221,100 @@ describe("guest template preview", () => {
     assert.match(distance, /name:'Linh',city:'Tokyo'/);
     assert.match(universe, /e\.oninput=\(\)=>\{set\(D,path,e\.value\);renderText\(\);scheduleSave\(\)\}/);
     assert.match(universe, /window\.CRUSHIFY_GUEST_PREVIEW===true\|\|Q\.get\('guest'\)==='1'\)initializeGuestPreview\(\)/);
+  });
+
+  it("resets the affected guest editors and scenes without changing authenticated hydration", () => {
+    const loveLetter = read("../templates/love-letter/index.html");
+    const proposal = read("../templates/say-yes/say-yes.js");
+    const distance = read("../templates/distance-means-nothing/app.js");
+    const customerEditor = read("../shared/customer-editor.js");
+    const guestPreview = read("../shared/guest-preview.js");
+
+    assert.match(guestPreview, /new Event\("crushify:guest-reset", \{ cancelable: true \}\)/);
+    assert.match(guestPreview, /location\.reload\(\)/);
+    assert.match(loveLetter, /const D=\{from:'Anh',to:'Em'/);
+    assert.match(loveLetter, /finally\{URL\.revokeObjectURL\(url\)\}/);
+    assert.match(proposal, /window\.addEventListener\('crushify:guest-reset',event=>/);
+    assert.match(proposal, /D=defaults\(\);S\.cel=0;S\.kick=0;S\.fw=0/);
+    assert.match(proposal, /pendingPhotoUrls\.delete\(url\);URL\.revokeObjectURL\(url\)/);
+    assert.match(distance, /window\.addEventListener\('crushify:guest-reset',event=>/);
+    assert.match(distance, /S=demoData\(\);bind\(\);render\(\)/);
+    assert.match(customerEditor, /if \(window\.CRUSHIFY_GUEST_PREVIEW === true \|\|/);
+    assert.match(customerEditor, /await adapter\.hydrate\(design\.data/);
+  });
+
+  it("renders a locked, canonical homepage catalog when the public API is unavailable", async () => {
+    const ids = templatePages.map(([id]) => id);
+    const cardPrices = ids.map((id) => ({ dataset: { templatePrice: id }, textContent: "" }));
+    const elements = Object.fromEntries([
+      "startingPrice",
+      "startingPriceNote",
+      "includedHostingPrice",
+      "additionalHostingPrice",
+      "lifetimePrice",
+      "pricingFormula",
+      "pricingAvailability",
+    ].map((id) => [id, { dataset: {}, textContent: "" }]));
+    const document = {
+      querySelectorAll(selector) {
+        assert.equal(selector, "[data-template-price]");
+        return cardPrices;
+      },
+      getElementById(id) { return elements[id]; },
+    };
+    const warnings = [];
+    const context = {
+      document,
+      Intl,
+      console: { warn(...args) { warnings.push(args); }, error() { assert.fail("Canonical fallback should render"); } },
+      window: {},
+    };
+    vm.runInNewContext(read("../shared/catalog-pricing.js"), context);
+    const fallbackCatalog = JSON.parse(JSON.stringify(context.window.CRUSHIFY_PUBLIC_CATALOG));
+    const canonicalCatalog = publicProductCatalog();
+
+    assert.deepEqual(fallbackCatalog.pricing_policy, canonicalCatalog.pricing_policy);
+    assert.deepEqual(fallbackCatalog.products, canonicalCatalog.products);
+    assert.equal(fallbackCatalog.checkout_enabled, false);
+
+    const requests = [];
+    const result = await context.window.loadCrushifyCatalogPricing(async (url, options) => {
+      requests.push({ url, options });
+      throw new Error("Preview runtime guard returned HTTP 500");
+    });
+
+    assert.equal(result, "fallback");
+    assert.deepEqual(requests.map(({ url, options }) => [url, options.method ?? "GET"]), [
+      ["/api/v1/catalog", "GET"],
+    ]);
+    assert.equal(cardPrices.length, 5);
+    assert.ok(cardPrices.every((node) => node.textContent === "59.000 đ · gồm 1 tháng hosting"));
+    assert.equal(elements.startingPrice.textContent, "59.000 đ");
+    assert.equal(elements.additionalHostingPrice.textContent, "Mỗi tháng hosting thêm: 10.000 đ");
+    assert.equal(elements.lifetimePrice.textContent, "Gói trọn đời: 199.000 đ");
+    assert.equal(elements.pricingAvailability.dataset.state, "locked");
+    assert.match(elements.pricingAvailability.textContent, /Tạo đơn chưa mở/);
+    assert.equal(warnings.length, 1);
+    assert.equal(read("../index.html").includes('src="shared/catalog-pricing.js"'), true);
+    assert.equal(read("../js/main.js").includes("loadCrushifyCatalogPricing"), true);
+  });
+
+  it("keeps canonical template names and descriptions present on homepage cards", () => {
+    const home = read("../index.html");
+    const expectedCards = [
+      ["our-universe", "Vũ trụ của chúng mình", "Một vũ trụ nhỏ chỉ có hai người."],
+      ["love-letter", "Lá thư tình", "Mở phong thư, mở cả lòng mình."],
+      ["our-memories", "Kỷ niệm đôi mình", "Gom những khoảnh khắc thành một nơi."],
+      ["say-yes", "Hãy nói đồng ý!", "Một câu hỏi nhỏ, một khoảnh khắc nhớ lâu."],
+      ["distance-means-nothing", "Xa mặt không cách lòng", "Dành cho hai người dưới cùng một bầu trời."],
+    ];
+
+    for (const [id, title, description] of expectedCards) {
+      const card = new RegExp(`<article class="template-card"[^>]*data-href="templates/${id}/index\\.html">([\\s\\S]*?)</article>`).exec(home)?.[1];
+      assert.ok(card, `homepage card is missing for ${id}`);
+      assert.ok(card.includes(`<h3><a class="template-card-link"`), `${id} title link is missing`);
+      assert.ok(card.includes(`>${title}</a></h3>`), `${id} title is not canonical`);
+      assert.ok(card.includes(`<p>${description}</p>`), `${id} description is not canonical`);
+    }
   });
 });

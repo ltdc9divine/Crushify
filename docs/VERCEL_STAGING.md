@@ -43,6 +43,17 @@ described above. Keep `PREVIEW_CUSTOMER_FLOW_ENABLED` disabled until those
 requirements are independently verified and configured; no Vercel settings or
 remote resources are changed by Guest Preview.
 
+The homepage may render its verified public template names, descriptions, and
+approved prices from `shared/catalog-pricing.js` when `/api/v1/catalog` is
+unavailable. The fallback is display-only, keeps checkout disabled, and is
+regression-tested against `src/product-catalog.ts`; it does not change the
+runtime guard or make customer APIs public. The Preview request-wide guard can
+return `RUNTIME_CONFIGURATION_ERROR` before the catalog route runs.
+
+Vercel's injected feedback overlay may emit CSP-blocked console warnings in
+Preview. Do not weaken Crushify's CSP for that overlay; change policy only if
+an actual Crushify application resource is confirmed blocked.
+
 ### Payment isolation
 
 - The payment policy uses trusted Vercel runtime classification. Preview defaults to disabled. It selects SePay Test mode only with `PREVIEW_PAYMENT_MODE=sepay-test` and the complete SePay configuration, or manual bank transfer only with `PREVIEW_PAYMENT_MODE=manual-bank-transfer` and a complete separate manual bank-details tuple. Both require the rest of the Preview customer-flow configuration. Otherwise checkout and fulfillment remain disabled. Production checkout and settlement remain disabled.

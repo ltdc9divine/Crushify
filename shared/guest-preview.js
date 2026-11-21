@@ -31,7 +31,12 @@
   const reset = document.createElement("button");
   reset.type = "button";
   reset.textContent = "Đặt lại mẫu";
-  reset.addEventListener("click", () => location.replace(`${location.pathname}?guest=1`));
+  reset.addEventListener("click", () => {
+    const resetEvent = new Event("crushify:guest-reset", { cancelable: true });
+    if (window.dispatchEvent(resetEvent)) {
+      location.reload();
+    }
+  });
 
   const selection = document.createElement("a");
   selection.href = "../../index.html#templates";
