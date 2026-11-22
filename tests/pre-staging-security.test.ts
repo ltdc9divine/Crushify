@@ -143,13 +143,17 @@ describe("pre-staging environment and storage isolation", () => {
       const handler = createVercelApiHandler({
         ...previewEnvironment,
         PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PREVIEW_ASSET_UPLOADS_ENABLED: "true",
         PREVIEW_AUTH_ALLOWED_EMAILS: "qa@example.test",
-        PREVIEW_EMAIL_SINK: "discard",
+        PREVIEW_MAIL_PROVIDER: "resend",
+        PREVIEW_MAIL_API_KEY: "synthetic-preview-resend-key",
+        PREVIEW_MAIL_FROM_EMAIL: "Crushify Preview <noreply@preview.example.test>",
         PREVIEW_PAYMENT_MODE: "sepay-test",
         PREVIEW_SEPAY_WEBHOOK_SECRET: "a".repeat(64),
         PREVIEW_SEPAY_BANK_CODE: "MB",
         PREVIEW_SEPAY_BANK_ACCOUNT: "1234567890",
         STAGING_LIFECYCLE_SECRET: "b".repeat(64),
+        VERCEL_BRANCH_URL: "preview.crushify.test",
       }, {
         async connectDatabase() {
           databaseConnections++;
@@ -600,7 +604,7 @@ describe("environment-specific email policy", () => {
     }
   });
 
-  it("keeps explicit Preview discard deterministic and fails closed on partial mail settings", async () => {
+  it("restricts Preview discard to disabled customer flow and fails closed on partial mail settings", async () => {
     const originalFetch = globalThis.fetch;
     let requestCount = 0;
     globalThis.fetch = async () => {
@@ -608,10 +612,17 @@ describe("environment-specific email policy", () => {
       return new Response(null, { status: 200 });
     };
     try {
-      const discarded = createEmailService({
+      const blockedDiscard = createEmailService({
         DB: database,
         ENVIRONMENT: "staging",
         PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PREVIEW_EMAIL_SINK: "discard",
+      }, "https://preview.crushify.test");
+      assert.equal(blockedDiscard, null);
+
+      const discarded = createEmailService({
+        DB: database,
+        ENVIRONMENT: "staging",
         PREVIEW_EMAIL_SINK: "discard",
       }, "https://preview.crushify.test");
       assert.ok(discarded);

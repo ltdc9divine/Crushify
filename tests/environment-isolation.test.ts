@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createVercelApiHandler } from "../src/platform/vercel.ts";
+import { createVercelApiHandler, resolveVercelOrigin } from "../src/platform/vercel.ts";
 import { createPublicationUrl } from "../src/publications.ts";
 
 function preflight(handler: (request: Request) => Promise<Response>, origin: string): Promise<Response> {
@@ -26,6 +26,49 @@ describe("Vercel environment and origin isolation", () => {
 
     assert.equal((await preflight(handler, "https://deployment-123.preview.test")).status, 204);
     assert.equal((await preflight(handler, "https://crushify.example.com")).status, 403);
+  });
+
+  it("uses the stable branch origin for Preview and rejects deployment-specific hosts", async () => {
+    const environment = {
+      VERCEL_ENV: "preview",
+      ENVIRONMENT: "staging",
+      VERCEL_URL: "deployment-123.preview.test",
+      VERCEL_BRANCH_URL: "preview-guest-mode.crushify.test",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.example.com",
+      STORAGE_PROVIDER: "mock",
+    };
+    const handler = createVercelApiHandler(environment);
+
+    assert.equal(resolveVercelOrigin(environment), "https://preview-guest-mode.crushify.test");
+    assert.equal((await preflight(handler, "https://preview-guest-mode.crushify.test")).status, 204);
+    assert.equal((await preflight(handler, "https://deployment-123.preview.test")).status, 403);
+    assert.equal((await preflight(handler, "https://crushify.example.com")).status, 403);
+    assert.equal((await handler(new Request(
+      "https://deployment-123.preview.test/api/v1/health/live",
+    ))).status, 200, "Guest Preview may use a deployment URL while customer flow is disabled");
+  });
+
+  it("rejects malformed or conflicting branch origins", () => {
+    const environment = {
+      VERCEL_ENV: "preview",
+      ENVIRONMENT: "staging",
+      VERCEL_URL: "deployment-123.preview.test",
+      VERCEL_BRANCH_URL: "preview-guest-mode.crushify.test",
+      VERCEL_PROJECT_PRODUCTION_URL: "crushify.example.com",
+    };
+
+    assert.equal(resolveVercelOrigin({
+      ...environment,
+      VERCEL_BRANCH_URL: "https://attacker.example/path",
+    }), null);
+    assert.equal(resolveVercelOrigin({
+      ...environment,
+      APP_ORIGIN: "https://deployment-123.preview.test",
+    }), null);
+    assert.equal(resolveVercelOrigin({
+      ...environment,
+      APP_ORIGIN: "https://preview-guest-mode.crushify.test",
+    }), "https://preview-guest-mode.crushify.test");
   });
 
   it("rejects Preview origin overrides that are Production, malformed, or ambiguous", async () => {

@@ -25,6 +25,7 @@ export interface Env {
   PREVIEW_MAIL_API_KEY?: string;
   PREVIEW_MAIL_FROM_EMAIL?: string;
   PREVIEW_CUSTOMER_FLOW_ENABLED?: string;
+  PREVIEW_ASSET_UPLOADS_ENABLED?: string;
   PREVIEW_AUTH_ALLOWED_EMAILS?: string;
   PREVIEW_TEST_EMAIL_SINK?: (message: import("./auth.ts").EmailMessage) => Promise<void>;
   PREVIEW_EMAIL_SINK?: "discard";

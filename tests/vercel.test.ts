@@ -196,8 +196,11 @@ describe("Vercel database environment selection", () => {
       CLOUDINARY_STAGING_API_SECRET: "synthetic-preview-secret",
       CLOUDINARY_PRODUCTION_CLOUD_NAME: "crushify-production-test",
       PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PREVIEW_ASSET_UPLOADS_ENABLED: "true",
       PREVIEW_AUTH_ALLOWED_EMAILS: "qa@example.test",
-      PREVIEW_EMAIL_SINK: "discard",
+      PREVIEW_MAIL_PROVIDER: "resend",
+      PREVIEW_MAIL_API_KEY: "synthetic-preview-resend-key",
+      PREVIEW_MAIL_FROM_EMAIL: "Crushify Preview <noreply@preview.example.test>",
       PREVIEW_PAYMENT_MODE: "sepay-test",
       PREVIEW_SEPAY_WEBHOOK_SECRET: "a".repeat(64),
       PREVIEW_SEPAY_BANK_CODE: "MB",
@@ -206,6 +209,7 @@ describe("Vercel database environment selection", () => {
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
       VERCEL_URL: "preview-crushify.test",
+      VERCEL_BRANCH_URL: "preview-guest-mode.crushify.test",
       VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
     };
 
@@ -225,10 +229,79 @@ describe("Vercel database environment selection", () => {
         { PREVIEW_SEPAY_BANK_ACCOUNT: "invalid" },
         { CLOUDINARY_STAGING_CLOUD_NAME: enabledPreview.CLOUDINARY_PRODUCTION_CLOUD_NAME },
         { PREVIEW_CUSTOMER_FLOW_ENABLED: "false" },
+        { VERCEL_BRANCH_URL: undefined },
+        { PREVIEW_EMAIL_SINK: "discard" },
+        {
+          PREVIEW_MAIL_PROVIDER: undefined,
+          PREVIEW_MAIL_API_KEY: undefined,
+          PREVIEW_MAIL_FROM_EMAIL: undefined,
+        },
         { STAGING_LIFECYCLE_SECRET: undefined },
       ]) {
         assert.notEqual(validateVercelEnvironment({ ...enabledPreview, ...override }), null);
       }
+    });
+
+    it("allows customer flow without storage when Preview uploads are off", () => {
+      const customerOnly = {
+        ...enabledPreview,
+        PREVIEW_ASSET_UPLOADS_ENABLED: "false",
+        STORAGE_PROVIDER: undefined,
+        CLOUDINARY_STAGING_CLOUD_NAME: undefined,
+        CLOUDINARY_STAGING_API_KEY: undefined,
+        CLOUDINARY_STAGING_API_SECRET: undefined,
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined,
+      };
+      assert.equal(validateVercelEnvironment(customerOnly), null);
+      assert.equal(validateVercelEnvironment({
+        ...customerOnly,
+        PREVIEW_ASSET_UPLOADS_ENABLED: undefined,
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...customerOnly,
+        PREVIEW_ASSET_UPLOADS_ENABLED: "enabled",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...customerOnly,
+        PREVIEW_ASSET_UPLOADS_ENABLED: "true",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...enabledPreview,
+        PREVIEW_ASSET_UPLOADS_ENABLED: "true",
+        CLOUDINARY_STAGING_API_KEY: undefined,
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...enabledPreview,
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined,
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...enabledPreview,
+        STORAGE_PROVIDER: "r2",
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...enabledPreview,
+        PREVIEW_CUSTOMER_FLOW_ENABLED: undefined,
+      }), null);
+      assert.notEqual(validateVercelEnvironment({
+        ...customerOnly,
+        PREVIEW_ASSET_UPLOADS_ENABLED: "true",
+        STORAGE_PROVIDER: "cloudinary",
+        CLOUDINARY_STAGING_CLOUD_NAME: "crushify-preview-test",
+        CLOUDINARY_STAGING_API_KEY: "synthetic-preview-key",
+        CLOUDINARY_STAGING_API_SECRET: "synthetic-preview-secret",
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: "crushify-preview-test",
+      }), null);
+    });
+
+    it("requires customer-flow requests to use the stable branch origin", async () => {
+      const handler = createVercelApiHandler(enabledPreview);
+      const response = await handler(new Request(
+        "https://preview-crushify.test/api/v1/health/live",
+      ));
+
+      assert.equal(response.status, 403);
+      assert.equal((await response.json() as { error: { code: string } }).error.code,
+        "ORIGIN_REJECTED");
     });
 
     it("accepts a separately configured manual transfer mode only in opted-in Preview", () => {
@@ -288,7 +361,7 @@ describe("Vercel database environment selection", () => {
         createCloudinaryStorage: () => new MemoryStorageAdapter(),
       });
       const response = await handler(new Request(
-        "https://preview-crushify.test/api/v1/catalog",
+        "https://preview-guest-mode.crushify.test/api/v1/catalog",
       ));
       assert.equal(response.status, 200);
       assert.equal((await response.json() as { checkout_enabled: boolean }).checkout_enabled, true);
@@ -319,10 +392,10 @@ describe("Vercel database environment selection", () => {
         ...dedicatedMail,
         PREVIEW_EMAIL_SINK: "discard",
       }), null, "discard and delivery modes cannot be configured together");
-      assert.notEqual(validateVercelEnvironment({
+      assert.equal(validateVercelEnvironment({
         ...enabledPreview,
         PREVIEW_EMAIL_SINK: undefined,
-      }), null, "Preview authentication must not silently discard without an explicit mode");
+      }), null, "Preview customer flow requires the deliverable Resend mode");
       assert.notEqual(validateVercelEnvironment({
         ...dedicatedMail,
         VERCEL_ENV: "production",
@@ -409,6 +482,12 @@ describe("Vercel database environment selection", () => {
       VERCEL_ENV: "production",
       VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
     };
+    assert.notEqual(validateVercelEnvironment({
+      ...production,
+      DATABASE_PROVIDER: "turso",
+      APP_ORIGIN: "https://crushify.test",
+      PREVIEW_ASSET_UPLOADS_ENABLED: "false",
+    }), null);
     assert.deepEqual(resolveVercelDatabaseConfiguration(production), {
       DATABASE_PROVIDER: "turso",
       TURSO_DATABASE_URL: production.TURSO_DATABASE_URL,
@@ -1067,7 +1146,7 @@ describe("Vercel API runtime adapter", () => {
     assert.equal(upload.status, 503);
     assert.equal(
       (await upload.json() as { error: { code: string } }).error.code,
-      "STORAGE_UNAVAILABLE",
+      "AUTH_UNAVAILABLE",
     );
 
     const publicAsset = await handler(new Request(
@@ -1700,7 +1779,8 @@ describe("Vercel API runtime adapter", () => {
     const databaseUrl = pathToFileURL(databasePath).href;
     const migrationClient = createClient({ url: databaseUrl, intMode: "number" });
     const database = new TursoDatabaseAdapter(migrationClient);
-    const storage = new MemoryStorageAdapter();
+    let storageInitializations = 0;
+    const lifecycleSecret = randomBytes(32).toString("hex");
     const tokens: string[] = [];
     const webhookSecret = randomBytes(32).toString("hex");
     const receivingAccount = "0000000000";
@@ -1721,12 +1801,8 @@ describe("Vercel API runtime adapter", () => {
       DATABASE_PROVIDER: "turso",
       TURSO_STAGING_DATABASE_URL: "libsql://crushify-staging-test-org.turso.io",
       TURSO_STAGING_AUTH_TOKEN: "synthetic-staging-token",
-      STORAGE_PROVIDER: "cloudinary",
-      CLOUDINARY_STAGING_CLOUD_NAME: "crushify-preview-test",
-      CLOUDINARY_STAGING_API_KEY: "synthetic-preview-key",
-      CLOUDINARY_STAGING_API_SECRET: "synthetic-preview-secret",
-      CLOUDINARY_PRODUCTION_CLOUD_NAME: "crushify-production-test",
       PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PREVIEW_ASSET_UPLOADS_ENABLED: "false",
       PREVIEW_AUTH_ALLOWED_EMAILS: emailAddresses.join(","),
       ADMIN_EMAILS: emailAddresses[0],
       PREVIEW_MAIL_PROVIDER: "resend",
@@ -1737,10 +1813,11 @@ describe("Vercel API runtime adapter", () => {
       PREVIEW_SEPAY_BANK_CODE: "MB",
       PREVIEW_SEPAY_BANK_ACCOUNT: receivingAccount,
       PREVIEW_SEPAY_ACCOUNT_NAME: "Crushify Preview",
-      STAGING_LIFECYCLE_SECRET: randomBytes(32).toString("hex"),
+      STAGING_LIFECYCLE_SECRET: lifecycleSecret,
       ENVIRONMENT: "staging",
       VERCEL_ENV: "preview",
       VERCEL_URL: "preview-crushify.test",
+      VERCEL_BRANCH_URL: "preview-guest-mode.crushify.test",
       VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
     }, {
       async connectDatabase(environment) {
@@ -1751,7 +1828,12 @@ describe("Vercel API runtime adapter", () => {
         return { database, close: () => undefined };
       },
       createCloudinaryStorage() {
-        return storage;
+        storageInitializations++;
+        return new MemoryStorageAdapter();
+      },
+      createMockStorage() {
+        storageInitializations++;
+        return new MemoryStorageAdapter();
       },
     });
 
@@ -1772,14 +1854,14 @@ describe("Vercel API runtime adapter", () => {
       if (session?.cookies.length) headers.set("Cookie", session.cookies.join("; "));
       if (settings.token) headers.set("Authorization", `Bearer ${settings.token}`);
       if (settings.mutating || ["POST", "PUT", "PATCH", "DELETE"].includes(settings.method ?? "")) {
-        headers.set("Origin", "https://preview-crushify.test");
+        headers.set("Origin", "https://preview-guest-mode.crushify.test");
         if (session?.csrf) headers.set("X-CSRF-Token", session.csrf);
       }
       if (settings.json !== undefined) headers.set("Content-Type", "application/json");
       if (path === "/customers/session" || path === "/customers/session/verify") {
         headers.set("x-vercel-forwarded-for", "198.51.100.41");
       }
-      const response = await handler(new Request(`https://preview-crushify.test/api/v1${path}`, {
+      const response = await handler(new Request(`https://preview-guest-mode.crushify.test/api/v1${path}`, {
         method: settings.method ?? "GET",
         headers,
         body: settings.json === undefined ? settings.body : JSON.stringify(settings.json),
@@ -1829,6 +1911,46 @@ describe("Vercel API runtime adapter", () => {
         json: { template_id: "our-universe", schema_version: 1 },
       });
       assert.equal(design.response.status, 201);
+      const unauthenticatedUpload = await request("/assets/upload-url", null, {
+        method: "POST",
+        json: {},
+      });
+      assert.equal(unauthenticatedUpload.response.status, 401);
+      const uploadWithoutCsrf = await request("/assets/upload-url", {
+        cookies: owner.cookies,
+        csrf: "",
+      }, {
+        method: "POST",
+        mutating: true,
+        json: {},
+      });
+      assert.equal(uploadWithoutCsrf.response.status, 403);
+      const disabledUpload = await request("/assets/upload-url", owner, {
+        method: "POST",
+        mutating: true,
+        json: {},
+      });
+      assert.equal(disabledUpload.response.status, 503);
+      assert.equal(disabledUpload.body.error.code, "ASSET_UPLOADS_DISABLED");
+      const disabledDelete = await request(`/assets/${crypto.randomUUID()}`, owner, {
+        method: "DELETE",
+        mutating: true,
+      });
+      assert.equal(disabledDelete.response.status, 503);
+      assert.equal(disabledDelete.body.error.code, "ASSET_UPLOADS_DISABLED");
+      const assetId = crypto.randomUUID();
+      const disabledContent = await request(`/assets/${assetId}/content`, null, {
+        method: "PUT",
+        body: new Uint8Array(),
+      });
+      assert.equal(disabledContent.response.status, 503);
+      assert.equal(disabledContent.body.error.code, "ASSET_UPLOADS_DISABLED");
+      const disabledComplete = await request(`/assets/${assetId}/complete`, owner, {
+        method: "POST",
+        mutating: true,
+      });
+      assert.equal(disabledComplete.response.status, 503);
+      assert.equal(disabledComplete.body.error.code, "ASSET_UPLOADS_DISABLED");
 
       const catalog = await request("/catalog");
       assert.equal(catalog.response.status, 200);
@@ -1879,6 +2001,70 @@ describe("Vercel API runtime adapter", () => {
       assert.equal(createdOrder.body.payment.provider, "SEPAY");
       assert.equal(createdOrder.body.status, "AWAITING_PAYMENT");
 
+      const photoOrder = await request("/orders", owner, {
+        method: "POST",
+        mutating: true,
+        headers: { "Idempotency-Key": `preview-photo-order-${crypto.randomUUID()}` },
+        json: {
+          design_id: design.body.design_id,
+          storage_plan_id: "1-month",
+          asset_consents: [],
+        },
+      });
+      assert.equal(photoOrder.response.status, 201);
+      const photoAssetId = crypto.randomUUID();
+      const photoNow = new Date().toISOString();
+      const photoOwner = await migrationClient.execute(
+        "SELECT customer_id FROM designs WHERE id = ?",
+        [design.body.design_id],
+      );
+      const photoCustomerId = String(photoOwner.rows[0]?.customer_id);
+      await migrationClient.execute({
+        sql: `INSERT INTO assets (
+                id, customer_id, design_id, object_key, visibility, status, media_type,
+                byte_size, sha256, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 'PRIVATE', 'READY', 'image/png', 4, ?, ?, ?)`,
+        args: [
+          photoAssetId, photoCustomerId, design.body.design_id, `private/${photoAssetId}.png`,
+          "d".repeat(64), photoNow, photoNow,
+        ],
+      });
+      await migrationClient.execute(
+        "INSERT INTO order_asset_refs (order_id, asset_id, created_at) VALUES (?, ?, ?)",
+        [photoOrder.body.order_id, photoAssetId, photoNow],
+      );
+
+      const photoTimestamp = Math.floor(Date.now() / 1000);
+      const photoWebhookBody = JSON.stringify({
+        id: `photo-${String(Date.now())}`,
+        accountNumber: receivingAccount,
+        code: photoOrder.body.payment.reference,
+        transferType: "in",
+        transferAmount: photoOrder.body.total_minor,
+      });
+      const photoSignature = createHmac("sha256", webhookSecret)
+        .update(`${photoTimestamp}.${photoWebhookBody}`)
+        .digest("hex");
+      const blockedPhotoSettlement = await request("/payments/sepay/webhook", null, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-SePay-Timestamp": String(photoTimestamp),
+          "X-SePay-Signature": `sha256=${photoSignature}`,
+        },
+        body: photoWebhookBody,
+      });
+      assert.equal(blockedPhotoSettlement.response.status, 200);
+      const photoStatus = await request(`/orders/${photoOrder.body.order_id}/status`, owner);
+      assert.equal(photoStatus.body.status, "MANUAL_REVIEW");
+      const photoWebhookReview = await migrationClient.execute(
+        `SELECT review_reason FROM payment_webhook_events
+         WHERE provider = 'SEPAY' AND event_id = ?`,
+        [JSON.parse(photoWebhookBody).id],
+      );
+      assert.match(String(photoWebhookReview.rows[0]?.review_reason ?? ""),
+        /Preview asset uploads are disabled/i);
+
       const timestamp = Math.floor(Date.now() / 1000);
       const webhookBody = JSON.stringify({
         id: String(Date.now() * 100 + 99),
@@ -1913,6 +2099,27 @@ describe("Vercel API runtime adapter", () => {
       const publication = await request(`/publications/${publicSlug}`);
       assert.equal(publication.response.status, 200);
       assert.equal(publication.body.data.mainMessage, customizedData.mainMessage);
+      const disabledConsent = await request(
+        `/publications/${website.publication_id}/assets/${assetId}/consent`,
+        owner,
+        { method: "POST", mutating: true, json: {} },
+      );
+      assert.equal(disabledConsent.response.status, 503);
+      assert.equal(disabledConsent.body.error.code, "ASSET_UPLOADS_DISABLED");
+      const unpublishedAsset = await request(
+        `/publications/${publicSlug}/assets/${crypto.randomUUID()}`,
+      );
+      assert.equal(unpublishedAsset.response.status, 404);
+
+      const lifecycle = await handler(new Request(
+        "https://preview-guest-mode.crushify.test/api/ops/staging/publication-lifecycle",
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${lifecycleSecret}` },
+        },
+      ));
+      assert.equal(lifecycle.status, 200);
+      assert.equal(storageInitializations, 0);
     } finally {
       globalThis.fetch = originalFetch;
       migrationClient.close();

@@ -67,6 +67,7 @@ export interface VercelEnvironment {
   PREVIEW_MAIL_API_KEY?: string;
   PREVIEW_MAIL_FROM_EMAIL?: string;
   PREVIEW_CUSTOMER_FLOW_ENABLED?: string;
+  PREVIEW_ASSET_UPLOADS_ENABLED?: string;
   PREVIEW_AUTH_ALLOWED_EMAILS?: string;
   PREVIEW_PAYMENT_MODE?: string;
   PREVIEW_SEPAY_WEBHOOK_SECRET?: string;
@@ -153,14 +154,18 @@ export function resolveVercelOrigin(
     ? undefined
     : vercelHostOrigin(environment.VERCEL_PROJECT_PRODUCTION_URL);
   if (environment.VERCEL_PROJECT_PRODUCTION_URL !== undefined && !productionOrigin) return null;
+  const branchOrigin = environment.VERCEL_BRANCH_URL === undefined
+    ? undefined
+    : vercelHostOrigin(environment.VERCEL_BRANCH_URL);
+  if (environment.VERCEL_BRANCH_URL !== undefined && !branchOrigin) return null;
 
   if (runtime === "staging") {
-    const deploymentOrigin = vercelHostOrigin(environment.VERCEL_URL);
-    if (!deploymentOrigin || deploymentOrigin === productionOrigin ||
-        (configuredOrigin && configuredOrigin !== deploymentOrigin)) {
+    const previewOrigin = branchOrigin ?? vercelHostOrigin(environment.VERCEL_URL);
+    if (!previewOrigin || previewOrigin === productionOrigin ||
+        (configuredOrigin && configuredOrigin !== previewOrigin)) {
       return null;
     }
-    return deploymentOrigin;
+    return previewOrigin;
   }
 
   if (configuredOrigin && productionOrigin && configuredOrigin !== productionOrigin) return null;
@@ -235,6 +240,7 @@ function validateCredentialScope(environment: VercelEnvironment): boolean {
       environment.CLOUDINARY_STAGING_API_SECRET,
       environment.CLOUDINARY_PRODUCTION_CLOUD_NAME,
       environment.PREVIEW_CUSTOMER_FLOW_ENABLED,
+      environment.PREVIEW_ASSET_UPLOADS_ENABLED,
       environment.PREVIEW_AUTH_ALLOWED_EMAILS,
       environment.PREVIEW_PAYMENT_MODE,
       environment.PREVIEW_SEPAY_WEBHOOK_SECRET,
@@ -276,6 +282,7 @@ function validateCredentialScope(environment: VercelEnvironment): boolean {
       environment.CLOUDINARY_STAGING_API_SECRET,
       environment.CLOUDINARY_PRODUCTION_CLOUD_NAME,
       environment.PREVIEW_CUSTOMER_FLOW_ENABLED,
+      environment.PREVIEW_ASSET_UPLOADS_ENABLED,
       environment.PREVIEW_AUTH_ALLOWED_EMAILS,
       environment.PREVIEW_PAYMENT_MODE,
       environment.PREVIEW_SEPAY_WEBHOOK_SECRET,
@@ -389,7 +396,19 @@ export function validateVercelEnvironment(environment: VercelEnvironment): strin
         environment.PREVIEW_CUSTOMER_FLOW_ENABLED !== "true") {
       return "RUNTIME_CONFIGURATION_ERROR";
     }
+    if (environment.PREVIEW_ASSET_UPLOADS_ENABLED !== undefined &&
+        environment.PREVIEW_ASSET_UPLOADS_ENABLED !== "true" &&
+        environment.PREVIEW_ASSET_UPLOADS_ENABLED !== "false") {
+      return "RUNTIME_CONFIGURATION_ERROR";
+    }
+    if (environment.PREVIEW_ASSET_UPLOADS_ENABLED === "true" &&
+        environment.PREVIEW_CUSTOMER_FLOW_ENABLED !== "true") {
+      return "RUNTIME_CONFIGURATION_ERROR";
+    }
     if (environment.PREVIEW_CUSTOMER_FLOW_ENABLED === "true") {
+      if (!vercelHostOrigin(environment.VERCEL_BRANCH_URL)) {
+        return "RUNTIME_CONFIGURATION_ERROR";
+      }
       const emails = (environment.PREVIEW_AUTH_ALLOWED_EMAILS ?? "")
         .split(",").map((email) => email.trim());
       if (emails.length === 0 || emails.some((email) =>
@@ -422,9 +441,8 @@ export function validateVercelEnvironment(environment: VercelEnvironment): strin
             /^[A-Z0-9]{2,20}$/i.test(environment.PREVIEW_SEPAY_BANK_CODE ?? "") &&
             Boolean(environment.PREVIEW_SEPAY_BANK_ACCOUNT) &&
             /^\d{5,20}$/.test(environment.PREVIEW_SEPAY_BANK_ACCOUNT ?? "");
-      if ((environment.PREVIEW_EMAIL_SINK !== "discard" &&
-            !validPreviewMailConfiguration) ||
-          environment.STORAGE_PROVIDER !== "cloudinary" ||
+      if (environment.PREVIEW_EMAIL_SINK !== undefined ||
+          !validPreviewMailConfiguration ||
           !validPreviewPaymentConfiguration ||
           environment.MAIL_PROVIDER !== undefined ||
           environment.MAIL_API_KEY !== undefined ||
@@ -433,15 +451,23 @@ export function validateVercelEnvironment(environment: VercelEnvironment): strin
           !/^[\da-f]{64}$/i.test(environment.STAGING_LIFECYCLE_SECRET)) {
         return "RUNTIME_CONFIGURATION_ERROR";
       }
-      try {
-        resolveCloudinaryConfiguration({
-          ...environment,
-          ENVIRONMENT: "staging",
-        });
-      } catch (error) {
-        return error instanceof CloudinaryConfigurationError
-          ? error.code
-          : "STORAGE_CONFIGURATION_ERROR";
+      if (environment.PREVIEW_ASSET_UPLOADS_ENABLED === "true") {
+        if (environment.STORAGE_PROVIDER !== "cloudinary") {
+          return "STORAGE_ISOLATION_ERROR";
+        }
+        try {
+          resolveCloudinaryConfiguration({
+            ...environment,
+            ENVIRONMENT: "staging",
+          });
+        } catch (error) {
+          return error instanceof CloudinaryConfigurationError
+            ? error.code
+            : "STORAGE_CONFIGURATION_ERROR";
+        }
+      } else if (environment.STORAGE_PROVIDER !== undefined &&
+          environment.STORAGE_PROVIDER !== "cloudinary") {
+        return "STORAGE_ISOLATION_ERROR";
       }
     } else if (environment.STORAGE_PROVIDER === "cloudinary" ||
         environment.CLOUDINARY_STAGING_CLOUD_NAME !== undefined ||
@@ -622,7 +648,8 @@ function createStorage(
 ): Storage | undefined {
   const runtime = runtimeEnvironment(environment);
   if (runtime === "staging" &&
-      environment.PREVIEW_CUSTOMER_FLOW_ENABLED !== "true") return undefined;
+      (environment.PREVIEW_CUSTOMER_FLOW_ENABLED !== "true" ||
+        environment.PREVIEW_ASSET_UPLOADS_ENABLED !== "true")) return undefined;
   if (environment.STORAGE_PROVIDER === "cloudinary") {
     if (runtime !== "production" && runtime !== "staging") {
       throw new TypeError("Cloudinary is not configured for this runtime");
@@ -936,7 +963,9 @@ export function createVercelApiHandler(
         }
         return apiError(requestIdValue, 500, "STORAGE_CONFIGURATION_ERROR", "Storage provider is not configured for this runtime");
       }
-      if (!storage) {
+      const storageOptional = environment.PREVIEW_CUSTOMER_FLOW_ENABLED === "true" &&
+        environment.PREVIEW_ASSET_UPLOADS_ENABLED !== "true";
+      if (!storage && !storageOptional) {
         return apiError(
           requestIdValue,
           503,
@@ -958,6 +987,30 @@ export function createVercelApiHandler(
           STORAGE: storage,
           IMAGE_NORMALIZER: dependencies.imageNormalizer,
           ENVIRONMENT: "staging",
+          PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+          PREVIEW_ASSET_UPLOADS_ENABLED: environment.PREVIEW_ASSET_UPLOADS_ENABLED,
+          PAYMENT_MODE: runtimePaymentMode(environment),
+          SEPAY_WEBHOOK_SECRET: environment.PREVIEW_PAYMENT_MODE === "sepay-test"
+            ? environment.PREVIEW_SEPAY_WEBHOOK_SECRET
+            : undefined,
+          SEPAY_BANK_CODE: environment.PREVIEW_PAYMENT_MODE === "sepay-test"
+            ? environment.PREVIEW_SEPAY_BANK_CODE
+            : undefined,
+          SEPAY_BANK_ACCOUNT: environment.PREVIEW_PAYMENT_MODE === "sepay-test"
+            ? environment.PREVIEW_SEPAY_BANK_ACCOUNT
+            : undefined,
+          SEPAY_ACCOUNT_NAME: environment.PREVIEW_PAYMENT_MODE === "sepay-test"
+            ? environment.PREVIEW_SEPAY_ACCOUNT_NAME
+            : undefined,
+          MANUAL_BANK_CODE: environment.PREVIEW_PAYMENT_MODE === "manual-bank-transfer"
+            ? environment.PREVIEW_MANUAL_BANK_CODE
+            : undefined,
+          MANUAL_BANK_ACCOUNT: environment.PREVIEW_PAYMENT_MODE === "manual-bank-transfer"
+            ? environment.PREVIEW_MANUAL_BANK_ACCOUNT
+            : undefined,
+          MANUAL_ACCOUNT_NAME: environment.PREVIEW_PAYMENT_MODE === "manual-bank-transfer"
+            ? environment.PREVIEW_MANUAL_ACCOUNT_NAME
+            : undefined,
           DATA_RETENTION_DAYS: environment.DATA_RETENTION_DAYS,
         }, { limit: 10 });
         return Response.json(result, {
@@ -1041,6 +1094,12 @@ export function createVercelApiHandler(
 
     const origin = originFromEnvironment(environment, request);
     const requestOrigin = request.headers.get("origin");
+    if (runtimeEnvironment(environment) === "staging" &&
+        environment.PREVIEW_CUSTOMER_FLOW_ENABLED === "true" &&
+        origin !== url.origin) {
+      return apiError(requestId(), 403, "ORIGIN_REJECTED",
+        "Preview requests must use the canonical branch origin");
+    }
 
     if (request.method === "OPTIONS") {
       const requestedMethod = request.headers.get("access-control-request-method")?.toUpperCase();
@@ -1112,7 +1171,7 @@ export function createVercelApiHandler(
     }
 
     const appOrigin = origin ?? undefined;
-    const cloudinary = environment.STORAGE_PROVIDER === "cloudinary"
+    const cloudinary = storage && environment.STORAGE_PROVIDER === "cloudinary"
       ? resolveCloudinaryConfiguration({
           ...environment,
           ENVIRONMENT: appEnvironment,
@@ -1123,13 +1182,17 @@ export function createVercelApiHandler(
       STORAGE: storage,
       IMAGE_NORMALIZER: dependencies.imageNormalizer,
       DATABASE_PROVIDER: "turso",
-      STORAGE_PROVIDER: environment.STORAGE_PROVIDER === "cloudinary" ? "cloudinary" : undefined,
+      STORAGE_PROVIDER: storage && environment.STORAGE_PROVIDER === "cloudinary" ? "cloudinary" : undefined,
       CLOUDINARY_CLOUD_NAME: cloudinary?.cloudName,
       CLOUDINARY_API_KEY: cloudinary?.apiKey,
       CLOUDINARY_API_SECRET: cloudinary?.apiSecret,
       ENVIRONMENT: appEnvironment,
       PREVIEW_CUSTOMER_FLOW_ENABLED: environment.VERCEL_ENV === "preview" &&
           environment.PREVIEW_CUSTOMER_FLOW_ENABLED === "true" ? "true" : undefined,
+      PREVIEW_ASSET_UPLOADS_ENABLED: environment.VERCEL_ENV === "preview" &&
+          environment.PREVIEW_CUSTOMER_FLOW_ENABLED === "true"
+        ? environment.PREVIEW_ASSET_UPLOADS_ENABLED
+        : undefined,
       PREVIEW_AUTH_ALLOWED_EMAILS: environment.VERCEL_ENV === "preview" &&
           environment.PREVIEW_CUSTOMER_FLOW_ENABLED === "true"
         ? environment.PREVIEW_AUTH_ALLOWED_EMAILS

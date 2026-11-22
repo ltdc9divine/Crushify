@@ -1,6 +1,7 @@
 import { DatabaseError } from "../database.ts";
 import { nowIso, safeId } from "../http.ts";
 import { handleFulfillmentForOrder, type FulfillmentResult } from "../publications.ts";
+import { previewAssetUploadsEnabled } from "../preview-assets.ts";
 import { resolvePaymentEnvironmentPolicy } from "./policy.ts";
 import { verifiedSettlementEvidence } from "./evidence.ts";
 import type { Env } from "../types.ts";
@@ -31,6 +32,7 @@ interface ManualOrderRow {
   order_review_required: number;
   expires_at: string | null;
   snapshot_total_minor: number | null;
+  has_uploaded_media: number;
 }
 
 export type ManualPaymentConfirmationResult =
@@ -43,6 +45,15 @@ function sameReference(left: string | null, right: string | null): boolean {
   return left === null || right === null
     ? left === right
     : left.toLowerCase() === right.toLowerCase();
+}
+
+function mediaSettlementGuard(env: Env, orderIdExpression: string): string {
+  return previewAssetUploadsEnabled(env)
+    ? "1 = 1"
+    : `NOT EXISTS (
+         SELECT 1 FROM order_asset_refs media_ref
+         WHERE media_ref.order_id = ${orderIdExpression}
+       )`;
 }
 
 async function findConfirmation(
@@ -73,7 +84,11 @@ async function loadManualOrder(env: Env, orderId: string): Promise<ManualOrderRo
             (SELECT CAST(json_extract(item.metadata_json, '$.pricing_snapshot.total_minor') AS INTEGER)
              FROM order_items item
              WHERE item.order_id = order_row.id AND item.item_type = 'ADD_ON'
-             LIMIT 1) AS snapshot_total_minor
+             LIMIT 1) AS snapshot_total_minor,
+            EXISTS (
+              SELECT 1 FROM order_asset_refs media_ref
+              WHERE media_ref.order_id = order_row.id
+            ) AS has_uploaded_media
      FROM orders order_row
      JOIN payments payment ON payment.order_id = order_row.id
      WHERE order_row.id = ?`,
@@ -107,6 +122,9 @@ export async function confirmManualPayment(
       order.order_review_required !== 0 ||
       (order.snapshot_total_minor !== null &&
         order.snapshot_total_minor !== input.amountMinor)) {
+    return { kind: "conflict" };
+  }
+  if (!previewAssetUploadsEnabled(env) && order.has_uploaded_media) {
     return { kind: "conflict" };
   }
 
@@ -144,6 +162,7 @@ export async function confirmManualPayment(
            AND payment.amount_minor = order_row.total_minor
            AND payment.amount_minor = ?
            AND payment.currency = order_row.currency
+           AND ${mediaSettlementGuard(env, "order_row.id")}
            AND NOT EXISTS (
              SELECT 1 FROM order_items pricing_item
              WHERE pricing_item.order_id = order_row.id
@@ -188,6 +207,7 @@ export async function confirmManualPayment(
        WHERE id = ? AND order_id = ? AND provider = ?
          AND status IN ('PENDING', 'SUCCEEDED') AND review_required = 0
          AND amount_minor = ? AND currency = 'VND'
+         AND ${mediaSettlementGuard(env, "payments.order_id")}
          AND EXISTS (
            SELECT 1 FROM manual_payment_confirmations confirmation
            WHERE confirmation.id = ? AND confirmation.payment_id = payments.id
@@ -201,6 +221,7 @@ export async function confirmManualPayment(
       `UPDATE orders SET status = 'PAID', paid_at = COALESCE(paid_at, ?), updated_at = ?
        WHERE id = ? AND order_type = 'SELF_SERVICE' AND status = 'AWAITING_PAYMENT'
          AND payment_review_required = 0
+         AND ${mediaSettlementGuard(env, "orders.id")}
          AND EXISTS (
            SELECT 1 FROM payments payment
            JOIN manual_payment_confirmations confirmation
@@ -220,6 +241,7 @@ export async function confirmManualPayment(
        FROM orders order_row
        JOIN payments payment ON payment.order_id = order_row.id
        WHERE order_row.id = ? AND order_row.status = 'PAID'
+         AND ${mediaSettlementGuard(env, "order_row.id")}
          AND payment.provider = ? AND payment.status = 'SUCCEEDED'
          AND ${verifiedSettlementEvidence("payment", "order_row")}
        ON CONFLICT(order_id) DO NOTHING`,

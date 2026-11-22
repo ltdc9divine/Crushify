@@ -24,6 +24,7 @@ import {
   runPublicationLifecycle,
 } from "../src/publications.ts";
 import { runScheduledPublicationLifecycle } from "../src/scheduler.ts";
+import { confirmManualPayment } from "../src/payments/manual-settlement.ts";
 import type { Storage, StorageObject } from "../src/storage.ts";
 import { MemoryStorageAdapter } from "../src/storage/mock.ts";
 
@@ -931,6 +932,95 @@ describe("published website QR codes", () => {
 });
 
 describe("publication expiration lifecycle", () => {
+  it("blocks manual settlement and confirmation replay for media orders when Preview uploads are off", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createStorage({ derivative: 0, source: 0 });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client, true);
+      const session = await createSession(client, fixture.customerId);
+      const localEnv = deletionContext(adapter, storage, session).env;
+      assert.equal((await saveDesignWithAsset(
+        localEnv, session, client, fixture.designId, fixture.assetId,
+      )).status, 200);
+      const order = await createOrderSnapshot(client, fixture, {
+        paid: false,
+        assetId: fixture.assetId,
+      });
+      await client.execute(
+        "UPDATE payments SET provider = 'MANUAL_BANK_TRANSFER' WHERE order_id = ?",
+        [order.orderId],
+      );
+      const previewEnv = {
+        DB: adapter,
+        ENVIRONMENT: "staging",
+        PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+        PREVIEW_ASSET_UPLOADS_ENABLED: "false",
+        PAYMENT_MODE: "manual-bank-transfer",
+      } as Parameters<typeof confirmManualPayment>[0];
+      const input = {
+        orderId: order.orderId,
+        actorCustomerId: fixture.customerId,
+        requestId: randomUUID(),
+        amountMinor: 1000,
+        transactionReference: "MANUAL-MEDIA-TEST",
+      };
+
+      assert.deepEqual(await confirmManualPayment(previewEnv, input), { kind: "conflict" });
+      let state = await client.execute({
+        sql: `SELECT order_row.status AS order_status, payment.status AS payment_status,
+                    (SELECT COUNT(*) FROM manual_payment_confirmations
+                     WHERE order_id = order_row.id) AS confirmations,
+                    (SELECT COUNT(*) FROM fulfillment_jobs WHERE order_id = order_row.id) AS jobs
+             FROM orders order_row JOIN payments payment ON payment.order_id = order_row.id
+             WHERE order_row.id = ?`,
+        args: [order.orderId],
+      });
+      assert.deepEqual(state.rows[0], {
+        order_status: "AWAITING_PAYMENT",
+        payment_status: "PENDING",
+        confirmations: 0,
+        jobs: 0,
+      });
+
+      const payment = await client.execute(
+        "SELECT id FROM payments WHERE order_id = ?",
+        [order.orderId],
+      );
+      const confirmedAt = NOW.toISOString();
+      await client.execute({
+        sql: `INSERT INTO manual_payment_confirmations (
+                id, payment_id, order_id, actor_customer_id, request_id,
+                transaction_reference, amount_minor, currency, confirmed_at, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, 'VND', ?, ?)`,
+        args: [
+          randomUUID(), payment.rows[0]?.id, order.orderId, fixture.customerId,
+          randomUUID(), input.transactionReference, input.amountMinor, confirmedAt, confirmedAt,
+        ],
+      });
+      assert.deepEqual(await confirmManualPayment(previewEnv, input), { kind: "conflict" });
+      state = await client.execute({
+        sql: `SELECT order_row.status AS order_status, payment.status AS payment_status,
+                    (SELECT COUNT(*) FROM manual_payment_confirmations
+                     WHERE order_id = order_row.id) AS confirmations,
+                    (SELECT COUNT(*) FROM fulfillment_jobs WHERE order_id = order_row.id) AS jobs
+             FROM orders order_row JOIN payments payment ON payment.order_id = order_row.id
+             WHERE order_row.id = ?`,
+        args: [order.orderId],
+      });
+      assert.deepEqual(state.rows[0], {
+        order_status: "AWAITING_PAYMENT",
+        payment_status: "PENDING",
+        confirmations: 1,
+        jobs: 0,
+      });
+    } finally {
+      client.close();
+    }
+  });
+
   it("blocks fulfillment recovery and public reads when settlement evidence is missing or invalid", async () => {
     const client = createClient({ url: "file::memory:", intMode: "number" });
     const adapter = new TursoDatabaseAdapter(client);
@@ -4060,6 +4150,40 @@ describe("publication expiration lifecycle", () => {
         [customerA.designId, customerB.designId],
       );
       assert.equal(state.rows.every((row) => row.status === "DRAFT"), true);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("deletes a draft when its only asset row is already DELETED", async () => {
+    const client = createClient({ url: "file::memory:", intMode: "number" });
+    const adapter = new TursoDatabaseAdapter(client);
+    const storage = createStorage({ derivative: 0, source: 0 });
+    try {
+      await client.execute("PRAGMA foreign_keys = ON");
+      await applyMigrations(client, await loadMigrations());
+      const fixture = await createDraftFixture(client);
+      const now = NOW.toISOString();
+      await client.execute({
+        sql: `INSERT INTO assets (
+                id, customer_id, design_id, object_key, visibility, status, media_type,
+                byte_size, sha256, deleted_at, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 'PRIVATE', 'DELETED', 'image/png', 4, ?, ?, ?, ?)`,
+        args: [
+          fixture.assetId, fixture.customerId, fixture.designId,
+          `private/${fixture.assetId}.png`, "e".repeat(64), now, now, now,
+        ],
+      });
+      const session = await createSession(client, fixture.customerId);
+      const response = await deletionContext(adapter, storage, session)
+        .deleteDesign(fixture.designId);
+      assert.equal(response.status, 200);
+      const state = await client.execute(
+        "SELECT status FROM designs WHERE id = ?",
+        [fixture.designId],
+      );
+      assert.deepEqual(state.rows[0], { status: "ARCHIVED" });
+      assert.equal(await storage.get(`private/${fixture.assetId}.png`), null);
     } finally {
       client.close();
     }
