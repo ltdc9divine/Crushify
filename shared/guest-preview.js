@@ -22,11 +22,40 @@
   status.className = "crushify-guest-status";
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
-  status.textContent = "Xem thử khách (Guest Preview) · Thay đổi chỉ ở tab này, không được lưu. Cần đặt hàng để nhận website được xuất bản khi dịch vụ mở.";
+  status.textContent = "Xem thử khách · Tùy chỉnh hiện chỉ ở tab này. Chọn “Đặt mẫu này” để lưu tạm trên thiết bị trong tối đa 60 phút; mở liên kết đăng nhập trên cùng thiết bị/trình duyệt.";
 
   const controls = document.createElement("nav");
   controls.className = "crushify-guest-controls";
   controls.setAttribute("aria-label", "Điều hướng chế độ xem thử");
+
+  const order = document.createElement("button");
+  order.type = "button";
+  order.className = "crushify-guest-order";
+  order.textContent = "Đặt mẫu này";
+  order.disabled = true;
+  order.addEventListener("click", async () => {
+    const editor = window.CRUSHIFY_GUEST_EDITOR;
+    if (!editor || typeof editor.serializeGuest !== "function") {
+      status.textContent = "Trình chỉnh sửa chưa sẵn sàng. Hãy đợi nội dung tải xong rồi thử lại.";
+      return;
+    }
+    order.disabled = true;
+    try {
+      const data = await editor.serializeGuest();
+      const draft = await window.CrushifyGuestDraft.createStore().save({
+        templateId: editor.templateId,
+        schemaVersion: editor.schemaVersion,
+        data,
+      });
+      status.textContent = "Đã lưu tạm tùy chỉnh trên thiết bị. Đang chuyển tới đăng nhập; bản nháp sẽ hết hạn sau 60 phút.";
+      location.assign(`/templates/${encodeURIComponent(editor.templateId)}/?guest_draft=${encodeURIComponent(draft.draftId)}`);
+    } catch (error) {
+      status.textContent = error instanceof Error
+        ? `Chưa thể tiếp tục: ${error.message}`
+        : "Chưa thể lưu tạm bản nháp. Nội dung hiện tại vẫn còn trên trang này.";
+      order.disabled = false;
+    }
+  });
 
   const reset = document.createElement("button");
   reset.type = "button";
@@ -42,9 +71,18 @@
   selection.href = "../../index.html#templates";
   selection.textContent = "Chọn mẫu khác";
 
-  controls.append(reset, selection);
+  controls.append(order, reset, selection);
   notice.append(status, controls);
   document.body.append(notice);
+  window.addEventListener("crushify:guest-editor-ready", () => {
+    order.disabled = false;
+  });
+  const guestDraftStore = window.CrushifyGuestDraft?.createStore();
+  if (guestDraftStore) {
+    void guestDraftStore.cleanupExpired().catch((error) => {
+      console.error("Could not clean up expired guest drafts", error);
+    });
+  }
   const updateLayoutOffset = () => {
     const offset = Math.ceil(notice.getBoundingClientRect().bottom + 8);
     document.documentElement.style.setProperty("--crushify-guest-offset", `${offset}px`);

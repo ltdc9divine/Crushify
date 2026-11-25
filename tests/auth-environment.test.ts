@@ -284,9 +284,23 @@ describe("environment-scoped authentication", () => {
     assert.deepEqual(db.queries, []);
     assert.deepEqual(messages, []);
 
+    const invalidDraftReturn = await handleApiRequest(
+      makeRequest("/customers/session", "POST", {
+        body: JSON.stringify({
+          email: "qa-auth@example.test",
+          return_to: "/templates/our-universe/?guest_draft=not-a-uuid",
+        }),
+      }),
+      env,
+    );
+    assert.equal(invalidDraftReturn.status, 400);
+
     const login = await handleApiRequest(
       makeRequest("/customers/session", "POST", {
-        body: JSON.stringify({ email: "QA-Auth@example.test" }),
+        body: JSON.stringify({
+          email: "QA-Auth@example.test",
+          return_to: "/templates/our-universe/?guest_draft=123e4567-e89b-42d3-a456-426614174000",
+        }),
       }),
       env,
     );
@@ -295,6 +309,7 @@ describe("environment-scoped authentication", () => {
     assert.equal((loginBody as { message: string }).message, responseMessage);
     assert.doesNotMatch(JSON.stringify(loginBody), /magic_token|https:\/\/preview\.crushify\.test/);
     assert.equal(messages.length, 1);
+    assert.match(messages[0].text, /\/templates\/our-universe\/\?guest_draft=123e4567-e89b-42d3-a456-426614174000#magic_token=/);
     const token = messages[0].text.match(/#magic_token=([A-Za-z0-9_-]+)/)?.[1];
     assert.ok(token);
 

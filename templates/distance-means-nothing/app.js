@@ -88,7 +88,9 @@ mobileTabs.addEventListener('change',event=>{if(event.matches&&!mobileTabChosen&
 addEventListener('resize',()=>{if(mobileTabs.matches&&!mobileTabChosen&&!document.body.classList.contains('view'))selectMobileTab(true)});
 window.registerCrushifyCustomerEditor({
 templateId:'distance-means-nothing',schemaVersion:1,
+async serializeGuest(){return structuredClone(S)},
 async serialize(){return structuredClone(S)},
+async hydrateGuest(data){S=merge(data);bind();render();scene?.apply(S,th())},
 async hydrate(data){S=merge(data);bind();render();scene?.apply(S,th())}
 });
 // ---------- boot ----------

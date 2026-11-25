@@ -380,7 +380,7 @@ export async function handleSessionRoutes(
 
     const body = parsed.value as { email: string; return_to?: string };
     const returnTo = body.return_to ?? "/templates/our-universe/";
-    if (!/^\/templates\/(our-universe|love-letter|our-memories|say-yes|distance-means-nothing)\/(?:\?design=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})?$/i.test(returnTo)) {
+    if (!/^\/templates\/(our-universe|love-letter|our-memories|say-yes|distance-means-nothing)\/(?:\?(?:design=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:&guest_draft=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})?|guest_draft=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}))?$/i.test(returnTo)) {
       return apiError(requestId, 400, "VALIDATION_ERROR", "A valid template return path is required");
     }
     const email = body.email.trim();
