@@ -82,7 +82,7 @@ Renewal orders snapshot the selected server-priced storage plan and do not requi
 - Verified balance changes project to `DELIVERED` only after deliverables are ready. Do not treat a deposit as full payment.
 - Additional work beyond quote requires a new/versioned quote and customer acceptance before work/charge.
 
-The workflow and guards are detailed in [CUSTOM_DESIGN_WORKFLOW.md](CUSTOM_DESIGN_WORKFLOW.md).
+The workflow and guards are detailed in [CUSTOM_DESIGN_WORKFLOW.md](../business/CUSTOM_DESIGN_WORKFLOW.md).
 
 ## 6. Coupons, refunds and reconciliation
 

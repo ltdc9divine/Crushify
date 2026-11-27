@@ -67,7 +67,7 @@ For Vercel local development:
 For Vercel Preview staging:
 
 1. Use a dedicated, verified non-production Turso database. Vercel serverless filesystems are ephemeral and must not be used for persistent databases.
-2. Database-only checks use `ENVIRONMENT=staging`, `DATABASE_PROVIDER=turso`, `TURSO_STAGING_DATABASE_URL`, and `TURSO_STAGING_AUTH_TOKEN`. For the complete opt-in customer flow, configure every isolated Preview variable listed in [SETUP-API-CREDENTIALS.md](./SETUP-API-CREDENTIALS.md), including dedicated Cloudinary, Resend, SePay Test mode, exact-email allowlist, and `STAGING_LIFECYCLE_SECRET`. The gate rejects incomplete or Production-scoped settings. Never configure `STORAGE_PROVIDER=mock` or generic Production credentials in Preview.
+2. Database-only checks use `ENVIRONMENT=staging`, `DATABASE_PROVIDER=turso`, `TURSO_STAGING_DATABASE_URL`, and `TURSO_STAGING_AUTH_TOKEN`. For the complete opt-in customer flow, configure every isolated Preview variable listed in [SETUP-API-CREDENTIALS.md](./operations/SETUP-API-CREDENTIALS.md), including dedicated Cloudinary, Resend, SePay Test mode, exact-email allowlist, and `STAGING_LIFECYCLE_SECRET`. The gate rejects incomplete or Production-scoped settings. Never configure `STORAGE_PROVIDER=mock` or generic Production credentials in Preview.
 3. Keep `LOCAL_TEST_MODE` and all `LOCAL_TEST_*` values out of Preview. Do not configure SePay Live credentials or a mock mark-paid route. Customer checkout in Preview is limited to the configured SePay Test-mode integration.
 4. Vercel Cron invokes the Production deployment only. The handler requires matching `ENVIRONMENT=production` and `VERCEL_ENV=production` for scheduled production cleanup. Preview has a protected manual lifecycle operation but no automatic schedule. `CRON_SECRET` is required in the Vercel Production environment before an approved release. No production endpoint was invoked during this work.
 5. Do not use production customer data or real-money payment. See [Vercel staging setup](./VERCEL_STAGING.md) for migration controls and outstanding provider verification.
@@ -173,7 +173,7 @@ Provider plan limits, pricing, commercial eligibility, data-region/privacy terms
 
 Local test mode supports `PAYMENT_MODE=mock|sepay-test`. The opt-in Preview flow uses `PREVIEW_PAYMENT_MODE=sepay-test` with `PREVIEW_SEPAY_WEBHOOK_SECRET`, `PREVIEW_SEPAY_BANK_CODE`, `PREVIEW_SEPAY_BANK_ACCOUNT`, and optional `PREVIEW_SEPAY_ACCOUNT_NAME`. Values are server-side only. Webhooks are signature-verified, and the protected lifecycle runner can retry persisted events and fulfillment. Local and Preview synthetic tests do not represent provider sandbox verification.
 
-SePay Live mode, Production webhooks/checkout, and real-money settlement are not implemented. Do not enable live checkout or send/receive actual money. See [SEPAY_SETUP.md](SEPAY_SETUP.md) for Test mode steps and [SEPAY_PRICING_AND_PROMOTIONS.md](SEPAY_PRICING_AND_PROMOTIONS.md) for the sourced pricing snapshot and eligibility caveats.
+SePay Live mode, Production webhooks/checkout, and real-money settlement are not implemented. Do not enable live checkout or send/receive actual money. See [SEPAY_SETUP.md](payments/SEPAY_SETUP.md) for Test mode steps and [SEPAY_PRICING_AND_PROMOTIONS.md](payments/SEPAY_PRICING_AND_PROMOTIONS.md) for the sourced pricing snapshot and eligibility caveats.
 
 ## Migration/rollback boundary
 

@@ -1200,7 +1200,7 @@ export async function handleAssetRoutes(
       "SELECT design_id FROM assets WHERE id = ? AND customer_id = ? AND status = 'READY'",
     ).bind(assetId, required.session!.customerId).first<{ design_id: string }>();
     if (!asset) return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
-    return serveAsset(request, env, requestId, assetId, required.session!.customerId, asset.design_id);
+    return serveAsset(env, requestId, assetId, required.session!.customerId, asset.design_id);
   }
   if (request.method === "DELETE") return deleteAsset(request, env, requestId, assetId);
   return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");

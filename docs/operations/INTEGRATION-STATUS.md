@@ -47,4 +47,4 @@ This report distinguishes source capability from external configuration and prov
 - **No public mock mark-paid route exists.** Local mock settlement is only a synthetic test facility.
 - **Production readiness:** **NOT PRODUCTION READY**. Production account/provider configuration, current commercial hosting eligibility, deployed runtime, external email delivery, actual payment, and scheduled invocation are **NOT VERIFIED**. SePay Live is not implemented, Production checkout/webhooks are disabled, and Production publication mutations are disabled. The existence of recovery code is not proof of end-to-end Production fulfillment.
 
-See [SETUP-API-CREDENTIALS.md](SETUP-API-CREDENTIALS.md) for exact variable names, environment scopes, and owner actions. Current payment limits are documented in [SEPAY_SETUP.md](SEPAY_SETUP.md).
+See [SETUP-API-CREDENTIALS.md](SETUP-API-CREDENTIALS.md) for exact variable names, environment scopes, and owner actions. Current payment limits are documented in [SEPAY_SETUP.md](../payments/SEPAY_SETUP.md).

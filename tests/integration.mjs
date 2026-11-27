@@ -2061,6 +2061,14 @@ try {
   const websites = await json("/publications", first);
   assert.equal(websites.response.status, 200);
   assert.ok(websites.body.websites.some((website) => website.publication_id === publicationId));
+  const secondCustomerWebsites = await json("/publications", second);
+  assert.equal(secondCustomerWebsites.response.status, 200);
+  assert.equal(
+    secondCustomerWebsites.body.websites.some((website) =>
+      website.design_id === designId || website.publication_id === publicationId),
+    false,
+    "the customer dashboard does not expose another customer's design or website",
+  );
 
   const referencedDelete = await json(`/assets/${goodImage.grant.asset_id}`, first, {
     method: "DELETE",

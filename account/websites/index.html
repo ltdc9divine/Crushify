@@ -15,6 +15,19 @@
     <h1>Website của tôi</h1>
     <p class="intro">Quản lý các thiết kế, trạng thái thanh toán và đường dẫn quà tặng đã xuất bản.</p>
     <p id="notice" role="status" aria-live="polite">Đang tải tài khoản…</p>
+    <section class="account-panel" aria-label="Truy cập tài khoản">
+      <form id="login-form" action="/api/v1/customers/session" method="post" aria-labelledby="login-heading" hidden>
+        <h2 id="login-heading">Đăng nhập hoặc tạo tài khoản</h2>
+        <p>Nhập email để nhận liên kết đăng nhập an toàn. Nếu đây là lần đầu, tài khoản sẽ được tạo khi bạn xác minh email.</p>
+        <label for="login-email">Email</label>
+        <input id="login-email" name="email" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" enterkeyhint="done" required>
+        <button type="submit">Gửi liên kết đăng nhập</button>
+      </form>
+      <div id="session-actions" hidden>
+        <p>Đã đăng nhập: <strong id="account-email"></strong></p>
+        <button id="logout" type="button">Đăng xuất</button>
+      </div>
+    </section>
     <section id="websites" class="grid" aria-label="Danh sách thiết kế"></section>
   </main>
 </body>

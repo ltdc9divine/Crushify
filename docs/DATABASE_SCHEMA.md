@@ -257,7 +257,7 @@ The base schema deliberately leaves out security and operational tables that nee
 
 `assets`: `PENDING → QUARANTINED → READY` or `REJECTED`; deletion uses `DELETION_PENDING → DELETED`.
 
-Custom project transitions and guard conditions are specified in [CUSTOM_DESIGN_WORKFLOW.md](CUSTOM_DESIGN_WORKFLOW.md).
+Custom project transitions and guard conditions are specified in [CUSTOM_DESIGN_WORKFLOW.md](business/CUSTOM_DESIGN_WORKFLOW.md).
 
 ## 5. Versioning and migrations
 

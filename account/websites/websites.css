@@ -16,6 +16,17 @@ h1 { margin: 8px 0; font: 500 clamp(2rem, 7vw, 3.2rem) Georgia, serif; }
 .intro { max-width: 64ch; color: #c5acbd; line-height: 1.7; }
 #notice { min-height: 2rem; margin: 26px 0; color: #d8c9d6; }
 #notice[data-state="error"] { color: #ffabb2; }
+.account-panel { margin: 20px 0; }
+#login-form { max-width: 520px; padding: 22px; border: 1px solid rgba(255, 157, 201, .18); border-radius: 18px; background: rgba(34, 22, 40, .9); }
+#login-form h2 { margin: 0 0 10px; font: 500 1.35rem Georgia, serif; }
+#login-form p { color: #c5acbd; line-height: 1.6; }
+#login-form label { display: block; margin: 16px 0 6px; color: #fff0f6; }
+#login-email { display: block; width: 100%; min-height: 48px; padding: 10px 12px; border: 1px solid rgba(255, 157, 201, .4); border-radius: 10px; background: #211728; color: #fff0f6; font: inherit; font-size: max(1rem, 1em); }
+#login-form button, #logout { min-height: 48px; margin-top: 12px; }
+#login-form button:focus-visible, #logout:focus-visible, #login-email:focus-visible { outline: 3px solid #ff9dc9; outline-offset: 3px; }
+#session-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+#session-actions p { margin: 0; color: #c5acbd; overflow-wrap: anywhere; }
+#session-actions strong { color: #fff0f6; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 18px; }
 .card { min-width: 0; padding: 22px; border: 1px solid rgba(255, 157, 201, .18); border-radius: 18px; background: rgba(34, 22, 40, .9); }
 .card h2 { margin: 0 0 14px; font: 500 1.45rem Georgia, serif; }

@@ -14,11 +14,13 @@
 
 ## 2. Route catalog
 
+The first route table is a proposed full-product contract. Many rows describe future or planned capabilities; implementation status is determined by the **Current local implementation** subsection below and must not be inferred from this catalog alone.
+
 | Method / path | Access | Purpose and result |
 |---|---|---|
 | `GET /catalog/templates` | Public | Active template IDs, published schema/renderer versions and purchasable package display info. |
 | `GET /templates/{templateId}/versions/{schemaVersion}` | Public | Defaults/editor metadata permitted for client authoring; no private data. |
-| `POST /customers/session` | Public, rate-limited | Request email login link/OTP; generic response prevents account enumeration. |
+| `POST /customers/session` | Public, rate-limited | Request an email magic link; generic response prevents account enumeration. The return path is restricted to supported template editors or `/account/websites/`. |
 | `POST /customers/session/verify` | Public, rate-limited | Consume one-time token and create secure session cookie. |
 | `DELETE /customers/session` | Customer | Revoke current session. |
 | `GET /customers/me` | Customer | Minimal profile and entitlements. |
@@ -41,16 +43,17 @@
 | `POST /custom-projects/{projectId}/revisions` | Owner | Request a revision against preview-ready work; enforce quote's included rounds/scope. |
 | `GET /p/{slug}` | Public | Serve the publication shell; the shell loads the allowlisted renderer payload from the publication API. |
 
-### Admin-only API (host identity gateway + application role; currently Cloudflare Access for the Worker)
+### Implemented admin API
 
-- `GET /admin/inquiries`, `GET /admin/projects/{id}`: review and queue work.
-- `POST /admin/projects/{id}/quotes`: create/issue a versioned quote; record scope and revision count.
-- `POST /admin/projects/{id}/transitions`: request a valid audited transition; no arbitrary status assignment.
-- `POST /admin/payments/{id}/reconcile`: audited recovery/reconciliation requiring evidence and elevated role; never a public endpoint.
-- `POST /admin/publications/{designId}` / `POST /admin/publications/{id}/revoke`: authorize publish/revoke after entitlement checks.
-- `POST /admin/assets/{id}/review`: approve/reject quarantined uploads.
+The current application admin boundary requires an authenticated customer session and an exact server-side `ADMIN_EMAILS` allowlist. Mutation routes also require CSRF validation. Implemented routes include:
 
-Admin handlers validate role, transition, reason, and actor; require step-up/MFA for payment reconciliation, refunds, and publication controls.
+- `GET /api/v1/admin/operations`: environment-scoped operations snapshot.
+- `PATCH /api/v1/admin/custom-design/requests/{requestId}`: review or request information on a custom-design request.
+- `POST /api/v1/admin/orders/{orderId}/manual-payment-confirmation`: confirm an eligible manual-bank-transfer payment.
+- `POST /api/v1/admin/fulfillments/recover`: run bounded audited fulfillment recovery.
+- `POST /api/v1/admin/publication-derivatives/reconcile`: run bounded publication-derivative reconciliation.
+
+These handlers enforce session, allowlist, CSRF, ownership, amount, lifecycle and media guards. They do not add Cloudflare Access, roles, MFA or an external identity provider. Cloudflare Access and step-up/MFA remain future hardening options, not current API behavior.
 
 ## 3. Example payloads
 
@@ -107,7 +110,7 @@ No client field for `amount`, `currency` authority, `paid`, `customer_id`, `orde
 
 ## 6. Compatibility and rollout
 
-Keep the present static pages usable while progressively calling the API. Introduce a browser adapter interface (`loadDraft`, `saveDraft`, `uploadAsset`, `createPreview`, `createCheckout`, `publishStatus`) and retain current local-only behavior until each endpoint is ready. API and template schema versions must be explicit; see [TEMPLATE_ENGINE.md](TEMPLATE_ENGINE.md).
+Keep the present static pages usable while progressively calling the API. Introduce a browser adapter interface (`loadDraft`, `saveDraft`, `uploadAsset`, `createPreview`, `createCheckout`, `publishStatus`) and retain current local-only behavior until each endpoint is ready. API and template schema versions must be explicit; see [TEMPLATE_ENGINE.md](templates/TEMPLATE_ENGINE.md).
 
 The database adapter refactor does not change the existing Our Universe request/response contract. Cloudflare remains the current HTTP runtime until a separately tested Vercel development adapter is added.
 
@@ -117,7 +120,7 @@ The following routes are implemented in the local Worker. Local integration test
 
 | Method / path | Access | Implemented behavior |
 |---|---|---|
-| `POST /customers/session` | Public, rate-limited | Request a one-time email link; local adapter writes the link to the Wrangler console only. |
+| `POST /customers/session` | Public, rate-limited | Request a one-time email link; local adapter writes the link to the Wrangler console only. Its validated return path supports the five template editors and `/account/websites/`. |
 | `POST /customers/session/verify` | Public | Consume a hashed, expiring, one-time token and set session/CSRF cookies. |
 | `DELETE /customers/session` | Customer + CSRF | Revoke the current session. |
 | `GET /customers/me` | Customer | Return minimal account data and CSRF token. |
@@ -150,7 +153,7 @@ The following routes are implemented in the local Worker. Local integration test
 | `GET /publications/{slug}/assets/{assetId}` | Public bearer URL | Read a consented, publication-specific derivative. |
 | `GET /p/{slug}` | Public | Serve the recipient shell; Vercel includes a rewrite for this route. |
 
-`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Worker selects one private storage adapter; Vercel uses Cloudinary or local-test-only mock storage. `src/product-catalog.ts` defines the approved policy for all five standard templates: 59,000 VND including the first hosting month, 10,000 VND per additional month, and 199,000 VND total for Lifetime. The public catalog exposes these approved prices independently of runtime checkout authorization. Production checkout is disabled; Preview checkout is disabled by default and can be enabled only through the explicit customer-flow gate with isolated Test-mode configuration. Order/payment routes are available in local test mode and that guarded Preview flow, but are not enabled in Production. Publication mutations have separate runtime gates. No live checkout, production fulfillment, production entitlement, refund, custom-project payment, or admin reconciliation exists. See [SEPAY_SETUP.md](SEPAY_SETUP.md), [PUBLICATION_AND_DELIVERY.md](PUBLICATION_AND_DELIVERY.md), and [SECURITY_PLAN.md](SECURITY_PLAN.md).
+`GET /previews/assets/{assetId}` serves media only with the preview bearer. The Worker selects one private storage adapter; Vercel uses Cloudinary or local-test-only mock storage. `src/product-catalog.ts` defines the approved policy for all five standard templates: 59,000 VND including the first hosting month, 10,000 VND per additional month, and 199,000 VND total for Lifetime. The public catalog exposes these approved prices independently of runtime checkout authorization. Production checkout is disabled; Preview checkout is disabled by default and can be enabled only through the explicit customer-flow gate with isolated Test-mode configuration. Order/payment routes are available in local test mode and that guarded Preview flow, but are not enabled in Production. Publication mutations have separate runtime gates. No live checkout, production fulfillment, production entitlement, refund, custom-project payment, or admin reconciliation exists. See [SEPAY_SETUP.md](payments/SEPAY_SETUP.md), [PUBLICATION_AND_DELIVERY.md](templates/PUBLICATION_AND_DELIVERY.md), and [SECURITY_PLAN.md](SECURITY_PLAN.md).
 
 ### Implemented local order contract
 
@@ -177,11 +180,11 @@ An event left in `RECEIVED` after a processing failure is retried atomically whe
 
 Business routes use `Storage` for private binary upload, read, deletion and private URL generation; database asset metadata remains in the selected database adapter. `R2StorageAdapter` keeps the existing private Worker-proxied R2 behavior, including legacy R2 object-key compatibility. `CloudinaryStorageAdapter` creates authenticated (`type=authenticated`) image assets using server-generated public IDs, signed requests and short-lived private download URLs. The Cloudinary API secret stays server-side. Uploads are proxied by the active Vercel Function or Worker runtime and keep the current request/response format; the API does not expose a direct signed upload URL to the browser.
 
-Cloudinary is currently permitted only in an explicitly identified Production runtime and uses the server-side `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` set. Vercel Preview rejects Cloudinary before storage initialization and has no approved durable storage provider; it does not instantiate `STORAGE_PROVIDER=mock`. Local development retains mock storage and rejects Cloudinary. `CLOUDINARY_STAGING_*` values and a staging-looking or distinct Cloud Name do not establish account ownership and do not enable Preview storage. Production rejects staging-specific Cloudinary credentials. R2 requires `STORAGE_PROVIDER=r2` and the `MEDIA` binding. Do not switch providers against existing asset rows without a separately planned binary migration: each adapter reads only its own provider's objects, and a config flip is not a data migration. Upload cleanup is attempted if metadata persistence fails; failed cleanup is marked `DELETION_PENDING` for retry. Deletion likewise records pending state before deleting the binary and marks metadata `DELETED` only after successful storage deletion.
+Cloudinary is optional for Preview customer checkout and is independent of SePay Test-mode payment. `PREVIEW_ASSET_UPLOADS_ENABLED` defaults off, so no-media checkout can proceed without Cloudinary while upload, private-media, derivative and asset-cleanup operations remain unavailable. Enabling Preview uploads requires `PREVIEW_ASSET_UPLOADS_ENABLED=true`, `STORAGE_PROVIDER=cloudinary`, the complete isolated `CLOUDINARY_STAGING_*` tuple, and `CLOUDINARY_PRODUCTION_CLOUD_NAME` as a non-secret cloud-name comparison. Generic Production Cloudinary credentials and staging/Production cloud-name matches are rejected in Preview. Local development retains mock storage and rejects Cloudinary; R2 requires `STORAGE_PROVIDER=r2` and the `MEDIA` binding. This documents the source gate only: Cloudinary configuration and actual uploads in the deployed Preview environment are not asserted. Do not switch providers against existing asset rows without a separately planned binary migration. Upload cleanup is attempted if metadata persistence fails; failed cleanup is marked `DELETION_PENDING` for retry. Deletion likewise records pending state before deleting the binary and marks metadata `DELETED` only after successful storage deletion.
 
 ### Vercel runtime adapter
 
-`api/v1.ts` receives the `/api/v1/:path*` Vercel rewrite, restores the original API path and query, and forwards it to `api/[...path].ts`. The latter converts Node `IncomingMessage`/`ServerResponse` to Web `Request`/`Response` and calls the same `handleApiRequest` used by the Worker. It preserves multiple session/CSRF cookies, supports GET/POST/PUT/PATCH/DELETE/OPTIONS, rejects other methods, bounds JSON to 64 KiB and binary image upload bodies to 4 MiB, and applies a 30-second request-body read timeout. Vercel Production uses `DATABASE_PROVIDER=turso`, `TURSO_DATABASE_URL`, and `TURSO_AUTH_TOKEN`; Preview requires `ENVIRONMENT=staging` and uses only `TURSO_STAGING_DATABASE_URL` and `TURSO_STAGING_AUTH_TOKEN`, without falling back to Production-style names. Preview Cloudinary is allowed only after full Preview customer-flow opt-in with dedicated staging credentials and a distinct Production cloud name; generic Production Cloudinary credentials are rejected. Preview does not instantiate in-memory mock storage; media operations fail closed without the isolated Cloudinary configuration. Local Vercel development retains mock storage and rejects Cloudinary credentials/provider selection. Production retains its generic Cloudinary credentials and existing selection behavior; it rejects staging Cloudinary configuration. The Turso connection is initialized on first API use and reused per warm function instance; migrations are never run on request. `APP_ORIGIN` must match exactly for credentialed CORS and CSRF; Preview may use the deployment-specific `VERCEL_URL` when no fixed origin is configured. A Preview deployment was probed; runtime database connection, schema, and provider credentials remain unverified.
+`api/v1.ts` receives the `/api/v1/:path*` Vercel rewrite, restores the original API path and query, and forwards it to `api/[...path].ts`. The latter converts Node `IncomingMessage`/`ServerResponse` to Web `Request`/`Response` and calls the same `handleApiRequest` used by the Worker. It preserves multiple session/CSRF cookies, supports GET/POST/PUT/PATCH/DELETE/OPTIONS, rejects other methods, bounds JSON to 64 KiB and binary image upload bodies to 4 MiB, and applies a 30-second request-body read timeout. Vercel Production uses `DATABASE_PROVIDER=turso`, `TURSO_DATABASE_URL`, and `TURSO_AUTH_TOKEN`; Preview requires `ENVIRONMENT=staging` and uses only `TURSO_STAGING_DATABASE_URL` and `TURSO_STAGING_AUTH_TOKEN`, without falling back to Production-style names. Preview Cloudinary is allowed only after full Preview customer-flow opt-in with dedicated staging credentials and a distinct Production cloud name; generic Production Cloudinary credentials are rejected. Preview does not instantiate in-memory mock storage; media operations fail closed without the isolated Cloudinary configuration. Local Vercel development retains mock storage and rejects Cloudinary credentials/provider selection. Production retains its generic Cloudinary credentials and existing selection behavior; it rejects staging Cloudinary configuration. After shared runtime-scope validation, `/catalog` uses the static product and payment policy without initializing database or storage; `/health/live` also does not touch providers. Other database-backed routes initialize the Turso connection on first use and reuse it per warm function instance; migrations are never run on request. `APP_ORIGIN` must match exactly for credentialed CORS and CSRF; Preview may use the deployment-specific `VERCEL_URL` when no fixed origin is configured. A Preview deployment was probed; runtime database connection, schema, and provider credentials remain unverified.
 
 ### Database adapter compatibility
 
@@ -189,4 +192,4 @@ The routes above call the shared `Database` interface and retain their existing 
 
 ## 8. Publication and delivery implementation limits
 
-The local publication handlers and `/p/{slug}` shell are described in [PUBLICATION_AND_DELIVERY.md](PUBLICATION_AND_DELIVERY.md). They have only been exercised with local D1/R2 and synthetic paid-order fixtures. All five template pages have editor adapters in source: Our Universe uses its own API client; Love Letter, Our Memories, Say Yes, and Distance Means Nothing register adapters with `shared/customer-editor.js` for owner-scoped draft save/reload, private preview, and checkout navigation. Photo-capable templates also serialize media through the shared asset APIs. This source-level integration is not proof of a deployed customer journey; no remote media bucket, Production checkout, real payment, or commercial customer delivery is enabled.
+The local publication handlers and `/p/{slug}` shell are described in [PUBLICATION_AND_DELIVERY.md](templates/PUBLICATION_AND_DELIVERY.md). They have only been exercised with local D1/R2 and synthetic paid-order fixtures. All five template pages have editor adapters in source: Our Universe uses its own API client; Love Letter, Our Memories, Say Yes, and Distance Means Nothing register adapters with `shared/customer-editor.js` for owner-scoped draft save/reload, private preview, and checkout navigation. Photo-capable templates also serialize media through the shared asset APIs. This source-level integration is not proof of a deployed customer journey; no remote media bucket, Production checkout, real payment, or commercial customer delivery is enabled.

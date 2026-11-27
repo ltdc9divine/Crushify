@@ -10,7 +10,6 @@ import { previewAssetUploadsEnabled } from "./preview-assets.ts";
 import {
   assetReferences,
   publicTemplateData,
-  supportsTemplateVersion,
   TEMPLATE_RENDERERS,
   validateTemplateData,
   type TemplateData,
@@ -811,7 +810,7 @@ export async function handlePreviewRoutes(
         !assetReferences(preview.template_id, data).includes(assetId)) {
       return apiError(requestId, 404, "NOT_FOUND", "Preview asset not found");
     }
-    return serveAsset(request, env, requestId, assetId, preview.customer_id, preview.design_id);
+    return serveAsset(env, requestId, assetId, preview.customer_id, preview.design_id);
   }
 
   const data = JSON.parse(preview.data_json) as TemplateData;
@@ -831,7 +830,6 @@ export async function handlePreviewRoutes(
 }
 
 export async function serveAsset(
-  request: Request,
   env: Env,
   requestId: string,
   assetId: string,

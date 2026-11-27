@@ -21,6 +21,7 @@ const templates = new Set([
   "distance-means-nothing",
 ]);
 let worker;
+let imageNormalizer;
 let logs = "";
 let ready = false;
 let magicToken = "";
@@ -33,21 +34,21 @@ function safeLogs() {
   return logs.replace(/magic_token=[A-Za-z0-9_-]+/g, "magic_token=[redacted]");
 }
 
-function d1Json(sql) {
-  const output = execFileSync(process.execPath, [
-    wrangler,
-    "d1", "execute", "crushify-local", "--local",
-    "--config", wranglerConfig,
-    "--persist-to", persistDirectory,
-    "--json", "--command", sql,
-  ], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  const parsed = JSON.parse(output);
-  const result = Array.isArray(parsed) ? parsed[0] : parsed;
-  return result?.results?.[0] ?? result?.result?.[0]?.results?.[0] ?? {};
+async function d1Json(sql) {
+  const response = await fetch(`${origin}/api/__integration/database`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "query", sql }),
+  });
+  if (!response.ok) {
+    throw new Error(`Local D1 integration query returned ${response.status}`);
+  }
+  const result = await response.json();
+  return result?.results?.[0] ?? {};
 }
 
 function startWorker() {
-  worker = spawn(process.execPath, [
+  const args = [
     wrangler,
     "dev",
     "--config", wranglerConfig,
@@ -61,7 +62,11 @@ function startWorker() {
     "--var", "LOCAL_TEST_CATALOG_OVERRIDE:true",
     "--var", "LOCAL_TEST_PRICING_POLICY:true",
     "--var", "PAYMENT_MODE:mock",
-  ], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+  ];
+  if (imageNormalizer) {
+    args.push("--var", `LOCAL_TEST_IMAGE_NORMALIZER_URL:${imageNormalizer.url}`);
+  }
+  worker = spawn(process.execPath, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   worker.stdout.on("data", capture);
   worker.stderr.on("data", capture);
 }
@@ -102,6 +107,7 @@ async function cleanup() {
   }
   await stopWorker();
   await emailSink.close();
+  if (imageNormalizer) await imageNormalizer.close();
   await delay(500);
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
@@ -117,7 +123,7 @@ async function cleanup() {
 try {
   await writeFile(wranglerConfig, JSON.stringify({
     name: "crushify-browser-fixture",
-    main: join(root, "src", "index.ts"),
+    main: join(root, "tests", "integration-worker.mjs"),
     compatibility_date: "2025-11-01",
     workers_dev: false,
     assets: {
@@ -148,6 +154,10 @@ try {
     "--config", wranglerConfig,
     "--persist-to", persistDirectory,
   ], { cwd: root, stdio: ["ignore", "ignore", "pipe"] });
+  if (process.argv.includes("--with-local-image-normalizer")) {
+    const { createLocalImageNormalizer } = await import("./local-image-normalizer.mjs");
+    imageNormalizer = await createLocalImageNormalizer();
+  }
   startWorker();
   await waitReady();
   await prepareSyntheticLogin();
@@ -162,6 +172,7 @@ try {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (request.method === "GET" && url.pathname === "/login") {
       const email = url.searchParams.get("email");
+      const returnTo = url.searchParams.get("return_to");
       if (!email) {
         response.writeHead(400).end();
         return;
@@ -170,7 +181,7 @@ try {
       const requested = await fetch(`${origin}/api/v1/customers/session`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, ...(returnTo ? { return_to: returnTo } : {}) }),
       });
       if (requested.status !== 202) {
         response.writeHead(500).end(JSON.stringify({ status: requested.status }));
@@ -196,21 +207,21 @@ try {
         return;
       }
       const customer = customerEmail
-        ? d1Json(`SELECT id FROM customers WHERE email_normalized = '${customerEmail.replaceAll("'", "''")}'`)
+        ? await d1Json(`SELECT id FROM customers WHERE email_normalized = '${customerEmail.replaceAll("'", "''")}'`)
         : {};
       const customerScope = customer.id
         ? ` AND customer_id = '${customer.id}'`
         : "";
-      const orderCount = d1Json(
+      const orderCount = await d1Json(
         `SELECT COUNT(*) AS count FROM orders
          WHERE design_id = '${designId.replaceAll("'", "''")}'${customerScope}`,
       );
-      const paymentCount = d1Json(
+      const paymentCount = await d1Json(
         `SELECT COUNT(*) AS count FROM payments p
          JOIN orders o ON o.id = p.order_id
          WHERE p.order_id = '${orderId.replaceAll("'", "''")}'${customerScope.replace("customer_id", "o.customer_id")}`,
       );
-      const matchingCount = d1Json(
+      const matchingCount = await d1Json(
         `SELECT COUNT(*) AS count FROM orders o
          WHERE o.design_id = '${designId.replaceAll("'", "''")}'
            AND o.id = '${orderId.replaceAll("'", "''")}'${customerScope.replace("customer_id", "o.customer_id")}`,

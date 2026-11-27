@@ -1372,7 +1372,6 @@ async function publish(
 }
 
 async function unpublishOrRevoke(
-  request: Request,
   env: Env,
   requestId: string,
   customerId: string,
@@ -1503,7 +1502,6 @@ async function revokeAssetConsent(
 }
 
 async function updateSnapshot(
-  request: Request,
   env: Env,
   requestId: string,
   customerId: string,
@@ -2517,11 +2515,11 @@ export async function handlePublicationRoutes(
         (parsed.value.expected_lifecycle_revision as number) < 1) {
       return apiError(requestId, 400, "VALIDATION_ERROR", "Expected expected_lifecycle_revision");
     }
-    return unpublishOrRevoke(request, env, requestId, customerId, publicationId,
+    return unpublishOrRevoke(env, requestId, customerId, publicationId,
       parsed.value.expected_lifecycle_revision as number, action === "revoke");
   }
   if (request.method === "PATCH") {
-    return updateSnapshot(request, env, requestId, customerId, publicationId, parsed.value);
+    return updateSnapshot(env, requestId, customerId, publicationId, parsed.value);
   }
   return apiError(requestId, 405, "METHOD_NOT_ALLOWED", "Method not allowed");
 }

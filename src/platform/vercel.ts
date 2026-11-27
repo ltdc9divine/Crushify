@@ -642,6 +642,46 @@ function runtimePaymentMode(environment: VercelEnvironment): Env["PAYMENT_MODE"]
   return policy.mode ?? undefined;
 }
 
+function catalogEnvironment(
+  environment: VercelEnvironment,
+  origin: string,
+): Env {
+  const localTestEnabled = environment.VERCEL_ENV === "development" &&
+    environment.LOCAL_TEST_MODE === "true";
+  const previewCustomerFlowEnabled = environment.VERCEL_ENV === "preview" &&
+    environment.PREVIEW_CUSTOMER_FLOW_ENABLED === "true";
+  const previewManualTransferEnabled = previewCustomerFlowEnabled &&
+    environment.PREVIEW_PAYMENT_MODE === "manual-bank-transfer";
+
+  return {
+    DB: livenessDatabase,
+    ENVIRONMENT: runtimeEnvironment(environment),
+    APP_ORIGIN: origin,
+    LOCAL_TEST_MODE: localTestEnabled ? "true" : undefined,
+    LOCAL_TEST_PRICING_POLICY: localTestEnabled &&
+        environment.LOCAL_TEST_PRICING_POLICY === "true"
+      ? "true"
+      : undefined,
+    PREVIEW_CUSTOMER_FLOW_ENABLED: previewCustomerFlowEnabled ? "true" : undefined,
+    PAYMENT_MODE: runtimePaymentMode(environment),
+    MANUAL_BANK_CODE: localTestEnabled
+      ? environment.MANUAL_BANK_CODE
+      : previewManualTransferEnabled
+        ? environment.PREVIEW_MANUAL_BANK_CODE
+        : undefined,
+    MANUAL_BANK_ACCOUNT: localTestEnabled
+      ? environment.MANUAL_BANK_ACCOUNT
+      : previewManualTransferEnabled
+        ? environment.PREVIEW_MANUAL_BANK_ACCOUNT
+        : undefined,
+    MANUAL_ACCOUNT_NAME: localTestEnabled
+      ? environment.MANUAL_ACCOUNT_NAME
+      : previewManualTransferEnabled
+        ? environment.PREVIEW_MANUAL_ACCOUNT_NAME
+        : undefined,
+  };
+}
+
 function createStorage(
   environment: VercelEnvironment,
   dependencies: VercelRuntimeDependencies,
@@ -1119,6 +1159,14 @@ export function createVercelApiHandler(
 
     if (!origin) {
       return apiError(requestId(), 500, "RUNTIME_CONFIGURATION_ERROR", "Application origin is not configured for this runtime");
+    }
+
+    if (url.pathname === "/api/v1/catalog") {
+      return withCors(
+        await handleApiRequest(request, catalogEnvironment(environment, origin)),
+        request,
+        origin,
+      );
     }
 
     const databaseError = validateDatabaseConfiguration(environment);

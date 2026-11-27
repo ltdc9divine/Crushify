@@ -6,6 +6,18 @@ import test from "node:test";
 
 const root = process.cwd();
 
+test("homepage and custom-design copy do not imply an active custom-service launch", async () => {
+  const [homepage, customDesign] = await Promise.all([
+    readFile(join(root, "index.html"), "utf8"),
+    readFile(join(root, "custom-design/index.html"), "utf8"),
+  ]);
+
+  assert.doesNotMatch(homepage, /<a[^>]*href="\/custom-design\/"[^>]*>Thiết kế riêng<\/a>/i);
+  assert.match(homepage, /<a href="mailto:hello@crushify\.love">Góp ý mẫu<\/a>/);
+  assert.match(customDesign, /CHƯA MỞ DỊCH VỤ THIẾT KẾ RIÊNG/);
+  assert.match(customDesign, /chưa tạo báo giá, chưa tạo đơn hàng và không cam kết thời gian/i);
+});
+
 test("Vercel release retains runtime entry points and migration packaging", async () => {
   const [
     vercelSource,

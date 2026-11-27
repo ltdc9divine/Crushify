@@ -3,6 +3,11 @@
 
   const notice = document.querySelector("#notice");
   const list = document.querySelector("#websites");
+  const loginForm = document.querySelector("#login-form");
+  const loginEmail = document.querySelector("#login-email");
+  const sessionActions = document.querySelector("#session-actions");
+  const accountEmail = document.querySelector("#account-email");
+  const logoutButton = document.querySelector("#logout");
   let csrfToken = "";
   let rows = [];
   let storagePlans = [];
@@ -29,8 +34,18 @@
     const body = response.headers.get("content-type")?.includes("application/json")
       ? await response.json()
       : null;
-    if (!response.ok) throw new Error(body?.error?.message || "Không thể hoàn tất yêu cầu.");
+    if (!response.ok) {
+      const error = new Error(body?.error?.message || "Không thể hoàn tất yêu cầu.");
+      error.status = response.status;
+      throw error;
+    }
     return body;
+  }
+
+  function showLogin(message, state = "info") {
+    loginForm.hidden = false;
+    sessionActions.hidden = true;
+    setNotice(message, state);
   }
 
   function selectedAssets(card) {
@@ -377,10 +392,15 @@
   }
 
   async function refresh() {
-    const response = await api("/publications");
-    rows = response.websites || [];
-    render();
-    setNotice(`${rows.length} thiết kế trong tài khoản.`);
+    list.setAttribute("aria-busy", "true");
+    try {
+      const response = await api("/publications");
+      rows = response.websites || [];
+      render();
+      setNotice(`${rows.length} thiết kế trong tài khoản.`);
+    } finally {
+      list.removeAttribute("aria-busy");
+    }
   }
 
   async function loadStoragePlans() {
@@ -560,20 +580,115 @@
     }
   });
 
-  async function start() {
+  async function loadDashboard() {
+    setNotice("Đang tải thiết kế và website của bạn…");
+    let storageError = null;
     try {
-      const customer = await api("/customers/me");
-      csrfToken = customer.csrf_token || "";
       await loadStoragePlans();
+    } catch (error) {
+      storageError = error;
+      storagePlans = [];
+      storageCheckoutEnabled = false;
+      renewalMonthlyRate = null;
+    }
+    try {
       await refresh();
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Hãy đăng nhập để xem thiết kế của bạn.", "error");
-      const link = document.createElement("a");
-      link.className = "button";
-      link.href = "/templates/our-universe/";
-      link.textContent = "Đăng nhập / mở Crushify";
-      list.replaceChildren(link);
+      list.replaceChildren();
+      addText(list, "p", "Không tải được dữ liệu tài khoản. Hãy thử tải lại.", "empty");
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "Thử tải lại";
+      retry.addEventListener("click", () => void loadDashboard());
+      list.append(retry);
+      setNotice(error instanceof Error ? error.message : "Không tải được dữ liệu tài khoản.", "error");
+      return;
     }
+    if (storageError) {
+      setNotice(
+        `Không tải được thông tin gói lưu trữ: ${storageError instanceof Error ? storageError.message : "Lỗi không xác định"}`,
+        "error",
+      );
+    }
+  }
+
+  loginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!loginForm.reportValidity()) return;
+    const button = loginForm.querySelector('button[type="submit"]');
+    button.disabled = true;
+    setNotice("Đang gửi liên kết đăng nhập…");
+    try {
+      await api("/customers/session", {
+        method: "POST",
+        body: JSON.stringify({
+          email: String(loginEmail.value || "").trim(),
+          return_to: "/account/websites/",
+        }),
+      });
+      setNotice("Nếu địa chỉ có thể dùng, liên kết đăng nhập sẽ được gửi qua email.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không gửi được liên kết đăng nhập.", "error");
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  logoutButton.addEventListener("click", async () => {
+    logoutButton.disabled = true;
+    try {
+      await api("/customers/session", { method: "DELETE" });
+      csrfToken = "";
+      loginForm.reset();
+      list.replaceChildren();
+      showLogin("Bạn đã đăng xuất.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể đăng xuất.", "error");
+    } finally {
+      logoutButton.disabled = false;
+    }
+  });
+
+  async function start() {
+    const params = new URLSearchParams(location.hash.slice(1));
+    const searchParams = new URLSearchParams(location.search);
+    const token = params.get("magic_token") || searchParams.get("magic_token");
+    if (token) {
+      history.replaceState(null, "", "/account/websites/");
+      try {
+        await api("/customers/session/verify", {
+          method: "POST",
+          body: JSON.stringify({ token }),
+        });
+      } catch (error) {
+        showLogin(
+          error instanceof Error ? error.message : "Liên kết đăng nhập không hợp lệ hoặc đã hết hạn.",
+          "error",
+        );
+        return;
+      }
+    }
+
+    let customer;
+    try {
+      customer = await api("/customers/me");
+    } catch (error) {
+      if (error?.status === 401) {
+        showLogin("Đăng nhập để xem thiết kế và website của bạn.");
+      } else {
+        setNotice(error instanceof Error ? error.message : "Không thể xác minh phiên đăng nhập.", "error");
+      }
+      return;
+    }
+    csrfToken = customer.csrf_token || "";
+    if (!csrfToken) {
+      setNotice("Phiên đăng nhập chưa sẵn sàng. Hãy tải lại trang hoặc đăng nhập lại.", "error");
+      return;
+    }
+    loginForm.hidden = true;
+    sessionActions.hidden = false;
+    accountEmail.textContent = customer.email || "";
+    await loadDashboard();
   }
 
   void start();

@@ -8,10 +8,10 @@ Protect customer contact details, private drafts/briefs, uploaded originals, pre
 
 ## 2. Admin authentication and access
 
-- Put admin routes behind Cloudflare Access using a managed identity provider, MFA and allowlisted operator identities.
-- Enforce application roles (`support`, `designer`, `finance`, `admin`) and least privilege; Access authentication alone does not replace authorization.
-- Step-up MFA/dual review for refunds, manual payment reconciliation, deletion, role changes and unpublishing.
-- Short-lived secure sessions, revocation, audit all privileged actions; no shared accounts.
+- The implemented admin boundary uses an active customer magic-link session plus an exact server-side `ADMIN_EMAILS` allowlist. It has no MFA or separate application role model.
+- Admin mutations require CSRF validation in addition to the allowlist check. Manual payment confirmation, fulfillment recovery and publication-derivative reconciliation are environment-gated and audited.
+- Cloudflare Access, managed identity/MFA, application roles (`support`, `designer`, `finance`, `admin`) and step-up/dual review remain future hardening options. They must not be described as already enforced.
+- Use short-lived secure sessions, revocation and immutable audit records; do not use shared accounts.
 - Secrets only in environment-specific server-side secret stores (currently none are configured for Vercel, Netlify, Turso, Cloudinary or SePay); rotate/revoke and never include in GitHub/browser/logs.
 
 ## 3. Customer authentication and authorization
@@ -83,7 +83,7 @@ IDOR across every entity; preview expiry/revocation; public slug collision; XSS 
 - Local Node HTTP test code covers multi-cookie session/CSRF flow, API contract, CORS allow/deny, and safe Turso errors. No hosted Vercel test, real Turso test, or Cloudinary account test is verified here. Current Vercel plan eligibility for commercial use is **NOT VERIFIED**; owner confirmation is required before commercial activity.
 - Legacy Worker R2 bucket/CORS configuration and current deployment state are **NOT VERIFIED**. Switching storage providers does not move existing binaries; a separate migration and reconciliation plan is required. Do not assume changing the provider setting is a safe rollback after writes.
 - Session cookies are `Secure` outside explicit local test mode. `ENVIRONMENT=staging` disables local mail mode even if `LOCAL_TEST_MODE` is accidentally set. Preview capabilities are passed in the Authorization header; the browser link carries the token in its fragment. These flows have local integration coverage only.
-- No admin authentication, checkout/payment protection, published media, production rate limiting/WAF policy, backup/restore, deletion-retention policy, security assessment, or production secrets/deployment is implemented.
+- Implemented admin authentication is limited to the magic-link session plus exact-email allowlist model described above; it does not provide MFA. Implemented checkout/payment, HMAC webhook, manual-settlement, publication, ownership, asset authorization and lifecycle protections are not a substitute for the remaining Production rate limiting/WAF, backup/restore, deletion-retention, operational, security-assessment and deployed-secret work.
 
 ## 11. Legacy Cloudflare staging notes
 

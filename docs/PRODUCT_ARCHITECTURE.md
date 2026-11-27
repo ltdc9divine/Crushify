@@ -1,6 +1,6 @@
 # Crushify Product & System Architecture
 
-**Status:** architecture migration in progress. Cloudflare Worker/D1/R2 remains available as the rollback runtime. A Vercel Node Functions adapter reuses the shared API router and Turso/Cloudinary adapters; local tests use isolated Turso and in-memory storage. Local synthetic orders, SePay HMAC webhook verification, and paid-order-gated publication/delivery are implemented; source also supports a separately gated Vercel Preview customer flow. Production checkout and publication mutations remain disabled. No provider account, remote database, host, or payment has been used.
+**Status:** architecture migration in progress. Cloudflare Worker/D1/R2 remains available as the rollback runtime. A Vercel Node Functions adapter reuses the shared API router and Turso adapter; Cloudinary is optional for the customer flow and separately gated in Preview and for enabled uploads. Local synthetic orders, SePay HMAC webhook verification, and paid-order-gated publication/delivery are implemented; source also supports a separately gated Vercel Preview customer flow. Production checkout and publication mutations remain disabled. No provider account, remote database, host, or payment has been used.
 **Audit basis:** repository contents and local browser checks on 2026-11-05.
 **Decision boundary:** SePay is only wired for local `mock`/Test mode behavior. This design does not set production prices or claim legal/compliance approval.
 
@@ -26,17 +26,18 @@ Browser (current HTML/CSS/JavaScript + template-specific renderers)
    ├── static GET ───────────────> Vercel Development / Netlify candidate
    └── /api/v1/* ────────────────> shared application services
                                       ├── database adapter ──> Turso/libSQL
-                                      ├── storage adapter ───> Cloudinary
+                                      ├── storage adapter ───> R2 or gated Cloudinary
                                       ├── payment adapter ────> SePay
                                       └── email adapter
 
-SePay Test mode webhook ─ signed event ─> local-only API route
-Admin (MFA/role protected) ───────> future admin API
+SePay Test mode webhook ─ signed event ─> explicitly gated local/Preview API route
+Admin (magic-link session + exact-email allowlist) ───────> current application admin API
+MFA, external identity provider and application roles ───────────────> future hardening
 
 Rollback path: Cloudflare Worker ──> D1 + R2
 ```
 
-The Vercel HTTP adapter and Turso/Cloudinary runtime wiring are implemented locally; the Cloudflare Worker/D1/R2 adapter remains available. SePay Live, Netlify, production payment configuration and deployment remain unimplemented. Do not point new code at customer data until an explicit, verified database and binary data migration plan exists.
+The Vercel HTTP adapter and Turso runtime wiring are implemented locally; Cloudinary and the Preview upload gate are separately opt-in and require staging credentials. The Cloudflare Worker/D1/R2 adapter remains available. SePay Live, Netlify, production payment configuration and deployment remain unimplemented. Do not point new code at customer data until an explicit, verified database and binary data migration plan exists.
 
 ### Runtime boundaries
 
@@ -44,8 +45,8 @@ The Vercel HTTP adapter and Turso/Cloudinary runtime wiring are implemented loca
 - Use Cloudflare Workers Static Assets or Vercel static hosting for the homepage, template source files, and versioned assets. Static assets are not a per-customer HTML publishing database.
 - Route `/api/v1/*`, authenticated previews, local-only payment webhooks, and the current `/p/{slug}` publication shell through the selected server-side API adapter. Keep public static routes cacheable independently of API responses. The publication shell and lifecycle have only been verified locally.
 - Use the database contract for metadata and state transitions only. Turso/libSQL uses the existing SQLite migrations; never put image bytes/base64 in the database.
-- Keep original and draft media private in the selected storage adapter. Cloudinary signed authenticated uploads use server-side secrets; no upload signature or Cloudinary secret is exposed to clients.
-- A published gift uses a high-entropy slug, e.g. `/g/<random-token>`. The public renderer resolves a published design version and its pinned template version. Do not expose a draft or an enumerable D1 ID.
+- Keep original and draft media private in the selected storage adapter. In Preview, Cloudinary uploads are enabled only when `PREVIEW_ASSET_UPLOADS_ENABLED=true`, the customer-flow gate is complete and dedicated staging Cloudinary configuration validates; unset or false uploads keep no-media checkout independent of Cloudinary.
+- A published gift uses the supported public route `/p/{slug}`. The public renderer resolves a published design version and its pinned template version from the publication API. Do not expose a draft or an enumerable D1 ID.
 
 ### Environments
 

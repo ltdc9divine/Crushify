@@ -334,9 +334,18 @@ describe("Vercel database environment selection", () => {
       }), null);
     });
 
-    it("maps Preview manual transfer settings into the runtime checkout capability", async () => {
+    it("serves the public catalog without connecting optional database or storage providers", async () => {
       const manualPreview = {
         ...enabledPreview,
+        DATABASE_PROVIDER: undefined,
+        TURSO_STAGING_DATABASE_URL: undefined,
+        TURSO_STAGING_AUTH_TOKEN: undefined,
+        STORAGE_PROVIDER: undefined,
+        CLOUDINARY_STAGING_CLOUD_NAME: undefined,
+        CLOUDINARY_STAGING_API_KEY: undefined,
+        CLOUDINARY_STAGING_API_SECRET: undefined,
+        CLOUDINARY_PRODUCTION_CLOUD_NAME: undefined,
+        PREVIEW_ASSET_UPLOADS_ENABLED: "false",
         PREVIEW_PAYMENT_MODE: "manual-bank-transfer",
         PREVIEW_SEPAY_WEBHOOK_SECRET: undefined,
         PREVIEW_SEPAY_BANK_CODE: undefined,
@@ -346,25 +355,47 @@ describe("Vercel database environment selection", () => {
         PREVIEW_MANUAL_BANK_ACCOUNT: "1234567890",
         PREVIEW_MANUAL_ACCOUNT_NAME: "Crushify Preview",
       };
-      const database: Database = {
-        prepare() {
-          throw new Error("public catalog must not query the database");
-        },
-        async batch() {
-          throw new Error("public catalog must not query the database");
-        },
-      };
+      let databaseConnections = 0;
+      let storageCreations = 0;
       const handler = createVercelApiHandler(manualPreview, {
         async connectDatabase() {
-          return { database, close: () => undefined };
+          databaseConnections++;
+          throw new Error("public catalog must not connect to the database");
         },
-        createCloudinaryStorage: () => new MemoryStorageAdapter(),
+        createCloudinaryStorage() {
+          storageCreations++;
+          throw new Error("public catalog must not create storage");
+        },
       });
       const response = await handler(new Request(
         "https://preview-guest-mode.crushify.test/api/v1/catalog",
       ));
       assert.equal(response.status, 200);
       assert.equal((await response.json() as { checkout_enabled: boolean }).checkout_enabled, true);
+      assert.equal(databaseConnections, 0);
+      assert.equal(storageCreations, 0);
+
+      const productionHandler = createVercelApiHandler({
+        VERCEL_ENV: "production",
+        ENVIRONMENT: "production",
+        VERCEL_PROJECT_PRODUCTION_URL: "crushify.test",
+      }, {
+        async connectDatabase() {
+          databaseConnections++;
+          throw new Error("public catalog must not connect to the database");
+        },
+        createCloudinaryStorage() {
+          storageCreations++;
+          throw new Error("public catalog must not create storage");
+        },
+      });
+      const productionResponse = await productionHandler(new Request(
+        "https://crushify.test/api/v1/catalog",
+      ));
+      assert.equal(productionResponse.status, 200);
+      assert.equal((await productionResponse.json() as { checkout_enabled: boolean }).checkout_enabled, false);
+      assert.equal(databaseConnections, 0);
+      assert.equal(storageCreations, 0);
     });
 
     it("accepts a complete dedicated Preview Resend mode and rejects incomplete or cross-scoped mail", () => {

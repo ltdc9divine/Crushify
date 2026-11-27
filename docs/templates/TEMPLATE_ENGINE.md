@@ -69,7 +69,7 @@ interface PublishingService {
 }
 ```
 
-API contracts in [API_SPECIFICATION.md](API_SPECIFICATION.md) are authoritative. All five template pages have editor adapters in source: Our Universe uses its own API client, while the other four register with `shared/customer-editor.js` for draft save/reload, private preview, and checkout navigation. Photo-capable templates serialize media through the shared asset APIs. These are local/source capabilities; deployed customer flows and production checkout/publication remain unverified or gated.
+API contracts in [API_SPECIFICATION.md](../API_SPECIFICATION.md) are authoritative. All five template pages have editor adapters in source: Our Universe uses its own API client, while the other four register with `shared/customer-editor.js` for draft save/reload, private preview, and checkout navigation. Photo-capable templates serialize media through the shared asset APIs. These are local/source capabilities; deployed customer flows and production checkout/publication remain unverified or gated.
 
 ## 4. Schema validation and compatibility
 

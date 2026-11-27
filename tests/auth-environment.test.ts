@@ -313,6 +313,18 @@ describe("environment-scoped authentication", () => {
     const token = messages[0].text.match(/#magic_token=([A-Za-z0-9_-]+)/)?.[1];
     assert.ok(token);
 
+    const dashboardLogin = await handleApiRequest(
+      makeRequest("/customers/session", "POST", {
+        body: JSON.stringify({
+          email: "qa-auth@example.test",
+          return_to: "/account/websites/",
+        }),
+      }),
+      env,
+    );
+    assert.equal(dashboardLogin.status, 202);
+    assert.match(messages[1].text, /\/account\/websites\/#magic_token=/);
+
     const verified = await handleApiRequest(
       makeRequest("/customers/session/verify", "POST", {
         body: JSON.stringify({ token }),
