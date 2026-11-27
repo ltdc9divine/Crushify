@@ -69,7 +69,7 @@ describe("guest template preview", () => {
     assert.equal(elements[0].attributes["aria-label"], "Chế độ xem thử khách");
     assert.equal(elements[1].attributes["aria-live"], "polite");
     assert.equal(elements[2].children[0].type, "button");
-    elements[2].children[0].listeners.click();
+    elements[2].children[1].listeners.click();
     assert.equal(location.reloaded, true);
   });
 
@@ -129,7 +129,7 @@ describe("guest template preview", () => {
     vm.runInNewContext(read("../shared/guest-preview.js"), context);
     resetHandler = (event) => event.preventDefault();
 
-    elements[2].children[0].listeners.click();
+    elements[2].children[1].listeners.click();
 
     assert.equal(location.replacedWith, undefined);
     assert.equal(context.window.resetEvent.type, "crushify:guest-reset");
@@ -185,6 +185,7 @@ describe("guest template preview", () => {
       const html = read(path);
       assert.match(html, /\/shared\/guest-preview\.css/);
       assert.match(html, /\/shared\/guest-preview\.js/);
+      assert.match(html, /\/shared\/guest-draft\.js/);
       assert.match(scripts, new RegExp(`guestHref: 'templates/${templateId === "distance-means-nothing" ? "distance-means-nothing" : templateId}/index\\.html\\?guest=1'`));
       assert.match(scripts, /template-guest-link/);
       assert.match(home, /id="templateGrid"/);
@@ -192,7 +193,8 @@ describe("guest template preview", () => {
       assert.match(bootstrap, /get\("guest"\) === "1"/);
     }
 
-    assert.match(editor, /get\("guest"\) === "1"\) return;/);
+    assert.match(editor, /get\("guest"\) === "1"\)\s*\{/);
+    assert.match(editor, /window\.CRUSHIFY_GUEST_EDITOR = adapter/);
     assert.match(guestStyles, /body\.crushify-guest-mode #app/);
     assert.match(guestStyles, /body\.crushify-guest-template-our-memories #tabs/);
     assert.match(guestStyles, /body\.crushify-guest-template-distance-means-nothing:not\(\.view\) #app/);
@@ -221,6 +223,7 @@ describe("guest template preview", () => {
     assert.match(distance, /name:'Linh',city:'Tokyo'/);
     assert.match(universe, /e\.oninput=\(\)=>\{set\(D,path,e\.value\);renderText\(\);scheduleSave\(\)\}/);
     assert.match(universe, /window\.CRUSHIFY_GUEST_PREVIEW===true\|\|Q\.get\('guest'\)==='1'\)initializeGuestPreview\(\)/);
+    assert.match(universe, /if\(window\.CRUSHIFY_GUEST_PREVIEW===true\|\|Q\.get\('guest'\)==='1'\)\{setRc\(true\)/);
   });
 
   it("keeps guest demo edits and photo previews client-side without order or payment requests", () => {
@@ -366,5 +369,97 @@ describe("guest template preview", () => {
     assert.match(styles, /\.template-card-link::after\{content:"";position:absolute;inset:0\}/);
     assert.match(styles, /\.template-order-link,\.round-arrow,\.template-preview\{position:relative;z-index:1\}/);
     assert.match(home, /href="templates\/our-universe\/index\.html\?guest=1" id="modalChoose"/);
+  });
+
+  it("adds a guest order CTA that saves a temporary draft before authentication", async () => {
+    const body = fakeElement();
+    const elements = [];
+    const events = {};
+    const savedDrafts = [];
+    const location = {
+      pathname: "/templates/our-universe/index.html",
+      search: "?guest=1",
+      hash: "",
+      assign(url) { this.assigned = url; },
+      reload() {},
+    };
+    const window = {
+      CRUSHIFY_GUEST_EDITOR: {
+        templateId: "our-universe",
+        schemaVersion: 1,
+        async serializeGuest() { return { headline: "A custom universe" }; },
+      },
+      CrushifyGuestDraft: {
+        createStore() {
+          return {
+            async save(draft) {
+              savedDrafts.push(draft);
+              return { draftId: "123e4567-e89b-42d3-a456-426614174000" };
+            },
+            async cleanupExpired() {},
+          };
+        },
+      },
+      addEventListener(type, callback) { events[type] = callback; },
+      dispatchEvent() { return true; },
+    };
+    const context = {
+      URLSearchParams,
+      Event,
+      window,
+      location,
+      history: { replaceState() {} },
+      document: {
+        body,
+        documentElement: { style: { setProperty() {} } },
+        createElement() {
+          const element = fakeElement();
+          elements.push(element);
+          return element;
+        },
+        querySelectorAll() { return []; },
+      },
+    };
+
+    vm.runInNewContext(read("../shared/guest-preview.js"), context);
+    events["crushify:guest-editor-ready"]();
+    await elements[2].children[0].listeners.click();
+
+    assert.deepEqual(JSON.parse(JSON.stringify(savedDrafts)), [{
+      templateId: "our-universe",
+      schemaVersion: 1,
+      data: { headline: "A custom universe" },
+    }]);
+    assert.equal(location.assigned,
+      "/templates/our-universe/?guest_draft=123e4567-e89b-42d3-a456-426614174000");
+  });
+
+  it("previews guest edits locally and routes restored drafts to checkout", () => {
+    const universe = read("../templates/our-universe/index.html");
+    const editor = read("../shared/customer-editor.js");
+    const auth = read("../src/auth.ts");
+    for (const [id, path] of templatePages) {
+      const source = id === "our-memories"
+        ? read("../templates/our-memories/our-memories.js")
+        : id === "say-yes"
+          ? read("../templates/say-yes/say-yes.js")
+          : id === "distance-means-nothing"
+            ? read("../templates/distance-means-nothing/app.js")
+            : read(path);
+      if (id !== "our-universe") {
+        assert.match(source, /async serializeGuest\(/);
+        assert.match(source, /async hydrateGuest\(/);
+      }
+    }
+    assert.match(universe, /setRc\(true\);setApiStatus\('Đang xem trước nội dung tùy chỉnh trong tab này\.'/);
+    const guestInitializer = universe.match(/function initializeGuestPreview\(\)\{([^}]+)\}/)?.[1] ?? "";
+    const readyEvent = "window.dispatchEvent(new Event('crushify:guest-editor-ready'))";
+    assert.ok(guestInitializer.includes(readyEvent));
+    assert.ok(guestInitializer.indexOf("renderText()") < guestInitializer.indexOf(readyEvent));
+    assert.equal(universe.split(readyEvent).length - 1, 1);
+    assert.match(editor, /adapter\.hydrateGuest\(draft\.data/);
+    assert.match(editor, /if \(!await save\(\)\) throw new Error\("Bản thiết kế chưa lưu được/);
+    assert.match(editor, /location\.assign\(`\/checkout\/\?design_id=/);
+    assert.match(auth, /guest_draft=\[0-9a-f\]/);
   });
 });

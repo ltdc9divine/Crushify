@@ -47,6 +47,17 @@
   cursor: pointer;
 }
 
+.crushify-guest-controls button:disabled {
+  cursor: wait;
+}
+
+.crushify-guest-controls .crushify-guest-order {
+  border-color: rgba(255, 172, 208, .8);
+  background: linear-gradient(90deg, #f04db2, #ff9ccb);
+  color: #1d0716;
+  font-weight: 700;
+}
+
 body.crushify-guest-mode #app {
   height: calc(100% - var(--crushify-guest-offset, 0px));
   margin-top: var(--crushify-guest-offset, 0px);

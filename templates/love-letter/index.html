@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-+oplsmPWqrjKA+gPreyBm8upMNX9yhnZjAlEzcRKIsQ='; style-src 'self' https://fonts.googleapis.com 'sha256-Msn0QZ2aUpG4aEf1DHuqi92I/TfzBd1vGfbTpmB2jFc='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js 'sha256-zaD8JHc0HylwrHcSO2GOyw86fiz7Kl/+1ChaHieVPPg='; style-src 'self' https://fonts.googleapis.com 'sha256-Msn0QZ2aUpG4aEf1DHuqi92I/TfzBd1vGfbTpmB2jFc='; style-src-attr 'unsafe-hashes' 'sha256-Q6l/5JQ8gS4/hmb/iuI7UP6nV9T9k4kqc1rFNxUTXG0=' 'sha256-xT6h2iOFCmc+b0YYoNajguP1/DpiqxRRQMAc8B17igQ='; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
 <meta name="referrer" content="no-referrer">
 <title>Crushify · Lá thư tình 3D</title>
 <link rel="stylesheet" href="/shared/publication-bootstrap.css">
@@ -86,6 +86,7 @@ button.on{border-color:var(--a);background:rgba(255,255,255,.16)}button:disabled
 <div id="lb" hidden><img alt="Ảnh kỷ niệm"></div>
 
 <script src="/shared/guest-preview.js"></script>
+<script src="/shared/guest-draft.js"></script>
 <script src="/shared/publication-bootstrap.js"></script>
 <script src="/shared/customer-editor-data-url.js"></script>
 <script src="/shared/customer-editor.js"></script>
@@ -367,11 +368,14 @@ let customerSchemaVersion=2;
 window.registerCrushifyCustomerEditor({
 templateId:'love-letter',schemaVersion:2,supportedSchemaVersions:[1,2],
 setSchemaVersion(version){customerSchemaVersion=version;$('#up').disabled=version!==2},
+async serializeGuest(){return{from:D.from,to:D.to,title:D.title,msg:D.msg,secret:D.secret,theme:D.theme,spd:D.spd,photos:up.map((photo,index)=>({url:photo.toDataURL('image/jpeg',.82),caption:D.photos?.[index]?.caption||''}))}},
 async serialize(upload){const data={from:D.from,to:D.to,title:D.title,msg:D.msg,secret:D.secret,theme:D.theme,spd:D.spd};
 if(customerSchemaVersion===2){const photos=[];for(let i=0;i<up.length;i++){const photo=D.photos?.[i],asset_id=photo?.asset_id||(photo?.url&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(photo.url)?photo.url:await upload(up[i].toDataURL('image/jpeg',.82)));photos.push({asset_id,caption:photo?.caption||''})}D.photos=photos;data.photos=photos}
 return data},
 async hydrate(data,assetUrl){Object.assign(D,data);for(const key of Object.keys(F))F[key].value=D[key]??'';$('#up').disabled=customerSchemaVersion!==2;$('#cnt').textContent=D.msg.length+' / 500';lay();draw(lp);drawTag();applyTheme(D.theme);
 const photos=Array.isArray(data.photos)?data.photos:[];const urls=await Promise.all(photos.map(async photo=>{try{return await assetUrl(photo.asset_id||photo.url)}catch{return ''}}));D.photos=photos.map((photo,index)=>({...photo,url:urls[index]}));await hydratePhotos();syncPh()}
+,
+async hydrateGuest(data,assetUrl){for(const photo of data.photos||[])await assetUrl(photo.asset_id||photo.url);return this.hydrate(data,assetUrl)}
 });
 if(!window.CRUSHIFY_GUEST_PREVIEW&&Q.get('guest')!=='1')window.__love={get S(){return S},openL,closeL,crystal,pick:click};
 addEventListener('pagehide',()=>{cancelAnimationFrame(raf);ro.disconnect();scene.traverse(o=>{o.geometry&&o.geometry.dispose();[].concat(o.material||[]).forEach(m=>{m.map&&m.map.dispose();m.dispose()})});envRT&&envRT.dispose();R.dispose()});

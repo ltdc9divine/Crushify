@@ -157,9 +157,11 @@ const THREE_INTEGRITY={'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/thr
 if(window.THREE)start();else load(['https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js','https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js','vendor/three.min.js'],start,fallback);
 window.registerCrushifyCustomerEditor({
 templateId:'say-yes',schemaVersion:1,
+async serializeGuest(){const data=structuredClone(D);for(const photo of data.photos||[])delete photo.asset_id;return data},
 async serialize(upload){const photos=[];for(const photo of D.photos){const asset_id=photo.asset_id||(ASSET_ID.test(photo.url)?photo.url:await upload(photo.url));photo.asset_id=asset_id;photos.push({asset_id,caption:photo.caption||''})}
 return{templateId:'say-yes',sender:D.sender,receiver:D.receiver,nickname:D.nickname,question:D.question,subtitle:D.subtitle,yesLabel:D.yesLabel,noLabel:D.noLabel,yesHeadline:D.yesHeadline,yesMessage:D.yesMessage,letter:D.letter,signature:D.signature,specialDate:D.specialDate||'',noMessage:D.noMessage,noBackLabel:D.noBackLabel,showNoMessage:D.showNoMessage,theme:D.theme,animation:D.animation,particles:D.particles,autoRotate:D.autoRotate,music:D.music||'',photos}},
-async hydrate(data,assetUrl){D=structuredClone(data);let failed=0;for(const photo of D.photos){try{photo.url=await assetUrl(photo.asset_id)}catch{photo.url=sky('#f8edf3','#d68ab0','#5b2946');failed++}}editor();apply();if(failed)$('#upload-status').textContent=`${failed} ảnh không tải được. Bạn có thể xóa ảnh lỗi và thêm ảnh khác.`}
+async hydrateGuest(data,assetUrl){D=structuredClone(data);for(const photo of D.photos||[]){photo.url=await assetUrl(photo.asset_id||photo.url);delete photo.asset_id}editor();apply()},
+async hydrate(data,assetUrl){D=structuredClone(data);let failed=0;for(const photo of D.photos){try{photo.url=await assetUrl(photo.asset_id||photo.url)}catch{photo.url=sky('#f8edf3','#d68ab0','#5b2946');failed++}}editor();apply();if(failed)$('#upload-status').textContent=`${failed} ảnh không tải được. Bạn có thể xóa ảnh lỗi và thêm ảnh khác.`}
 });
 window.addEventListener('crushify:guest-reset',event=>{
 if(!window.CRUSHIFY_GUEST_PREVIEW)return;

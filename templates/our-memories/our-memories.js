@@ -150,9 +150,13 @@ const THREE_INTEGRITY={'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/thr
 if(window.THREE)start();else load(['https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js','https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js','vendor/three.min.js'],start,()=>{fallback();ui();apply()});
 window.registerCrushifyCustomerEditor({
 templateId:'our-memories',schemaVersion:1,
+async serializeGuest(){const data=structuredClone(D);delete data.coverImageAssetId;for(const chapter of data.chapters||[])for(const photo of chapter.photos||[])delete photo.asset_id;return data},
 async serialize(upload){const cover=D.coverImageAssetId||(ASSET_ID.test(D.coverImage)?D.coverImage:D.coverImage?await upload(D.coverImage):'');if(cover)D.coverImageAssetId=cover;
 const chapters=[];for(const chapter of D.chapters){const photos=[];for(const photo of chapter.photos){const asset_id=photo.asset_id||(ASSET_ID.test(photo.url)?photo.url:await upload(photo.url));photo.asset_id=asset_id;photos.push({asset_id,caption:photo.caption||''})}chapters.push({id:chapter.id,title:chapter.title,date:chapter.date||'',description:chapter.description||'',photos})}
 return{templateId:'our-memories',sender:D.sender,receiver:D.receiver,nickname:D.nickname,albumTitle:D.albumTitle,subtitle:D.subtitle,anniversary:D.anniversary||'',theme:D.theme,animation:D.animation,coverImage:cover,introduction:D.introduction,story:D.story,chapters,closingMessage:D.closingMessage,signature:D.signature,music:D.music||''}},
+async hydrateGuest(data,assetUrl){D=structuredClone(data);const coverId=D.coverImage;D.coverImageAssetId=ASSET_ID.test(coverId||'')?coverId:'';D.coverImage=coverId?await assetUrl(coverId):''
+for(const chapter of D.chapters||[])for(const photo of chapter.photos||[]){photo.url=await assetUrl(photo.asset_id||photo.url);delete photo.asset_id}
+editor();apply()},
 async hydrate(data,assetUrl){D=structuredClone(data);let failed=0;const coverId=D.coverImage;D.coverImageAssetId=coverId||'';try{D.coverImage=coverId?await assetUrl(coverId):''}catch{D.coverImage='';failed++}
 for(const chapter of D.chapters)for(const photo of chapter.photos){try{photo.url=await assetUrl(photo.asset_id)}catch{photo.url=sky('#f8edf3','#d68ab0','#5b2946');failed++}}
 editor();apply();if(failed)$('#upload-status').textContent=`${failed} ảnh không tải được. Bạn có thể xóa ảnh lỗi và thêm ảnh khác.`

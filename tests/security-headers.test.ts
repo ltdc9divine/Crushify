@@ -12,6 +12,7 @@ const policyRoutes = [
   { route: "/templates/our-memories/", file: "templates/our-memories/index.html" },
   { route: "/templates/say-yes/", file: "templates/say-yes/index.html" },
   { route: "/templates/distance-means-nothing/", file: "templates/distance-means-nothing/index.html" },
+  { route: "/checkout/", file: "checkout/index.html" },
   { route: "/admin/", file: "admin/index.html" },
   { route: "/p/index.html", file: "p/index.html" },
 ];
@@ -21,34 +22,60 @@ function hash(value: string): string {
   return `'sha256-${createHash("sha256").update(browserText).digest("base64")}'`;
 }
 
-function parseHeaderRules(source: string): Map<string, Map<string, string>> {
+type VercelHeaderRule = {
+  source: string;
+  headers: Array<{ key: string; value: string }>;
+};
+
+async function readVercelHeaderRules(): Promise<Map<string, Map<string, string>>> {
+  const vercel = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8")) as {
+    headers?: VercelHeaderRule[];
+  };
+  assert.ok(Array.isArray(vercel.headers), "Missing Vercel header rules");
   const rules = new Map<string, Map<string, string>>();
-  let current: Map<string, string> | undefined;
-  for (const line of source.split(/\r?\n/)) {
-    if (!line || line.startsWith("#")) continue;
-    if (!line.startsWith(" ")) {
-      current = new Map();
-      rules.set(line, current);
-      continue;
+  for (const rule of vercel.headers) {
+    const values = new Map<string, string>();
+    for (const header of rule.headers) {
+      const key = header.key.toLowerCase();
+      assert.equal(values.has(key), false, `Duplicate ${header.key} in ${rule.source}`);
+      values.set(key, header.value);
     }
-    const match = line.match(/^\s+([^:]+):\s*(.*)$/);
-    assert.ok(match && current, `Invalid _headers line: ${line}`);
-    assert.equal(current.has(match[1]), false, `Duplicate ${match[1]} header in one rule`);
-    current.set(match[1], match[2]);
+    assert.equal(rules.has(rule.source), false, `Duplicate Vercel header rule for ${rule.source}`);
+    rules.set(rule.source, values);
   }
   return rules;
 }
 
-function mergedHeaders(rules: Map<string, Map<string, string>>, route: string): Map<string, string> {
-  const baseline = rules.get("/*") ?? new Map<string, string>();
-  const specific = rules.get(route === "/" || route === "/p/index.html"
-    ? route
-    : `${route.slice(0, -1)}/*`);
-  assert.ok(specific, `Missing _headers rule for ${route}`);
-  for (const name of baseline.keys()) {
-    assert.equal(specific.has(name), false, `Duplicate ${name} rule for ${route}`);
-  }
-  return new Map([...baseline, ...specific]);
+function vercelPageSources(): Map<string, string> {
+  return new Map([
+    ["/", "/"],
+    ["/index.html", "/index.html"],
+    ...policyRoutes.slice(1, 6).map(({ route }) => [
+      route,
+      `${route.slice(0, -1)}/:path*`,
+    ] as const),
+    ["/checkout/", "/checkout/"],
+    ["/admin/", "/admin/:path*"],
+    ["/p/index.html", "/p/:path*"],
+  ]);
+}
+
+function vercelHeadersForRoute(
+  rules: Map<string, Map<string, string>>,
+  pageSources: Map<string, string>,
+  route: string,
+): Map<string, string> {
+  const source = pageSources.get(route);
+  assert.ok(source, `No Vercel source mapping for ${route}`);
+  const headers = rules.get(source);
+  assert.ok(headers, `Missing Vercel header rule for ${source}`);
+  return headers;
+}
+
+function expectedCacheControl(route: string): string {
+  return ["/checkout/", "/admin/", "/p/index.html"].includes(route)
+    ? "no-store"
+    : "public, max-age=0, must-revalidate";
 }
 
 function directive(policy: string, name: string): string[] {
@@ -58,27 +85,25 @@ function directive(policy: string, name: string): string[] {
 }
 
 describe("static security headers and CSP", () => {
-  it("defines one compatible header policy per customer-facing static page", async () => {
-    const headerText = await readFile(new URL("_headers", root), "utf8");
-    const rules = parseHeaderRules(headerText);
-    const baseline = rules.get("/*");
-    assert.ok(baseline, "Missing baseline static response security headers");
-    assert.deepEqual([...baseline.keys()], [
-      "X-Content-Type-Options",
-      "Referrer-Policy",
-      "X-Frame-Options",
-      "Permissions-Policy",
-    ]);
+  it("defines a compatible Vercel header policy per customer-facing static page", async () => {
+    const rules = await readVercelHeaderRules();
+    const pageSources = vercelPageSources();
+    const baseline = {
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+      "x-frame-options": "DENY",
+      "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    };
 
     for (const { route, file } of policyRoutes) {
-      const rule = mergedHeaders(rules, route);
-      const policy = rule.get("Content-Security-Policy");
+      const rule = vercelHeadersForRoute(rules, pageSources, route);
+      const policy = rule.get("content-security-policy");
       assert.ok(policy, `Missing CSP for ${route}`);
-      assert.equal(rule.get("X-Content-Type-Options"), "nosniff");
-      assert.equal(rule.get("Referrer-Policy"), "no-referrer");
-      assert.equal(rule.get("X-Frame-Options"), "DENY");
-      assert.equal(rule.get("Permissions-Policy"), "camera=(), microphone=(), geolocation=()");
-      assert.ok(rule.has("Cache-Control"));
+      for (const [name, value] of Object.entries(baseline)) {
+        assert.equal(rule.get(name), value, `Missing Vercel ${name} for ${route}`);
+      }
+      assert.equal(rule.get("cache-control"), expectedCacheControl(route),
+        `Unexpected Vercel cache policy for ${route}`);
 
       const html = await readFile(new URL(file, root), "utf8");
       const meta = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/i)?.[1];
@@ -109,12 +134,23 @@ describe("static security headers and CSP", () => {
         assert.ok(styleSources.includes(hash(match[1])), `Inline style hash missing in ${file}`);
       }
     }
+
+    for (const source of ["/checkout/", "/checkout/:path*"]) {
+      const headers = rules.get(source);
+      assert.ok(headers, `Missing Vercel header rule for ${source}`);
+      assert.equal(headers.get("content-security-policy"), rules.get("/checkout/")?.get("content-security-policy"));
+      assert.equal(headers.get("cache-control"), "no-store", `Checkout must not be cached for ${source}`);
+      for (const [name, value] of Object.entries(baseline)) {
+        assert.equal(headers.get(name), value, `Missing Vercel ${name} for ${source}`);
+      }
+    }
   });
 
   it("uses only the intended remote resources and trusted dynamic style values", async () => {
-    const headerText = await readFile(new URL("_headers", root), "utf8");
-    const rules = parseHeaderRules(headerText);
+    const rules = await readVercelHeaderRules();
+    const pageSources = vercelPageSources();
     const runtimeFiles = new Map([
+      ["checkout/index.html", ["checkout/checkout.js"]],
       ["templates/our-memories/index.html", ["templates/our-memories/our-memories.js"]],
       ["templates/say-yes/index.html", ["templates/say-yes/say-yes.js"]],
       ["templates/distance-means-nothing/index.html", [
@@ -132,8 +168,8 @@ describe("static security headers and CSP", () => {
     ]);
 
     for (const { route, file } of policyRoutes) {
-      const rule = mergedHeaders(rules, route);
-      const policy = rule.get("Content-Security-Policy");
+      const rule = vercelHeadersForRoute(rules, pageSources, route);
+      const policy = rule.get("content-security-policy");
       assert.ok(policy);
       const scriptSources = directive(policy, "script-src");
       const styleAttrSources = directive(policy, "style-src-attr");
@@ -151,6 +187,8 @@ describe("static security headers and CSP", () => {
             assert.ok(directive(policy, "font-src").includes("https://fonts.gstatic.com"), `${file} font denied`);
           } else if (resource.includes("cdnjs.cloudflare.com") || resource.includes("cdn.jsdelivr.net")) {
             assert.ok(scriptSources.some((source) => resource.startsWith(source)), `${file} script resource denied: ${resource}`);
+          } else if (resource.includes("vietqr.app")) {
+            assert.ok(directive(policy, "img-src").includes("https://vietqr.app"), `${file} QR image denied: ${resource}`);
           } else {
             assert.fail(`Unreviewed external resource in ${file}: ${resource}`);
           }
@@ -255,7 +293,6 @@ describe("static security headers and CSP", () => {
       }
       return [rule.source, values];
     }));
-    const cloudflareRules = parseHeaderRules(await readFile(new URL("../_headers", import.meta.url), "utf8"));
     const baseline = {
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
@@ -272,31 +309,14 @@ describe("static security headers and CSP", () => {
     ]);
     assert.deepEqual(vercel.functions, { "api/[...path].ts": { includeFiles: "migrations/**" } });
 
-    const pageSources = new Map([
-      ["/", "/"],
-      ["/index.html", "/index.html"],
-      ...policyRoutes.slice(1, 6).map(({ route }) => [
-        route,
-        `${route.slice(0, -1)}/:path*`,
-      ] as const),
-      ["/admin/", "/admin/:path*"],
-      ["/p/index.html", "/p/:path*"],
-    ]);
+    const pageSources = vercelPageSources();
     for (const { route, file } of policyRoutes) {
-      const source = pageSources.get(route);
-      assert.ok(source, `No Vercel source mapping for ${route}`);
-      const configured = headerRules.get(source);
-      assert.ok(configured, `Missing Vercel header rule for ${source}`);
-      const headerRule = mergedHeaders(cloudflareRules, route);
-      assert.equal(
-        configured.get("content-security-policy"),
-        headerRule.get("Content-Security-Policy"),
-        `Vercel and Cloudflare CSP differ for ${route}`,
-      );
+      const configured = vercelHeadersForRoute(headerRules, pageSources, route);
       for (const [name, value] of Object.entries(baseline)) {
         assert.equal(configured.get(name), value, `Missing Vercel ${name} for ${route}`);
       }
-      assert.equal(configured.get("cache-control"), headerRule.get("Cache-Control"));
+      assert.equal(configured.get("cache-control"), expectedCacheControl(route),
+        `Unexpected Vercel cache policy for ${route}`);
 
       const html = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
       const meta = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/i)?.[1];
@@ -322,6 +342,8 @@ describe("static security headers and CSP", () => {
       "/templates/our-memories/:path*",
       "/templates/say-yes/:path*",
       "/templates/distance-means-nothing/:path*",
+      "/checkout/",
+      "/checkout/:path*",
       "/admin/:path*",
       "/p/:path*",
       "/shared/:path*",

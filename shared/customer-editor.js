@@ -66,6 +66,21 @@
     throw new Error("Ảnh phải thuộc bản thiết kế này hoặc bản xem trước đang mở.");
   }
 
+  async function loadGuestAsset(reference, previewToken) {
+    if (typeof reference === "string" && reference.startsWith("data:")) {
+      if (typeof window.crushifyDataImageBlob !== "function") {
+        throw new Error("Không thể đọc ảnh của bản nháp tạm.");
+      }
+      const blob = window.crushifyDataImageBlob(reference);
+      if (!blob || !["image/jpeg", "image/png"].includes(blob.type) ||
+          blob.size < 1 || blob.size > 4 * 1024 * 1024) {
+        throw new Error("Ảnh của bản nháp phải là PNG hoặc JPEG hợp lệ và không vượt quá 4 MB.");
+      }
+      return reference;
+    }
+    return loadAsset(reference, previewToken);
+  }
+
   async function uploadAsset(designId, source, csrf) {
     if (typeof source !== "string" || !source.startsWith("data:") ||
         typeof window.crushifyDataImageBlob !== "function") {
@@ -134,6 +149,7 @@
 
     let csrf = "";
     let designId = new URLSearchParams(location.search).get("design") || "";
+    const guestDraftId = new URLSearchParams(location.search).get("guest_draft") || "";
     let revision = 0;
     let hydrating = false;
     let timer = 0;
@@ -146,6 +162,44 @@
     const previewToken = new URLSearchParams(location.hash.slice(1)).get("preview_token") ||
       (new URLSearchParams(location.search).has("preview") ? location.hash.slice(1) : "");
 
+    function replaceEditorUrl() {
+      const params = new URLSearchParams();
+      if (designId) params.set("design", designId);
+      if (guestDraftId) params.set("guest_draft", guestDraftId);
+      history.replaceState(null, "", `${location.pathname}${params.size ? `?${params}` : ""}`);
+    }
+
+    async function restoreGuestDraft() {
+      if (!guestDraftId) return;
+      const draftStore = window.CrushifyGuestDraft?.createStore();
+      if (!draftStore) throw new Error("Không thể mở kho bản nháp tạm trên thiết bị này.");
+      const draft = await draftStore.load(guestDraftId);
+      if (draft.templateId !== adapter.templateId ||
+          !(adapter.supportedSchemaVersions || [adapter.schemaVersion]).includes(draft.schemaVersion) ||
+          typeof adapter.hydrateGuest !== "function") {
+        throw new Error("Bản nháp tạm không khớp template hoặc phiên bản hiện tại.");
+      }
+      adapter.setSchemaVersion?.(draft.schemaVersion);
+      hydrating = true;
+      try {
+        await adapter.hydrateGuest(draft.data, (value) => loadGuestAsset(value, previewToken));
+      } finally {
+        hydrating = false;
+      }
+      if (!await save()) throw new Error("Bản thiết kế chưa lưu được. Bản nháp tạm vẫn được giữ trên thiết bị.");
+      try {
+        await draftStore.delete(guestDraftId);
+      } catch (error) {
+        setStatus(
+          `Đã lưu thiết kế, nhưng chưa xóa được bản nháp tạm khỏi thiết bị: ${error instanceof Error ? error.message : "Lỗi lưu trữ"}`,
+          "error",
+        );
+        return;
+      }
+      replaceEditorUrl();
+      location.assign(`/checkout/?design_id=${encodeURIComponent(designId)}`);
+    }
+
     async function signIn() {
       if (token) {
         await api("/customers/session/verify", {
@@ -154,7 +208,7 @@
           body: JSON.stringify({ token }),
         });
         token = "";
-        history.replaceState(null, "", location.pathname + (designId ? `?design=${encodeURIComponent(designId)}` : ""));
+        replaceEditorUrl();
       }
       const account = await api("/customers/me");
       csrf = account.csrf_token || "";
@@ -187,10 +241,13 @@
         }, csrf);
         designId = design.design_id;
         revision = design.revision;
-        history.replaceState(null, "", `${location.pathname}?design=${encodeURIComponent(designId)}`);
-        setStatus("Đã tạo bản nháp riêng. Đang lưu nội dung…");
-        await save();
+        replaceEditorUrl();
+        if (!guestDraftId) {
+          setStatus("Đã tạo bản nháp riêng. Đang lưu nội dung…");
+          await save();
+        }
       }
+      await restoreGuestDraft();
     }
 
     function save() {
@@ -282,8 +339,12 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             email: String(email || "").trim(),
-            return_to: `/templates/${adapter.templateId}/` +
-              (ID.test(designId) ? `?design=${encodeURIComponent(designId)}` : ""),
+            return_to: `/templates/${adapter.templateId}/` + (() => {
+              const params = new URLSearchParams();
+              if (ID.test(designId)) params.set("design", designId);
+              if (ID.test(guestDraftId)) params.set("guest_draft", guestDraftId);
+              return params.size ? `?${params}` : "";
+            })(),
           }),
         });
         setStatus("Nếu địa chỉ có thể dùng, sẽ được gửi liên kết đăng nhập.");
@@ -304,6 +365,9 @@
           location.href = await createPreviewLink();
         } else if (button.dataset.action === "checkout") {
           if (!await save()) return;
+          if (guestDraftId) {
+            await window.CrushifyGuestDraft.createStore().delete(guestDraftId);
+          }
           location.href = `/checkout/?design_id=${encodeURIComponent(designId)}`;
         } else if (button.dataset.action === "signout") {
           await api("/customers/session", { method: "DELETE" }, csrf);
@@ -320,7 +384,9 @@
     void signIn().catch((error) => {
       hydrating = false;
       if (error instanceof Error && error.message === "Sign-in required") {
-        setStatus("Đăng nhập để tạo và lưu thiết kế riêng.");
+        setStatus(guestDraftId
+          ? "Đăng nhập trên cùng thiết bị/trình duyệt để tiếp tục bản nháp tạm."
+          : "Đăng nhập để tạo và lưu thiết kế riêng.");
         form.hidden = false;
         actions.hidden = true;
       } else {
@@ -337,12 +403,21 @@
         (adapter.supportedSchemaVersions !== undefined &&
           (!Array.isArray(adapter.supportedSchemaVersions) ||
            !adapter.supportedSchemaVersions.every(Number.isSafeInteger))) ||
+        (adapter.serializeGuest !== undefined && typeof adapter.serializeGuest !== "function") ||
+        (adapter.hydrateGuest !== undefined && typeof adapter.hydrateGuest !== "function") ||
         typeof adapter.serialize !== "function" || typeof adapter.hydrate !== "function") {
       throw new TypeError("Invalid customer editor adapter");
     }
     if (showRecipientUnavailable()) return;
     if (window.CRUSHIFY_GUEST_PREVIEW === true ||
-        new URLSearchParams(location.search).get("guest") === "1") return;
+        new URLSearchParams(location.search).get("guest") === "1") {
+      if (typeof adapter.serializeGuest === "function" &&
+          typeof adapter.hydrateGuest === "function") {
+        window.CRUSHIFY_GUEST_EDITOR = adapter;
+        window.dispatchEvent(new Event("crushify:guest-editor-ready"));
+      }
+      return;
+    }
     createTools(adapter);
   };
 })();
