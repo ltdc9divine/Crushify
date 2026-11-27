@@ -16,6 +16,11 @@
   }
 
   async function loadPublication(templateId) {
+    if (window.CRUSHIFY_GUEST_PREVIEW === true ||
+        new URLSearchParams(location.search).get("guest") === "1") {
+      return null;
+    }
+
     const params = new URLSearchParams(location.search);
     if (params.has("preview") && templateId !== "our-universe") {
       const token = location.hash.slice(1);

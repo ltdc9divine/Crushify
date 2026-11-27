@@ -26,6 +26,23 @@
 - `PREVIEW_TEST_EMAIL_SINK` is an injected test callback, not a Vercel variable. It captures synthetic messages only in tests. Preview Resend credentials and actual delivery have not been remotely configured or verified.
 - No separate signup, password recovery, OAuth, session renewal, or admin-authentication implementation is present. Verify locally with `node --experimental-strip-types --test tests/auth-environment.test.ts`; this does not verify Resend delivery or deployed Preview behavior.
 
+### Public Guest Preview
+
+The five template editors support an explicit `?guest=1` mode for static
+sample-based exploration. It keeps edits in page memory, skips publication and
+customer-editor initialization APIs, disables server save/share/order actions,
+and does not create drafts, sessions, uploads, or database records. Local image
+previews use temporary browser object URLs that are revoked after decoding.
+Closing or resetting the page discards guest edits.
+
+Guest Preview does not repair or bypass the Preview runtime configuration
+guard. Authenticated customer flows still require the isolated Preview
+database, migrations, dedicated storage, email mode and allowlist, one chosen
+Preview payment mode, lifecycle secret, and matching deployment origin
+described above. Keep `PREVIEW_CUSTOMER_FLOW_ENABLED` disabled until those
+requirements are independently verified and configured; no Vercel settings or
+remote resources are changed by Guest Preview.
+
 ### Payment isolation
 
 - The payment policy uses trusted Vercel runtime classification. Preview defaults to disabled. It selects SePay Test mode only with `PREVIEW_PAYMENT_MODE=sepay-test` and the complete SePay configuration, or manual bank transfer only with `PREVIEW_PAYMENT_MODE=manual-bank-transfer` and a complete separate manual bank-details tuple. Both require the rest of the Preview customer-flow configuration. Otherwise checkout and fulfillment remain disabled. Production checkout and settlement remain disabled.
