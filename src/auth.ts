@@ -158,7 +158,11 @@ export function createEmailService(env: Env, _origin: string): EmailService | nu
         (env.PREVIEW_EMAIL_SINK === "discard" && hasPreviewMailConfiguration)) {
       return null;
     }
-    if (env.PREVIEW_EMAIL_SINK === "discard") return new PreviewDiscardEmailService();
+    if (env.PREVIEW_EMAIL_SINK === "discard") {
+      return env.PREVIEW_CUSTOMER_FLOW_ENABLED === "true"
+        ? null
+        : new PreviewDiscardEmailService();
+    }
     if (env.PREVIEW_CUSTOMER_FLOW_ENABLED !== "true") return null;
     if (env.PREVIEW_TEST_EMAIL_SINK) {
       return new LocalTestingEmailService(env.PREVIEW_TEST_EMAIL_SINK);

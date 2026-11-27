@@ -34,6 +34,7 @@ import {
   type StandardPriceSnapshot,
 } from "./product-catalog.ts";
 import { entitlementExpiry } from "./storage-plans.ts";
+import { previewAssetUploadsEnabled } from "./preview-assets.ts";
 import type { Env } from "./types.ts";
 
 const ORDER_LIFETIME_MINUTES = 15;
@@ -712,6 +713,10 @@ async function createOrder(
     return apiError(requestId, 422, "VALIDATION_ERROR", "Consent may only reference an image in this design");
   }
   const referencedAssetIds = [...availableAssetIds].sort();
+  if (referencedAssetIds.length > 0 &&
+      (!previewAssetUploadsEnabled(env) || !env.STORAGE)) {
+    return apiError(requestId, 503, "ASSET_UPLOADS_DISABLED", "Asset uploads are disabled for this Preview");
+  }
   const snapshotHash = await sha256(design.data_json);
 
   const orderId = createOrderId();
@@ -1145,6 +1150,22 @@ async function processWebhookEvent(
       actualAmountMinor: transaction.amountMinor,
     });
     return;
+  }
+  if (!previewAssetUploadsEnabled(env)) {
+    const mediaReference = await env.DB.prepare(
+      `SELECT 1 AS present FROM order_asset_refs
+       WHERE order_id = ? LIMIT 1`,
+    ).bind(payment.order_id).first<{ present: number }>();
+    if (mediaReference) {
+      await markWebhookReview(
+        env,
+        eventId,
+        "Order contains uploaded media while Preview asset uploads are disabled",
+        payment,
+        { actualAmountMinor: transaction.amountMinor },
+      );
+      return;
+    }
   }
 
   try {

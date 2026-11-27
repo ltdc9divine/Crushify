@@ -24,6 +24,7 @@ import {
   type TemplateId,
 } from "./template-registry.ts";
 import { entitlementExpiry } from "./storage-plans.ts";
+import { previewAssetUploadsEnabled } from "./preview-assets.ts";
 import type { Env } from "./types.ts";
 
 const CONSENT_VERSION = "public-image-v1";
@@ -138,9 +139,6 @@ function publicationMutationsEnabled(env: Env): boolean {
 async function requirePublicationMutations(requestId: string, env: Env): Promise<Response | null> {
   if (!publicationMutationsEnabled(env)) {
     return apiError(requestId, 503, "PUBLICATION_DISABLED", "Publication mutations are disabled for this runtime");
-  }
-  if (!env.STORAGE) {
-    return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Media storage is unavailable");
   }
   return null;
 }
@@ -294,6 +292,10 @@ async function insertPublication(
     return apiError(requestId, 422, "VALIDATION_ERROR", "Design data is invalid", validated.fields);
   }
   const references = assetReferences(order.template_id, validated.value);
+  if (references.length > 0 &&
+      (!previewAssetUploadsEnabled(env) || !env.STORAGE)) {
+    return apiError(requestId, 503, "ASSET_UPLOADS_DISABLED", "Photo publication is unavailable for this Preview");
+  }
   const consents = parseConsentList(body.asset_consents, references);
   if (!consents) {
     return apiError(requestId, 422, "ASSET_CONSENT_REQUIRED", "Every selected photo requires explicit publication consent");
@@ -432,6 +434,9 @@ export async function cleanupAssets(
   now?: Date,
 ): Promise<PublicationDerivativeCleanupResult> {
   if (!env.STORAGE) {
+    if (!previewAssetUploadsEnabled(env)) {
+      return reconcilePublicationDerivativeCleanup(env, { publicationId, now });
+    }
     return derivativeCleanupResult({
       processed: 0,
       cleaned: 0,
@@ -494,7 +499,6 @@ export async function reconcilePublicationDerivativeCleanup(
     timeBudgetMs?: number;
   } = {},
 ): Promise<PublicationDerivativeCleanupResult> {
-  if (!env.STORAGE) throw new Error("Publication derivative cleanup requires configured storage");
   const limit = options.limit ?? 25;
   const timeBudgetMs = options.timeBudgetMs ?? DERIVATIVE_CLEANUP_MAX_DURATION_MS;
   const now = options.now ?? new Date();
@@ -504,6 +508,42 @@ export async function reconcilePublicationDerivativeCleanup(
       !Number.isFinite(now.getTime())) {
     throw new RangeError("Invalid publication derivative cleanup configuration");
   }
+  if (!env.STORAGE && !previewAssetUploadsEnabled(env)) {
+    const publicationFilter = options.publicationId === undefined
+      ? ""
+      : "AND operation.publication_id = ?";
+    const publicationArgs = options.publicationId === undefined ? [] : [options.publicationId];
+    const timestamp = now.toISOString();
+    const pending = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM publication_derivative_operations operation
+       WHERE (
+         operation.status IN ('CREATING','CLEANUP_PENDING') OR
+         (operation.status = 'CLEANED' AND operation.provider_create_succeeded_at IS NULL
+           AND operation.next_cleanup_at <= ?) OR
+         (operation.status = 'READY' AND NOT EXISTS (
+           SELECT 1 FROM publication_assets pa
+           JOIN publications p ON p.id = pa.publication_id
+           WHERE p.id = operation.publication_id AND p.status = 'PUBLISHED'
+             AND pa.id = operation.publication_asset_id
+             AND pa.revoked_at IS NULL AND pa.derivative_key = operation.derivative_key
+             AND pa.derivative_status = 'READY'
+         ))
+       ) ${publicationFilter}`,
+    ).bind(timestamp, ...publicationArgs).first<{ count: number }>();
+    const manualReview = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM publication_derivative_operations operation
+       WHERE operation.status = 'MANUAL_REVIEW' ${publicationFilter}`,
+    ).bind(...publicationArgs).first<{ count: number }>();
+    return derivativeCleanupResult({
+      processed: 0,
+      cleaned: 0,
+      pending: 0,
+      deferred: Number(pending?.count ?? 0),
+      retryable: 0,
+      manualReview: Number(manualReview?.count ?? 0),
+    });
+  }
+  if (!env.STORAGE) throw new Error("Publication derivative cleanup requires configured storage");
   const timestamp = now.toISOString();
   const cleanupLeaseExpiresAt = new Date(now.getTime() + DERIVATIVE_CLEANUP_LEASE_MS).toISOString();
   const publicationFilter = options.publicationId === undefined
@@ -897,7 +937,9 @@ export async function runPublicationLifecycle(
       !Number.isFinite(nowDate.getTime())) {
     throw new RangeError("Invalid publication lifecycle batch configuration");
   }
-  if (!env.STORAGE) throw new Error("Publication lifecycle requires private media storage");
+  if (!env.STORAGE && previewAssetUploadsEnabled(env)) {
+    throw new Error("Publication lifecycle requires private media storage");
+  }
 
   const now = nowDate.toISOString();
   const retainUntil = new Date(nowDate.getTime() + retentionDays * 86400_000).toISOString();
@@ -1002,10 +1044,16 @@ export async function runPublicationLifecycle(
       `SELECT id, object_key FROM assets
        WHERE design_id = ? AND status NOT IN ('DELETED','REJECTED')`,
     ).bind(publication.design_id).all<{ id: string; object_key: string }>();
+    const storage = env.STORAGE;
+    if (assets.results.length > 0 && !storage) {
+      retryable++;
+      continue;
+    }
     let deleted = true;
     for (const asset of assets.results) {
       try {
-        await env.STORAGE.delete(asset.object_key);
+        if (!storage) throw new Error("Private media storage is unavailable");
+        await storage.delete(asset.object_key);
       } catch (error) {
         deleted = false;
         logSafeError("publication.expired_media_cleanup_failed", "storage", error);
@@ -1059,7 +1107,6 @@ async function publish(
   publicationId: string,
   expectedLifecycle: number,
 ): Promise<Response> {
-  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Media storage is unavailable");
   const row = await loadOwnedPublication(env, customerId, publicationId);
   if (!row) return apiError(requestId, 404, "NOT_FOUND", "Publication not found");
   if (row.status === "REVOKED" || row.status === "EXPIRED" ||
@@ -1078,6 +1125,11 @@ async function publish(
   const validated = validateTemplateData(row.template_id, row.schema_version, snapshot.data);
   if (!validated.value) return apiError(requestId, 422, "VALIDATION_ERROR", "Publication snapshot is invalid");
   const references = assetReferences(row.template_id, validated.value);
+  if (references.length > 0 &&
+      (!previewAssetUploadsEnabled(env) || !env.STORAGE)) {
+    return apiError(requestId, 503, "ASSET_UPLOADS_DISABLED", "Photo publication is unavailable for this Preview");
+  }
+  const storage = env.STORAGE;
   const assets = await env.DB.prepare(
     `SELECT pa.id, pa.asset_id, pa.customer_id, pa.consent_version, pa.revoked_at,
             pa.derivative_key, pa.derivative_status, a.object_key, a.media_type, a.byte_size
@@ -1173,7 +1225,10 @@ async function publish(
       return apiError(requestId, 409, "CONFLICT", "Photo consent changed during publish");
     }
     try {
-      await env.STORAGE.createPublishedDerivative(item.object_key, derivativeKey, normalizeImage);
+      if (!storage) {
+        return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Media storage is unavailable");
+      }
+      await storage.createPublishedDerivative(item.object_key, derivativeKey, normalizeImage);
     } catch (error) {
       logSafeError("publication.media_creation_failed", "storage", error, { request_id: requestId });
       const failedAt = nowIso();
@@ -1482,6 +1537,10 @@ async function updateSnapshot(
   const validated = validateTemplateData(row.template_id, row.schema_version, JSON.parse(rawData));
   if (!validated.value) return apiError(requestId, 422, "VALIDATION_ERROR", "Design data is invalid", validated.fields);
   const references = assetReferences(row.template_id, validated.value);
+  if (references.length > 0 &&
+      (!previewAssetUploadsEnabled(env) || !env.STORAGE)) {
+    return apiError(requestId, 503, "ASSET_UPLOADS_DISABLED", "Photo publication is unavailable for this Preview");
+  }
   const consents = parseConsentList(body.asset_consents, references);
   if (!consents) return apiError(requestId, 422, "ASSET_CONSENT_REQUIRED", "Every selected photo requires explicit publication consent");
   if (!await validateOwnedAssets(env, order, references)) {
@@ -1499,6 +1558,10 @@ async function updateSnapshot(
     derivative_key: string | null;
     revoked_at: string | null;
   }>();
+  if (priorAssets.results.length > 0 &&
+      (!previewAssetUploadsEnabled(env) || !env.STORAGE)) {
+    return apiError(requestId, 503, "ASSET_UPLOADS_DISABLED", "Photo updates are unavailable for this Preview");
+  }
   const now = nowIso();
   const statements = [
     env.DB.prepare(
@@ -2276,9 +2339,11 @@ async function publicAsset(
   slug: string,
   assetId: string,
 ): Promise<Response> {
-  if (!env.STORAGE || !SLUG_PATTERN.test(slug) || !ID_PATTERN.test(assetId)) {
+  if (!previewAssetUploadsEnabled(env) || !SLUG_PATTERN.test(slug) || !ID_PATTERN.test(assetId)) {
     return apiError(requestId, 404, "NOT_FOUND", "Image not found");
   }
+  const storage = env.STORAGE;
+  if (!storage) return apiError(requestId, 404, "NOT_FOUND", "Image not found");
   const row = await env.DB.prepare(
     `SELECT pa.derivative_key, a.media_type, a.byte_size
      FROM publications p
@@ -2319,7 +2384,7 @@ async function publicAsset(
     byte_size: number;
   }>();
   if (!row?.derivative_key) return apiError(requestId, 404, "NOT_FOUND", "Image not found");
-  const object = await env.STORAGE.getPublishedDerivative(row.derivative_key);
+  const object = await storage.getPublishedDerivative(row.derivative_key);
   if (!object || object.size !== row.byte_size || object.contentType !== row.media_type) {
     await object?.body?.cancel();
     return apiError(requestId, 404, "NOT_FOUND", "Image not found");
@@ -2425,6 +2490,9 @@ export async function handlePublicationRoutes(
   }
   const csrf = await requireCsrf(request, env, required.session!, requestId);
   if (csrf) return csrf;
+  if (action?.startsWith("assets/") && !previewAssetUploadsEnabled(env)) {
+    return apiError(requestId, 503, "ASSET_UPLOADS_DISABLED", "Asset management is disabled for this Preview");
+  }
   const parsed = await readJson(request, requestId);
   if (parsed.response) return parsed.response;
   if (action?.startsWith("assets/")) {

@@ -6,6 +6,7 @@ import {
 } from "./publications.ts";
 import { apiError, jsonResponse, nowIso, randomToken, readJson, safeId, sha256 } from "./http.ts";
 import { isJsonWithinLimit } from "./universe.ts";
+import { previewAssetUploadsEnabled } from "./preview-assets.ts";
 import {
   assetReferences,
   publicTemplateData,
@@ -169,6 +170,9 @@ async function updateDesign(
     return apiError(requestId, 422, "VALIDATION_ERROR", "Design data is invalid", validated.fields);
   }
   const references = assetReferences(design.template_id, validated.value);
+  if (references.length > 0 && !previewAssetUploadsEnabled(env)) {
+    return apiError(requestId, 503, "ASSET_UPLOADS_DISABLED", "Asset uploads are disabled for this Preview");
+  }
   if (!await validateAssetReferences(env, required.session!.customerId, designId, design.template_id, validated.value)) {
     return apiError(requestId, 422, "VALIDATION_ERROR", "One or more photo references are not available");
   }
@@ -278,7 +282,17 @@ async function deleteDesign(
     "SELECT status FROM designs WHERE id = ? AND customer_id = ?",
   ).bind(designId, ownerId).first<{ status: string }>();
   if (!owned) return apiError(requestId, 404, "NOT_FOUND", "Design not found");
-  if (!env.STORAGE) {
+  const existingAssets = await env.DB.prepare(
+    `SELECT id FROM assets
+     WHERE design_id = ? AND customer_id = ?
+       AND status NOT IN ('DELETED','REJECTED')
+     LIMIT 1`,
+  ).bind(designId, ownerId).first<{ id: string }>();
+  const storage = env.STORAGE;
+  if (existingAssets && !previewAssetUploadsEnabled(env)) {
+    return apiError(requestId, 503, "ASSET_UPLOADS_DISABLED", "Asset deletion is disabled for this Preview");
+  }
+  if (existingAssets && !storage) {
     return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
   }
   if (owned.status === "ARCHIVED") {
@@ -366,8 +380,11 @@ async function deleteDesign(
        WHERE design_id = ? AND customer_id = ? AND status = 'DELETION_PENDING'`,
     ).bind(designId, ownerId).all<{ id: string; object_key: string }>();
     for (const asset of archivedAssets.results) {
+      if (!storage) {
+        return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
+      }
       try {
-        await env.STORAGE.delete(asset.object_key);
+        await storage.delete(asset.object_key);
         const deletedAt = nowIso();
         const finalized = await env.DB.prepare(
           `UPDATE assets SET status = 'DELETED', deleted_at = COALESCE(deleted_at, ?), updated_at = ?
@@ -525,8 +542,11 @@ async function deleteDesign(
      WHERE design_id = ? AND customer_id = ? AND status != 'DELETED'`,
   ).bind(designId, ownerId).all<{ id: string; object_key: string }>();
   for (const asset of assets.results) {
+    if (!storage) {
+      return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
+    }
     try {
-      await env.STORAGE.delete(asset.object_key);
+      await storage.delete(asset.object_key);
       const deletedAt = nowIso();
       const deleted = await env.DB.prepare(
         `UPDATE assets SET status = 'DELETED', deleted_at = ?, updated_at = ?
@@ -787,13 +807,18 @@ export async function handlePreviewRoutes(
   if (!preview) return apiError(requestId, 404, "NOT_FOUND", "Preview is unavailable");
   if (assetId) {
     const data = JSON.parse(preview.data_json) as TemplateData;
-    if (!assetReferences(preview.template_id, data).includes(assetId)) {
+    if (!previewAssetUploadsEnabled(env) ||
+        !assetReferences(preview.template_id, data).includes(assetId)) {
       return apiError(requestId, 404, "NOT_FOUND", "Preview asset not found");
     }
     return serveAsset(request, env, requestId, assetId, preview.customer_id, preview.design_id);
   }
 
   const data = JSON.parse(preview.data_json) as TemplateData;
+  if (!previewAssetUploadsEnabled(env) &&
+      assetReferences(preview.template_id, data).length > 0) {
+    return apiError(requestId, 404, "NOT_FOUND", "Preview is unavailable");
+  }
   const validated = validateTemplateData(preview.template_id, preview.schema_version, data);
   if (!validated.value) return apiError(requestId, 404, "NOT_FOUND", "Preview is unavailable");
   return jsonResponse({
@@ -813,7 +838,11 @@ export async function serveAsset(
   customerId: string,
   designId: string,
 ): Promise<Response> {
-  if (!env.STORAGE) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
+  if (!previewAssetUploadsEnabled(env)) {
+    return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
+  }
+  const storage = env.STORAGE;
+  if (!storage) return apiError(requestId, 503, "STORAGE_UNAVAILABLE", "Private media storage is unavailable");
   const asset = await env.DB.prepare(
     `SELECT object_key, media_type, byte_size FROM assets
      WHERE id = ? AND customer_id = ? AND design_id = ? AND status = 'READY'`,
@@ -823,7 +852,7 @@ export async function serveAsset(
     byte_size: number;
   }>();
   if (!asset) return apiError(requestId, 404, "NOT_FOUND", "Asset not found");
-  const object = await env.STORAGE.get(asset.object_key);
+  const object = await storage.get(asset.object_key);
   if (!object || object.size !== asset.byte_size || object.contentType !== asset.media_type) {
     await object?.body?.cancel();
     return apiError(requestId, 404, "NOT_FOUND", "Asset not found");

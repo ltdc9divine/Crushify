@@ -6,7 +6,7 @@ import type {
   DatabaseResult,
   DatabaseStatement,
 } from "../src/database.ts";
-import { getSession, requireSession, type EmailMessage } from "../src/auth.ts";
+import { createEmailService, getSession, requireSession, type EmailMessage } from "../src/auth.ts";
 import type { Env } from "../src/types.ts";
 
 const requestId = "00000000-0000-4000-8000-000000000001";
@@ -137,6 +137,17 @@ function spyOnConsoleInfo(): { events: string[]; restore(): void } {
 }
 
 describe("environment-scoped authentication", () => {
+  it("does not allow discarded Preview email to enable customer authentication", () => {
+    const service = createEmailService({
+      DB: new SyntheticAuthDatabase(),
+      ENVIRONMENT: "staging",
+      PREVIEW_CUSTOMER_FLOW_ENABLED: "true",
+      PREVIEW_EMAIL_SINK: "discard",
+    }, "https://preview.crushify.test");
+
+    assert.equal(service, null);
+  });
+
   it("rejects Preview authentication before database, token, or email side effects", async () => {
     const db = new SyntheticAuthDatabase();
     const emailMessages: EmailMessage[] = [];
