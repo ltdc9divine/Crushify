@@ -15,6 +15,7 @@ const demoData=()=>Object.assign(blank(),{
  memories:[{title:'Ngày mình gặp nhau',body:'Một khoảnh khắc nhỏ mở đầu cho hành trình của đôi mình.'}],
 });
 let S=blank(),scene=null,glOK=false;
+let rebuildFallbackMessages=()=>{};
 const get=(o,p)=>p.split('.').reduce((a,k)=>a?.[k],o),set=(o,p,v)=>{const k=p.split('.'),l=k.pop();k.reduce((a,x)=>a[x],o)[l]=v};
 const merge=d=>{const b=blank();for(const k in b){if(d?.[k]===undefined)continue;b[k]=b[k]&&typeof b[k]==='object'&&!Array.isArray(b[k])?{...b[k],...d[k]}:d[k]}return b};
 const publicationData=window.CRUSHIFY_PUBLICATION_DATA;
@@ -95,4 +96,11 @@ bind();render();
 (async()=>{try{const {DistanceScene}=await import('./DistanceScene.js');scene=new DistanceScene($('#gl'),{onPick,onPhase});glOK=true;scene.apply(S,th());scene.start()}
  catch(err){console.warn('WebGL unavailable, using fallback:',err);document.body.classList.add('nogl');$('#gl').hidden=true;$('#fallback').hidden=false;$('[data-a=skip]').hidden=true;
   const tb=$('#tools');$$('button',tb).forEach(b=>{if(!['end','full'].includes(b.dataset.a))b.hidden=true});
-  const mk=()=>{$$('.fbm').forEach(x=>x.remove());S.messages.forEach((m,i)=>{const b=document.createElement('button');b.className='fbm';b.textContent=`${m.emoji||'💌'} ${m.title||'Lời nhắn'}`;b.onclick=()=>open(m.emoji,m.title,m.body);tb.prepend(b)})};mk()}})();
+  rebuildFallbackMessages=()=>{$$('.fbm').forEach(x=>x.remove());S.messages.forEach((m,i)=>{const b=document.createElement('button');b.className='fbm';b.textContent=`${m.emoji||'💌'} ${m.title||'Lời nhắn'}`;b.onclick=()=>open(m.emoji,m.title,m.body);tb.prepend(b)})};rebuildFallbackMessages()}})();
+window.addEventListener('crushify:guest-reset',event=>{
+ if(!guestPreview)return;
+ event.preventDefault();S=demoData();bind();render();panel.hidden=true;$('#final').hidden=true;phase.textContent='';
+ document.body.classList.remove('view','view-preview','tab-stage');mobileTabChosen=false;selectMobileTab(mobileTabs.matches);
+ $('[data-a="rotate"]').setAttribute('aria-pressed','false');$('[data-a="parts"]').setAttribute('aria-pressed','true');
+ scene?.setAuto(false);scene?.setParticles(true);scene?.apply(S,th());scene?.start();rebuildFallbackMessages()
+});
